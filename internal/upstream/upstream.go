@@ -26,6 +26,12 @@ type Upstream struct {
 	Config *rest.Config
 }
 
+// scoringQPS and scoringBurst bound one scoring's reads. See FromConfig.
+const (
+	scoringQPS   = 100
+	scoringBurst = 200
+)
+
 func Load(c config.Config) (*Upstream, error) {
 	var cfg *rest.Config
 	var err error
@@ -73,5 +79,14 @@ func FromConfig(cfg *rest.Config) (*Upstream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Upstream{URL: u, Normal: normal, Upgrade: upgrade, Config: cfg}, nil
+	// Scoring one delete makes a few dozen reads through sounding, each
+	// scoring with its own clients and so its own limiter. client-go's
+	// default (5 per second after a burst of 10) turned those into 4.4s of
+	// waiting on an idle cluster -- most of the score budget, and past it
+	// on a larger one, which holds every delete as unmeasured. The budget
+	// already bounds how long one scoring reads for; the API server's own
+	// priority and fairness protects it from many at once.
+	sc := rest.CopyConfig(cfg)
+	sc.QPS, sc.Burst = scoringQPS, scoringBurst
+	return &Upstream{URL: u, Normal: normal, Upgrade: upgrade, Config: sc}, nil
 }

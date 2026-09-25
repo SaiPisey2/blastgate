@@ -78,3 +78,22 @@ func TestLoadRequiresAnExplicitPath(t *testing.T) {
 }
 
 func configWithPath(p string) config.Config { return config.Config{UpstreamKubeconfig: p} }
+
+// Scoring one delete makes a few dozen reads through sounding. Under
+// client-go's default limiter (5 per second after a burst of 10) that
+// took 4.4s on an idle kind cluster -- most of the 5s score budget -- and
+// on a larger cluster would run past it, holding every delete as
+// unmeasured. Found live.
+func TestScoringConfigIsNotThrottledLikeADefaultClient(t *testing.T) {
+	_, cfg := tlsServer(t, func(http.ResponseWriter, *http.Request) {})
+	up, err := FromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Config.QPS < 100 || up.Config.Burst < 200 {
+		t.Errorf("scoring config QPS %v burst %d", up.Config.QPS, up.Config.Burst)
+	}
+	if cfg.QPS != 0 || cfg.Burst != 0 {
+		t.Errorf("the caller's config was changed: QPS %v burst %d", cfg.QPS, cfg.Burst)
+	}
+}
