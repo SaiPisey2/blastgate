@@ -2,6 +2,7 @@ package normalize
 
 import (
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -206,4 +207,73 @@ func TestPatchTypeKeptVerbatimOnParseError(t *testing.T) {
 	if a.PatchType != "not a media type;;;" {
 		t.Errorf("patch type %q; unparseable content-type should be kept as-is", a.PatchType)
 	}
+}
+
+// Final review I1: kubectl opens exec, attach and port-forward over
+// WebSocket (GET) and falls back to SPDY (POST) when that fails. The API
+// server authorises both as "create"; if the digests differed, one
+// command would leave two pending approvals, and denying the one it
+// reported would leave its twin approvable.
+func TestInteractiveVerbIsCreateOverEitherTransport(t *testing.T) {
+	up := map[string]string{"Connection": "Upgrade", "Upgrade": "websocket"}
+	spdy := map[string]string{"Connection": "Upgrade", "Upgrade": "SPDY/3.1"}
+	for _, target := range []string{
+		"/api/v1/namespaces/demo/pods/web-1/exec?command=psql&command=-c&command=drop+table+x&stdout=true&stderr=true",
+		"/api/v1/namespaces/demo/pods/web-1/attach?stdin=true&stdout=true",
+		"/api/v1/namespaces/demo/pods/web-1/portforward?ports=8080",
+	} {
+		ws, sp := act(t, "GET", target, up), act(t, "POST", target, spdy)
+		if ws.Verb != "create" || sp.Verb != "create" {
+			t.Errorf("%s: verbs %q (GET) and %q (POST), want create", target, ws.Verb, sp.Verb)
+		}
+		if RequestDigest(ws, nil) != RequestDigest(sp, nil) {
+			t.Errorf("%s: WebSocket and SPDY digests differ", target)
+		}
+	}
+}
+
+// Final review I5: an upgraded connection is a bidirectional stream, not a
+// read, whatever the subresource -- a KubeVirt VNC or serial console is a
+// GET upgrade on a subresource blastgate has no special case for.
+func TestUpgradeIsNeverARead(t *testing.T) {
+	target := "/apis/subresources.kubevirt.io/v1/namespaces/demo/virtualmachineinstances/vm/vnc"
+	plain := act(t, "GET", target, nil)
+	up := act(t, "GET", target, map[string]string{"Connection": "keep-alive, Upgrade", "Upgrade": "websocket"})
+	if !up.Upgrade || up.IsRead() {
+		t.Errorf("upgrade GET %+v treated as a read", up)
+	}
+	if plain.Upgrade || !plain.IsRead() {
+		t.Errorf("plain GET %+v not a read", plain)
+	}
+	if RequestDigest(plain, nil) == RequestDigest(up, nil) {
+		t.Error("an upgrade and a plain GET of the same path digest the same")
+	}
+}
+
+// Final review minor 1: a "." or ".." segment, or an empty one, is a path
+// a cleaning server or proxy may resolve to a different object than the
+// one parsed -- for a read too, which is never scored.
+func TestDotAndEmptySegmentsAreRefused(t *testing.T) {
+	for _, target := range []string{
+		"/api/v1/namespaces/demo/pods/../secrets",
+		"/api/v1/namespaces/demo/pods/%2e%2e/secrets",
+		"/api/v1/namespaces/demo/./pods",
+		"/api/v1/namespaces//pods",
+		"/api/v1/namespaces/demo/pods//",
+		"//api/v1/namespaces",
+	} {
+		// ParseRequestURI, as net/http's server does: URL.Parse would
+		// clean the dots away and url.Parse would read "//api" as a host.
+		r := httptest.NewRequest("GET", "/", nil)
+		u, err := url.ParseRequestURI(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.URL = u
+		if a, err := FromRequest(r, p); err == nil {
+			t.Errorf("%s normalised to %+v", target, a)
+		}
+	}
+	act(t, "GET", "/", nil)                             // the root is not an empty segment
+	act(t, "GET", "/api/v1/namespaces/demo/pods/", nil) // a cleaner resolves this to the same object
 }

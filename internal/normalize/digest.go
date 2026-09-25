@@ -24,7 +24,10 @@ func RequestDigest(a Action, body []byte) string {
 		Query                                                                                   map[string][]string
 		Body                                                                                    json.RawMessage
 		RawBody                                                                                 string `json:",omitempty"`
-	}{a.Verb, a.Group, a.Version, a.Resource, a.Subresource, a.Namespace, a.Name, a.Path, a.RawQuery, a.PatchType, a.Query, nil, ""}
+		// omitempty keeps every non-upgrade digest what it was before
+		// this field existed.
+		Upgrade bool `json:",omitempty"`
+	}{a.Verb, a.Group, a.Version, a.Resource, a.Subresource, a.Namespace, a.Name, a.Path, a.RawQuery, a.PatchType, a.Query, nil, "", a.Upgrade}
 	if canon, ok := canonicalBody(a.PatchType, body); ok {
 		id.Body = canon
 	} else if len(body) > 0 {

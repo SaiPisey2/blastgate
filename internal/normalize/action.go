@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 
+	"golang.org/x/net/http/httpguts"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/endpoints/request"
 )
@@ -38,7 +41,12 @@ type Action struct {
 	// whatever it finds in the query, not only from the semantic
 	// parameters blastgate otherwise recognises -- the same sub-path with
 	// a different query can be a different backend endpoint.
-	RawQuery  string              `json:"rawQuery,omitempty"`
+	RawQuery string `json:"rawQuery,omitempty"`
+	// Upgrade is set when the request asks to switch protocols
+	// (Connection: Upgrade). An upgraded connection is a bidirectional
+	// stream whatever its verb, so it is never a read, and it is part of
+	// the digest: approving a plain GET must not also approve the stream.
+	Upgrade   bool                `json:"upgrade,omitempty"`
 	PatchType string              `json:"patchType,omitempty"`
 	Query     map[string][]string `json:"query,omitempty"`
 	Principal Principal           `json:"principal"`
@@ -64,11 +72,17 @@ var semanticQuery = []string{
 }
 
 func FromRequest(r *http.Request, p Principal) (Action, error) {
+	if err := checkSegments(r.URL.EscapedPath()); err != nil {
+		return Action{}, err
+	}
 	info, err := infoFactory.NewRequestInfo(r)
 	if err != nil {
 		return Action{}, fmt.Errorf("parsing request: %w", err)
 	}
 	a := Action{Principal: p, Source: "proxy", Path: r.URL.EscapedPath()}
+	// The same test the proxy's transport switch uses: whatever it would
+	// forward as an upgrade, the gate must treat as one.
+	a.Upgrade = httpguts.HeaderValuesContainsToken(r.Header["Connection"], "Upgrade")
 	if !info.IsResourceRequest {
 		// Discovery, /version, /openapi: harmless to read, meaningless to
 		// write. A write here is nothing this build can score.
@@ -81,6 +95,14 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	a.Verb, a.Group, a.Version = info.Verb, info.APIGroup, info.APIVersion
 	a.Resource, a.Subresource = info.Resource, info.Subresource
 	a.Namespace, a.Name = info.Namespace, info.Name
+	if a.Resource == "pods" && streamSubresources[a.Subresource] {
+		// kubectl tries WebSocket (GET, parsed as "get") and falls back to
+		// SPDY (POST, "create") for one command. The API server authorises
+		// both as create; so does blastgate, or the two attempts digest
+		// differently and one command leaves two pending approvals --
+		// denying the one the agent reported would leave its twin live.
+		a.Verb = "create"
+	}
 	// RequestInfoFactory reports "delete namespace demo" with the name in
 	// Name and the namespace in Namespace as well; the target is the
 	// cluster-scoped Namespace object.
@@ -114,6 +136,36 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	return a, nil
 }
 
+// streamSubresources are the pod subresources opened as a stream over
+// either transport.
+var streamSubresources = map[string]bool{"exec": true, "attach": true, "portforward": true}
+
+// checkSegments refuses a path with a ".", ".." or empty segment, escaped
+// or not. The parser takes the path as it is, but a server or proxy that
+// cleans paths would resolve pods/../secrets (or collapse a//b) to a
+// different object than the one parsed -- and a read is forwarded
+// unscored, so the parse is all that stands between it and the wrong
+// object.
+func checkSegments(escaped string) error {
+	// One trailing slash is not refused: a cleaner resolves .../web/ to
+	// .../web, the same object the parser reads, and apiPath already
+	// accepts it (TestAPIPathAgreesWithNormalize). "/" alone is the root.
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(escaped, "/"), "/")
+	if trimmed == "" && (escaped == "/" || escaped == "") {
+		return nil
+	}
+	for _, seg := range strings.Split(trimmed, "/") {
+		u, err := url.PathUnescape(seg)
+		if err != nil {
+			return fmt.Errorf("path segment not decodable: %w", err)
+		}
+		if u == "" || u == "." || u == ".." {
+			return fmt.Errorf("path has an empty, \".\" or \"..\" segment")
+		}
+	}
+	return nil
+}
+
 // normalizePatchType strips parameters (e.g. "; charset=utf-8") from a
 // Content-Type so the same patch type sent with different parameters still
 // binds to the same digest. A header mime can't parse is kept verbatim --
@@ -139,7 +191,7 @@ var interactiveSubresources = map[string]bool{
 }
 
 func (a Action) IsRead() bool {
-	if interactiveSubresources[a.Subresource] {
+	if a.Upgrade || interactiveSubresources[a.Subresource] {
 		return false
 	}
 	switch a.Verb {
