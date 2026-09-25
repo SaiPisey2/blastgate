@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 var ErrInsecure = errors.New("insecure configuration")
@@ -20,28 +21,51 @@ type Config struct {
 	UpstreamInCluster  bool
 	SigningKey         []byte
 	TLSHosts           []string
+
+	// Hold is how long a held request waits for a human before its ticket
+	// is returned; ScoreBudget is how long scoring one write may take.
+	Hold, ScoreBudget time.Duration
+	// ApprovalTTL is how long an approval's token stays spendable.
+	ApprovalTTL time.Duration
+	// PolicyPath is the operator's policy file; "" means the built-in
+	// default policy.
+	PolicyPath string
 }
 
 const (
 	minKeyLen      = 32
 	minKeyDistinct = 10
+
+	// kubectl's and the MCP SDK's own request timeouts are 60s. A hold
+	// that outlasts them answers a client that has already gone, so its
+	// ticket -- the approval ID the agent needs to ask for a decision --
+	// is never seen.
+	maxHold = 50 * time.Second
+	// Scoring runs before the hold and again before an inline release, so
+	// the two together must still end inside the client's 60s with a
+	// margin for forwarding (ruling P1-R16).
+	maxHoldPlusBudget = 55 * time.Second
+	maxBudget         = 30 * time.Second
+	maxApprovalTTL    = 24 * time.Hour
 )
 
-// Load is the configuration serve needs: everything LoadLocal reads, plus
-// the signing key and the upstream cluster.
+// Load is the configuration serve needs: everything LoadSigning reads,
+// plus the hold window, score budget, policy file and upstream cluster.
 func Load(getenv func(string) string) (Config, error) {
-	c, err := LoadLocal(getenv)
+	c, err := LoadSigning(getenv)
 	if err != nil {
 		return Config{}, err
 	}
-	key := getenv("BLASTGATE_SIGNING_KEY")
-	if err := checkKey(key); err != nil {
+	if c.Hold, err = duration(getenv, "BLASTGATE_HOLD", 45*time.Second, maxHold); err != nil {
 		return Config{}, err
 	}
-	// Nothing signs with the key yet: it is reserved for the approval
-	// tokens of the next phase, and required now so a deployment made
-	// today does not start failing when that lands.
-	c.SigningKey = []byte(key)
+	if c.ScoreBudget, err = duration(getenv, "BLASTGATE_SCORE_BUDGET", 5*time.Second, maxBudget); err != nil {
+		return Config{}, err
+	}
+	if c.Hold+c.ScoreBudget > maxHoldPlusBudget {
+		return Config{}, fmt.Errorf("BLASTGATE_HOLD (%s) plus BLASTGATE_SCORE_BUDGET (%s) must be at most %s: clients give up after 60s, and a held request's ticket must reach them first", c.Hold, c.ScoreBudget, maxHoldPlusBudget)
+	}
+	c.PolicyPath = getenv("BLASTGATE_POLICY")
 
 	path := getenv("BLASTGATE_UPSTREAM_KUBECONFIG")
 	inCluster := getenv("BLASTGATE_UPSTREAM_IN_CLUSTER") == "1"
@@ -58,6 +82,45 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	c.UpstreamKubeconfig, c.UpstreamInCluster = path, inCluster
 	return c, nil
+}
+
+// LoadSigning is the configuration a command that signs approvals needs
+// (approve, deny): everything LoadLocal reads, plus a checked signing key
+// and the approval token lifetime -- but not the upstream, which an
+// approver's workstation has no reason to hold.
+func LoadSigning(getenv func(string) string) (Config, error) {
+	c, err := LoadLocal(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	key := getenv("BLASTGATE_SIGNING_KEY")
+	if err := checkKey(key); err != nil {
+		return Config{}, err
+	}
+	c.SigningKey = []byte(key)
+	if c.ApprovalTTL, err = duration(getenv, "BLASTGATE_APPROVAL_TTL", 15*time.Minute, maxApprovalTTL); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+// duration reads a positive duration no longer than max. Zero is refused
+// rather than read as "off": a zero hold would ticket every held write
+// without waiting, and a zero budget would score nothing, so every write
+// would hold -- neither is a setting anyone means.
+func duration(getenv func(string) string, name string, def, max time.Duration) (time.Duration, error) {
+	v := getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a duration (for example %s)", name, v, def)
+	}
+	if d <= 0 || d > max {
+		return 0, fmt.Errorf("%s %s must be more than 0 and at most %s", name, d, max)
+	}
+	return d, nil
 }
 
 // LoadLocal is the configuration a local command such as `session new`
