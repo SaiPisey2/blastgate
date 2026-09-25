@@ -37,6 +37,65 @@ var migrations = []string{
 		expires_at INTEGER NOT NULL,
 		revoked_at INTEGER
 	)`,
+	`CREATE TABLE audit (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		at             INTEGER NOT NULL,
+		kind           TEXT NOT NULL CHECK (kind IN ('decision','result')),
+		request_id     TEXT NOT NULL,
+		session_id     TEXT NOT NULL,
+		human          TEXT NOT NULL,
+		agent          TEXT NOT NULL,
+		source         TEXT NOT NULL,
+		verb           TEXT NOT NULL,
+		grp            TEXT NOT NULL,
+		resource       TEXT NOT NULL,
+		subresource    TEXT NOT NULL,
+		namespace      TEXT NOT NULL,
+		name           TEXT NOT NULL,
+		request_digest TEXT NOT NULL,
+		action_json    BLOB,
+		impact_json    BLOB,
+		labels_json    BLOB,
+		class          TEXT NOT NULL,
+		measured       INTEGER NOT NULL,
+		rule           TEXT NOT NULL,
+		decision       TEXT NOT NULL,
+		approval_id    TEXT NOT NULL,
+		status         INTEGER NOT NULL,
+		outcome        TEXT NOT NULL,
+		latency_ms     INTEGER NOT NULL,
+		snapshot       TEXT NOT NULL
+	);
+	CREATE INDEX audit_at ON audit(at);
+	CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;
+	CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT, 'audit is append-only'); END;`,
+	`CREATE TABLE approvals (
+		id             TEXT PRIMARY KEY,
+		session_id     TEXT NOT NULL,
+		human          TEXT NOT NULL,
+		agent          TEXT NOT NULL,
+		request_digest TEXT NOT NULL,
+		impact_digest  TEXT NOT NULL,
+		action_json    BLOB NOT NULL,
+		impact_json    BLOB NOT NULL,
+		rule           TEXT NOT NULL,
+		status         TEXT NOT NULL,
+		created_at     INTEGER NOT NULL,
+		decided_at     INTEGER,
+		decided_by     TEXT NOT NULL DEFAULT '',
+		nonce          TEXT NOT NULL DEFAULT '',
+		token          TEXT NOT NULL DEFAULT '',
+		expires_at     INTEGER NOT NULL
+	);
+	CREATE INDEX approvals_lookup ON approvals(session_id, request_digest, created_at);
+	CREATE TABLE nonces (nonce TEXT PRIMARY KEY, used_at INTEGER NOT NULL);
+	CREATE TABLE outbox (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		kind         TEXT NOT NULL,
+		payload      BLOB NOT NULL,
+		created_at   INTEGER NOT NULL,
+		delivered_at INTEGER
+	);`,
 }
 
 func Open(path string) (*Store, error) {
