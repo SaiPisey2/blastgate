@@ -43,12 +43,20 @@ type Engine struct {
 	// labelsFn reads a namespace's labels. A field so tests can see which
 	// namespace is looked up, and whether one is, without a cluster.
 	labelsFn func(ctx context.Context, ns string) (map[string]string, error)
+	// look lists the Services and Pods a relabel or retarget affects and
+	// measures a scale-down's disruption. A field so tests can supply them.
+	look lookups
 }
 
 func New(up *upstream.Upstream, budget time.Duration) *Engine {
 	e := &Engine{up: up, budget: budget}
 	e.scoreFn = e.soundingScore
 	e.labelsFn = e.readNamespaceLabels
+	if up != nil {
+		e.look = soundingLookups{cfg: up.Config}
+	} else {
+		e.look = soundingLookups{}
+	}
 	e.httpDo = func(r *http.Request) (*http.Response, error) { return up.Normal.RoundTrip(r) }
 	return e
 }
