@@ -514,6 +514,17 @@ input::placeholder {
   font-weight: 600;
   color: var(--calm-fg);
 }
+.live-connecting,
+.live-reconnecting {
+  color: var(--warn-fg);
+}
+.live-offline {
+  color: var(--muted);
+}
+.live-offline .live-dot,
+.live-connecting .live-dot {
+  animation: none;
+}
 .live-dot {
   width: 8px;
   height: 8px;
@@ -783,6 +794,18 @@ table.feed {
   margin-right: 6px;
 }
 
+.detail-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--danger-fg);
+  font-size: 14px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
 .card-error {
   color: var(--danger-fg);
   font-weight: 500;
@@ -847,12 +870,17 @@ table.feed {
   .who {
     margin-left: auto;
   }
+  /* Wraps rather than scrolls: a sideways scroll strip hides screens
+     people then never find. */
   .nav {
     order: 3;
     flex-basis: 100%;
-    overflow-x: auto;
+    flex-wrap: wrap;
+    gap: 2px;
     padding-bottom: 8px;
-    scrollbar-width: none;
+  }
+  .nav-link {
+    padding: 6px 9px;
   }
   .main {
     padding: 20px 16px 48px;

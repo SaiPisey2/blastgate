@@ -46,7 +46,9 @@ export default function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) 
             name="token"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            autoComplete="off"
+            // one-time-code: password managers neither offer to save it nor
+            // autofill it, as they would for a plain password field.
+            autoComplete="one-time-code"
             spellCheck={false}
             autoFocus
             placeholder="bga_…"

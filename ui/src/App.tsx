@@ -28,12 +28,20 @@ export default function App() {
   useEffect(() => {
     if (!me) return;
     if (window.location.hash === '#/login') navigate(returnTo.current);
+    // Subscribe first, and let any stream event win over the initial fetch:
+    // a fetch answered after an event would put a stale count back.
+    let heard = false;
+    const off = subscribe('approvals', (ev) => {
+      heard = true;
+      setPending(ev.count);
+    });
     const close = openStream();
     get<ApprovalSummary[]>('/api/approvals?status=pending').then(
-      (list) => setPending((list ?? []).length),
+      (list) => {
+        if (!heard) setPending((list ?? []).length);
+      },
       () => {},
     );
-    const off = subscribe('approvals', (ev) => setPending(ev.count));
     return () => {
       close();
       off();

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Feed from './Feed';
-import { emit } from '../api';
+import { emit, setStreamStatus } from '../api';
 import { mockFetch, type Call } from '../test/fetch';
 import { feedRow } from '../test/fixtures';
 
@@ -65,5 +65,35 @@ describe('Feed', () => {
     mockFetch({ 'GET /api/feed': { body: [] } });
     render(<Feed />);
     expect(await screen.findByText(/no requests/i)).toBeTruthy();
+  });
+
+  it('keeps rows that stream in while a page is loading', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    mockFetch({
+      'GET /api/feed': async () => {
+        await gate;
+        return { body: [feedRow({ id: 10, name: 'from-page' }), feedRow({ id: 9, name: 'older-page' })] };
+      },
+    });
+    render(<Feed />);
+    // Arrives before the page does; one of them is also in the page.
+    act(() => emit('audit', feedRow({ id: 11, name: 'early-live' })));
+    act(() => emit('audit', feedRow({ id: 10, name: 'from-page' })));
+    await act(async () => release());
+    expect(await screen.findByText('early-live')).toBeTruthy();
+    const names = screen.getAllByRole('row').slice(1).map((r) => r.querySelector('.name')!.textContent);
+    expect(names).toEqual(['early-live', 'from-page', 'older-page']);
+  });
+
+  it('the live indicator follows the stream', async () => {
+    mockFetch({ 'GET /api/feed': { body: [] } });
+    render(<Feed />);
+    act(() => setStreamStatus('live'));
+    expect(screen.getByRole('status').textContent).toBe('Live');
+    act(() => setStreamStatus('reconnecting'));
+    expect(screen.getByRole('status').textContent).toBe('Reconnecting');
+    act(() => setStreamStatus('offline'));
+    expect(screen.getByRole('status').textContent).toBe('Offline');
   });
 });

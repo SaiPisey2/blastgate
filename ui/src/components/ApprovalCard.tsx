@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ApiError, post, type ApprovalDetail, type ApprovalSummary } from '../api';
 import ClassBadge from './ClassBadge';
 import { duration, plural, target, useNow } from '../format';
@@ -8,8 +8,14 @@ export type Outcome = 'approved' | 'denied' | 'gone';
 type Props = {
   summary: ApprovalSummary;
   detail?: ApprovalDetail;
+  detailError?: string;
+  onRetry: () => void;
   onDecided: (id: string, outcome: Outcome) => void;
 };
+
+// How long the confirm button stays inert after the confirm step opens:
+// long enough that a double-click on Approve cannot also confirm.
+export const ARM_MS = 300;
 
 type Severity = 'severe' | 'warn' | 'calm';
 
@@ -17,12 +23,21 @@ type Severity = 'severe' | 'warn' | 'calm';
 // to click through. So the card's weight follows what approving would do:
 // destructive and power-granting changes look and act differently from a
 // reversible patch, and destroying data takes a typed confirmation.
-function severityOf(d?: ApprovalDetail): Severity {
-  if (!d) return 'calm';
-  const cls = d.impact.class;
-  if (cls === 'TERMINAL' || cls === 'AUTHORITY' || d.impact.dataDestroyed > 0) return 'severe';
-  if (cls === 'COMPENSABLE') return 'warn';
+// It is computed from the summary, which the list already carries, so it
+// is right from the first paint and does not depend on a second request.
+function severityOf(s: ApprovalSummary): Severity {
+  if (s.class === 'TERMINAL' || s.class === 'AUTHORITY' || s.data_destroyed > 0) return 'severe';
+  if (s.class === 'COMPENSABLE') return 'warn';
   return 'calm';
+}
+
+// confirmPhrase is what must be typed to approve destroying data. A
+// cluster-scoped request can have neither namespace nor name (a
+// deletecollection of persistentvolumes) and that is the most destructive
+// kind there is, so the phrase falls back to the resource and is never
+// empty: an empty phrase would make the typed confirmation a no-op.
+export function confirmPhrase(s: ApprovalSummary): string {
+  return s.namespace || s.name || s.resource || s.verb || 'approve';
 }
 
 function undoText(undo: string): string {
@@ -37,20 +52,35 @@ function undoText(undo: string): string {
   return undo;
 }
 
-export default function ApprovalCard({ summary: s, detail, onDecided }: Props) {
+export default function ApprovalCard({ summary: s, detail, detailError, onRetry, onDecided }: Props) {
   const now = useNow();
   const [confirming, setConfirming] = useState<'approve' | 'deny' | null>(null);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [armed, setArmed] = useState(false);
+  const confirmRef = useRef<HTMLButtonElement>(null);
 
-  const severity = severityOf(detail);
+  useEffect(() => {
+    setArmed(false);
+    if (confirming === null) return;
+    const t = setTimeout(() => setArmed(true), ARM_MS);
+    return () => clearTimeout(t);
+  }, [confirming]);
+
+  const severity = severityOf(s);
   const impact = detail?.impact;
-  const destroys = (impact?.dataDestroyed ?? 0) > 0;
-  // A cluster-scoped delete (a Namespace, a PV) has no namespace; the
-  // object's own name is then the thing to type.
-  const phrase = s.namespace || s.name;
+  // Either source saying data is destroyed is enough to demand typing.
+  const destroys = s.data_destroyed > 0 || (impact?.dataDestroyed ?? 0) > 0;
+  const phrase = confirmPhrase(s);
   const needsTyping = confirming === 'approve' && destroys;
+
+  // Only a calm card moves focus to its confirm button (once it is armed;
+  // a disabled button cannot take focus). On a severe or compensable card,
+  // Enter must not be a reflex away from yes.
+  useEffect(() => {
+    if (armed && !needsTyping && severity === 'calm') confirmRef.current?.focus();
+  }, [armed, needsTyping, severity]);
   const created = Date.parse(s.created);
   const age = Number.isNaN(created) ? s.age_seconds : (now - created) / 1000;
   const expires = Date.parse(s.expires);
@@ -84,7 +114,7 @@ export default function ApprovalCard({ summary: s, detail, onDecided }: Props) {
     <article className={`card approval sev-${severity}`} data-severity={severity} aria-label={`${s.verb} ${s.resource} ${phrase}`}>
       <div className="card-head">
         <div className="card-tags">
-          {impact ? <ClassBadge cls={impact.class} /> : <span className="badge badge-neutral">measuring…</span>}
+          <ClassBadge cls={s.class} />
           <span className="held-by">
             held by <code className="rule">{s.rule}</code>
           </span>
@@ -108,6 +138,14 @@ export default function ApprovalCard({ summary: s, detail, onDecided }: Props) {
 
       <section className="impact" aria-label="Impact">
         <p className="impact-line">{s.summary}</p>
+        {detailError && (
+          <div className="detail-error" role="alert">
+            <span>Could not load the impact: {detailError}</span>
+            <button type="button" className="btn btn-secondary btn-small" onClick={onRetry}>
+              Retry
+            </button>
+          </div>
+        )}
         {impact && (
           <>
             <dl className="stats">
@@ -151,7 +189,7 @@ export default function ApprovalCard({ summary: s, detail, onDecided }: Props) {
           className={`confirm confirm-${confirming}`}
           onSubmit={(e) => {
             e.preventDefault();
-            if (!busy && (!needsTyping || typed === phrase)) void decide(confirming);
+            if (armed && !busy && (!needsTyping || typed === phrase)) void decide(confirming);
           }}
         >
           {needsTyping ? (
@@ -171,8 +209,8 @@ export default function ApprovalCard({ summary: s, detail, onDecided }: Props) {
             <button
               type="submit"
               className={confirming === 'deny' ? 'btn btn-secondary' : severity === 'severe' ? 'btn btn-danger' : 'btn btn-primary'}
-              disabled={busy || (needsTyping && typed !== phrase)}
-              autoFocus={!needsTyping}
+              ref={confirmRef}
+              disabled={!armed || busy || (needsTyping && typed !== phrase)}
             >
               {confirming === 'approve' ? 'Confirm approve' : 'Confirm deny'}
             </button>

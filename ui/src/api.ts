@@ -60,6 +60,10 @@ export type ApprovalSummary = {
   namespace: string;
   name: string;
   summary: string;
+  // class and data_destroyed ride on the summary so a card's severity and
+  // its typed confirmation never wait on (or depend on) a second request.
+  class: string;
+  data_destroyed: number;
   age_seconds: number;
   created: string;
   expires: string;
@@ -226,6 +230,26 @@ export function emit<K extends keyof StreamEvents>(event: K, data: StreamEvents[
   listeners[event].forEach((fn) => fn(data));
 }
 
+// Connection state of the stream, for the feed's Live indicator: a feed
+// that says "Live" while disconnected is worse than no indicator.
+export type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
+let status: StreamStatus = 'offline';
+const statusListeners = new Set<(s: StreamStatus) => void>();
+
+export function streamStatus(): StreamStatus {
+  return status;
+}
+
+export function onStreamStatus(fn: (s: StreamStatus) => void): () => void {
+  statusListeners.add(fn);
+  return () => statusListeners.delete(fn);
+}
+
+export function setStreamStatus(s: StreamStatus) {
+  status = s;
+  statusListeners.forEach((fn) => fn(s));
+}
+
 function parse(ev: MessageEvent): unknown {
   try {
     return JSON.parse(String(ev.data));
@@ -240,6 +264,8 @@ function parse(ev: MessageEvent): unknown {
 export function openStream(): () => void {
   if (typeof EventSource === 'undefined') return () => {};
   const es = new EventSource('/api/stream');
+  setStreamStatus('connecting');
+  es.onopen = () => setStreamStatus('live');
   es.addEventListener('audit', (ev) => {
     const row = parse(ev as MessageEvent);
     if (row && typeof row === 'object') emit('audit', row as FeedRow);
@@ -252,13 +278,18 @@ export function openStream(): () => void {
   });
   es.addEventListener('expired', () => {
     es.close();
+    setStreamStatus('offline');
     signedOut();
   });
   es.onerror = () => {
+    setStreamStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'reconnecting');
     // EventSource retries by itself, except after a non-2xx answer such as
     // 401, when it gives up (CLOSED). Ask /api/me so a dead session lands
     // on the login screen instead of a silently frozen feed.
     if (es.readyState === EventSource.CLOSED) whoami().catch(() => {});
   };
-  return () => es.close();
+  return () => {
+    es.close();
+    setStreamStatus('offline');
+  };
 }

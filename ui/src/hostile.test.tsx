@@ -15,7 +15,7 @@ const EVIL = '<img src=x onerror=alert(1)>';
 
 describe('hostile text', () => {
   it('renders hostile names as text', async () => {
-    const s = summary({ name: EVIL, namespace: EVIL, rule: EVIL, human: EVIL, agent: EVIL, summary: EVIL });
+    const s = summary({ name: EVIL, namespace: EVIL, rule: EVIL, human: EVIL, agent: EVIL, summary: EVIL, class: EVIL });
     mockFetch({
       'GET /api/feed': { body: [feedRow({ name: EVIL, namespace: EVIL, rule: EVIL, human: EVIL, agent: EVIL, resource: EVIL, verb: EVIL })] },
       'GET /api/approvals?status=pending': { body: [s] },

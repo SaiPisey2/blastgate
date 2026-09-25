@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { get, subscribe, type FeedRow } from '../api';
+import { get, onStreamStatus, streamStatus, subscribe, type FeedRow, type StreamStatus } from '../api';
 import ClassBadge, { DecisionChip } from '../components/ClassBadge';
 import { clock, target } from '../format';
 
@@ -21,6 +21,24 @@ function query(f: Filters, before?: number): string {
     if (v) p.set(k, v);
   }
   return `/api/feed?${p.toString()}`;
+}
+
+const LIVE_LABELS: Record<StreamStatus, string> = { connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting', offline: 'Offline' };
+const LIVE_TITLES: Record<StreamStatus, string> = {
+  connecting: 'Connecting to the live stream',
+  live: 'New requests appear as they happen',
+  reconnecting: 'The live stream dropped; retrying',
+  offline: 'Not receiving live updates; reload to see new requests',
+};
+
+// mergeNewestFirst joins stream rows with a fetched page, dropping
+// duplicates by audit id and keeping newest (highest id) first.
+function mergeNewestFirst(a: FeedRow[], b: FeedRow[]): FeedRow[] {
+  const seen = new Set<number>();
+  return [...a, ...b]
+    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    .sort((x, y) => y.id - x.id)
+    .slice(0, MAX_ROWS);
 }
 
 // matches mirrors the server's filters for rows arriving on the stream,
@@ -45,6 +63,14 @@ export default function Feed() {
   const [error, setError] = useState('');
   const seq = useRef(0);
   const appliedRef = useRef(applied);
+  // Rows that arrive on the stream while a page is loading would be lost
+  // (the page replaces the list) or duplicated; they wait here and are
+  // merged into the page when it lands.
+  const loading = useRef(true);
+  const buffer = useRef<FeedRow[]>([]);
+  const [live, setLive] = useState<StreamStatus>(streamStatus());
+
+  useEffect(() => onStreamStatus(setLive), []);
 
   useEffect(() => {
     const t = setTimeout(() => setApplied(filters), filters.agent !== applied.agent || filters.human !== applied.human ? 300 : 0);
@@ -56,15 +82,25 @@ export default function Feed() {
     // seq discards a slow response to an older filter that lands after
     // the newer one's.
     const mine = ++seq.current;
+    loading.current = true;
+    buffer.current = [];
     get<FeedRow[]>(query(applied)).then(
       (page) => {
         if (mine !== seq.current) return;
-        setRows(page ?? []);
-        setMore((page ?? []).length >= PAGE);
-        setFresh(new Set());
+        const got = page ?? [];
+        const early = buffer.current.filter((r) => matches(r, appliedRef.current));
+        loading.current = false;
+        buffer.current = [];
+        setRows(mergeNewestFirst(early, got));
+        setMore(got.length >= PAGE);
+        setFresh(new Set(early.map((r) => r.id)));
         setError('');
       },
-      (e) => mine === seq.current && setError(e instanceof Error ? e.message : 'Could not load the feed.'),
+      (e) => {
+        if (mine !== seq.current) return;
+        loading.current = false;
+        setError(e instanceof Error ? e.message : 'Could not load the feed.');
+      },
     );
   }, [applied]);
 
@@ -72,6 +108,10 @@ export default function Feed() {
     () =>
       subscribe('audit', (row) => {
         if (!matches(row, appliedRef.current)) return;
+        if (loading.current) {
+          buffer.current.push(row);
+          return;
+        }
         setRows((prev) => {
           if (prev === null || prev.some((r) => r.id === row.id)) return prev;
           return [row, ...prev].slice(0, MAX_ROWS);
@@ -111,9 +151,9 @@ export default function Feed() {
           <h1>Live feed</h1>
           <p className="lede">Every request an agent sent through blastgate, newest first.</p>
         </div>
-        <span className="live" title="New requests appear as they happen">
+        <span className={`live live-${live}`} role="status" title={LIVE_TITLES[live]}>
           <span className="live-dot" aria-hidden="true" />
-          Live
+          {LIVE_LABELS[live]}
         </span>
       </div>
 

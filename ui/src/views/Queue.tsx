@@ -11,10 +11,25 @@ const NOTES: Record<Outcome, string> = {
 export default function Queue() {
   const [items, setItems] = useState<ApprovalSummary[] | null>(null);
   const [details, setDetails] = useState<Record<string, ApprovalDetail>>({});
+  const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const idsRef = useRef<string>('');
   const fetched = useRef(new Set<string>());
+
+  const fetchDetail = useCallback((id: string) => {
+    fetched.current.add(id);
+    setDetailErrors((prev) => {
+      const { [id]: _drop, ...rest } = prev;
+      return rest;
+    });
+    get<ApprovalDetail>(`/api/approvals/${encodeURIComponent(id)}`).then(
+      (d) => setDetails((prev) => ({ ...prev, [id]: d })),
+      // The card shows this with a retry; Approve stays disabled meanwhile,
+      // because approving without the impact means approving blind.
+      (e) => setDetailErrors((prev) => ({ ...prev, [id]: e instanceof Error ? e.message : 'request failed' })),
+    );
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -26,17 +41,12 @@ export default function Queue() {
       // The list carries the summary line; the numbers, class and undo
       // come from each approval's detail.
       for (const r of rows) {
-        if (fetched.current.has(r.id)) continue;
-        fetched.current.add(r.id);
-        get<ApprovalDetail>(`/api/approvals/${encodeURIComponent(r.id)}`).then(
-          (d) => setDetails((prev) => ({ ...prev, [r.id]: d })),
-          () => fetched.current.delete(r.id),
-        );
+        if (!fetched.current.has(r.id)) fetchDetail(r.id);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load the queue.');
     }
-  }, []);
+  }, [fetchDetail]);
 
   useEffect(() => {
     void load();
@@ -88,7 +98,14 @@ export default function Queue() {
 
       <div className="cards">
         {items?.map((s) => (
-          <ApprovalCard key={s.id} summary={s} detail={details[s.id]} onDecided={decided} />
+          <ApprovalCard
+            key={s.id}
+            summary={s}
+            detail={details[s.id]}
+            detailError={detailErrors[s.id]}
+            onRetry={() => fetchDetail(s.id)}
+            onDecided={decided}
+          />
         ))}
       </div>
     </div>
