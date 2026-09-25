@@ -35,6 +35,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	case "help", "-h", "--help":
 		fmt.Fprintln(stdout, usage)
 		return 0
+	case "session":
+		return sessionCmd(args[1:], getenv, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s\n", args[0], usage)
 		return 2
