@@ -79,6 +79,12 @@ func (e *Engine) Assess(parent context.Context, a normalize.Action, body []byte)
 		i = Unmeasured("a proxied request cannot be measured")
 	case a.Resource == "pods" && (a.Subresource == "exec" || a.Subresource == "attach" || a.Subresource == "portforward"):
 		i = assessExec(a)
+	case a.Resource == "pods" && a.Group == "" && a.Subresource == "ephemeralcontainers" && !a.IsRead():
+		// `kubectl debug` starts a container with a command of its choosing
+		// by patching this subresource. The dry-run would call that a
+		// REVERSIBLE change to the Pod, and the safe rule would let the
+		// command run unheld; like exec, it cannot be measured.
+		i = assessEphemeral(a, body)
 	case a.IsRead(), isSelfReview(a):
 		i = Impact{Class: ClassRead, Measured: true, Undo: "none"}
 	case a.Verb == "delete" && a.Subresource == "":

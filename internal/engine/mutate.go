@@ -442,6 +442,52 @@ func (e *Engine) Before(ctx context.Context, a normalize.Action) ([]byte, error)
 	return data, nil
 }
 
+// List returns the raw JSON of the collection a deletecollection would
+// empty: a LIST of the same path, with the same labelSelector and
+// fieldSelector, read impersonated as the session's human -- what the
+// API server itself deletes is what that LIST returns. Unlike Before, a
+// 404 is an error: a collection that cannot be listed is not an empty
+// one, and forwarding on it would delete with no way back.
+func (e *Engine) List(ctx context.Context, a normalize.Action) ([]byte, error) {
+	if a.Principal.Human == "" {
+		return nil, errors.New("no human to list the collection as")
+	}
+	if a.Name != "" || a.Subresource != "" {
+		return nil, errors.New("not a collection")
+	}
+	r, err := e.request(ctx, a, http.MethodGet, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	for _, k := range []string{"labelSelector", "fieldSelector"} {
+		v := a.Query[k]
+		if len(v) > 1 {
+			// normalize sorts repeated values, so which one the API server
+			// honours is no longer known; listing by the other one would
+			// snapshot a different set than the one deleted.
+			return nil, fmt.Errorf("more than one %s", k)
+		}
+		if len(v) == 1 {
+			q.Set(k, v[0])
+		}
+	}
+	r.URL.RawQuery = q.Encode()
+	resp, err := e.httpDo(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := readLimitedBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("collection list returned %d", resp.StatusCode)
+	}
+	return data, nil
+}
+
 // readLimitedBody reads resp's body up to maxBody -- the API server's own
 // request limit, applied to its responses too, because an object it stored
 // larger than its own limit could not have been written by a client. The

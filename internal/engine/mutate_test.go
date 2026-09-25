@@ -458,3 +458,23 @@ func TestBeforeRefusesWithoutHuman(t *testing.T) {
 		t.Error("Before with no human to impersonate reached the server")
 	}
 }
+
+// List is the snapshot of a deletecollection: a 404 or a second selector
+// value (whose winner the API server, not blastgate, would pick) is an
+// error, never an empty collection.
+func TestListRefusesWhatItCannotListFaithfully(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, "", "", 200, &seen) // every GET answers 404
+	a := normalize.Action{Verb: "deletecollection", Version: "v1", Resource: "configmaps", Namespace: "demo", Principal: alice}
+	if _, err := e.List(context.Background(), a); err == nil {
+		t.Error("a 404 list was not an error")
+	}
+	a.Query = map[string][]string{"labelSelector": {"app=db", "app=web"}}
+	if _, err := e.List(context.Background(), a); err == nil {
+		t.Error("two labelSelectors were listed")
+	}
+	a.Query, a.Principal = nil, normalize.Principal{}
+	if _, err := e.List(context.Background(), a); err == nil {
+		t.Error("listed with no human to impersonate")
+	}
+}

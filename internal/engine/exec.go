@@ -1,8 +1,13 @@
 package engine
 
 import (
+	"bytes"
+	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/SaiPisey2/blastgate/internal/normalize"
 )
@@ -15,6 +20,68 @@ func assessExec(a normalize.Action) Impact {
 	i := Unmeasured("an arbitrary command in a container cannot be measured")
 	i.SQLDetected = detectSQL(a.Query["command"])
 	return i
+}
+
+// assessEphemeral is assessExec for an ephemeral container: Unmeasured,
+// with the SQL check run over every command and args list in the body.
+func assessEphemeral(a normalize.Action, body []byte) Impact {
+	i := Unmeasured("a command in an ephemeral container cannot be measured")
+	i.SQLDetected = detectSQL(commandLines(a.PatchType, body))
+	return i
+}
+
+// commandLines collects every "command" and "args" string list anywhere in
+// a JSON or YAML body. Walking the whole body, not one path, covers every
+// shape the request can take -- a strategic merge patch, a JSON patch's
+// "value", a whole Pod on update, apply YAML -- and a list that is not a
+// container's is only more words to check, which errs toward holding. A
+// body that cannot be decoded yields nothing: the request is unmeasured
+// and held either way.
+func commandLines(patchType string, body []byte) []string {
+	js := bytes.TrimSpace(body)
+	if strings.Contains(patchType, "yaml") || (len(js) > 0 && js[0] != '{' && js[0] != '[') {
+		y, err := yaml.YAMLToJSON(js)
+		if err != nil {
+			return nil
+		}
+		js = y
+	}
+	var v any
+	if err := json.Unmarshal(js, &v); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			// command before args, and children in key order: the result
+			// feeds SQLDetected, which is part of the impact digest, so the
+			// same body must always give the same words in the same order.
+			for _, k := range []string{"command", "args"} {
+				l, _ := t[k].([]any)
+				for _, s := range l {
+					if s, ok := s.(string); ok {
+						out = append(out, s)
+					}
+				}
+			}
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(t[k])
+			}
+		case []any:
+			for _, c := range t {
+				walk(c)
+			}
+		}
+	}
+	walk(v)
+	return out
 }
 
 var (
