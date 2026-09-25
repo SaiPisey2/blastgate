@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,9 +9,8 @@ import (
 	"time"
 
 	"github.com/SaiPisey2/blastgate/internal/config"
-	"github.com/SaiPisey2/blastgate/internal/engine"
-	"github.com/SaiPisey2/blastgate/internal/normalize"
 	"github.com/SaiPisey2/blastgate/internal/policy"
+	"github.com/SaiPisey2/blastgate/internal/replay"
 )
 
 // replayCmd re-evaluates recorded decisions under a candidate policy, so
@@ -55,46 +53,19 @@ func replayCmd(args []string, getenv func(string) string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	var n, skipped int
-	var changes []string
-	for _, r := range rows {
-		var a normalize.Action
-		var imp engine.Impact
-		var labels map[string]string
-		// A decision row with no stored impact was never scored (a request
-		// refused as unparseable): there is nothing a policy could be
-		// evaluated against, so it is counted apart rather than guessed.
-		// Labels of JSON null decode to a nil map: unknown, exactly as the
-		// gate saw them, so a rule reading them holds here as it did live.
-		if len(r.ActionJSON) == 0 || len(r.ImpactJSON) == 0 || len(r.LabelsJSON) == 0 ||
-			json.Unmarshal(r.ActionJSON, &a) != nil || json.Unmarshal(r.ImpactJSON, &imp) != nil ||
-			json.Unmarshal(r.LabelsJSON, &labels) != nil {
-			skipped++
-			continue
-		}
-		n++
-		v := pol.Evaluate(ctx, a, imp, labels)
-		if string(v.Decision) == r.Decision {
-			continue
-		}
-		target := safe(r.Name)
-		if r.Namespace != "" {
-			target = safe(r.Namespace) + "/" + target
-		}
-		resource := safe(r.Resource)
-		if r.Subresource != "" {
-			resource += "/" + safe(r.Subresource)
-		}
-		changes = append(changes, fmt.Sprintf("%s %s→%s %s→%s %s %s %s",
-			r.At.Local().Format(time.RFC3339), safe(r.Rule), safe(v.Rule), safe(r.Decision), v.Decision,
-			safe(r.Verb), resource, target))
+	res := replay.Run(ctx, rows, pol)
+	fmt.Fprintf(stdout, "%d decisions re-evaluated; %d would change\n", res.Evaluated, res.Changed)
+	if res.Skipped > 0 {
+		fmt.Fprintf(stdout, "%d decisions skipped: never scored, nothing to evaluate\n", res.Skipped)
 	}
-	fmt.Fprintf(stdout, "%d decisions re-evaluated; %d would change\n", n, len(changes))
-	if skipped > 0 {
-		fmt.Fprintf(stdout, "%d decisions skipped: never scored, nothing to evaluate\n", skipped)
-	}
-	for _, c := range changes {
-		fmt.Fprintln(stdout, c)
+	for _, c := range res.Changes {
+		target := safe(c.Name)
+		if c.Namespace != "" {
+			target = safe(c.Namespace) + "/" + target
+		}
+		fmt.Fprintf(stdout, "%s %s→%s %s→%s %s %s %s\n",
+			c.At.Local().Format(time.RFC3339), safe(c.RuleBefore), safe(c.RuleAfter), safe(c.DecisionBefore), c.DecisionAfter,
+			safe(c.Verb), safe(c.Resource), target)
 	}
 	return 0
 }
