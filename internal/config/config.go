@@ -38,6 +38,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if err := checkKey(key); err != nil {
 		return Config{}, err
 	}
+	// Nothing signs with the key yet: it is reserved for the approval
+	// tokens of the next phase, and required now so a deployment made
+	// today does not start failing when that lands.
 	c.SigningKey = []byte(key)
 
 	path := getenv("BLASTGATE_UPSTREAM_KUBECONFIG")

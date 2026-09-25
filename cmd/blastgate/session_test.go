@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -89,5 +91,69 @@ func TestSessionNeedsADataDir(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run([]string{"session", "list"}, noenv, &out, &errb); code != 2 || !strings.Contains(errb.String(), "BLASTGATE_DATA_DIR") {
 		t.Errorf("exit = %d, stderr = %q", code, errb.String())
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// `session new > agent.kubeconfig` on a full disk used to exit 0 with an
+// empty file, leaving a live session whose token nobody holds.
+func TestSessionNewFailsWhenStdoutFails(t *testing.T) {
+	env := tempEnv(t)
+	var errb bytes.Buffer
+	if code := run([]string{"session", "new", "--human", "alice", "--agent", "x"}, env, failWriter{}, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1: %s", code, errb.String())
+	}
+	var out bytes.Buffer
+	run([]string{"session", "list"}, env, &out, &errb)
+	if !strings.Contains(out.String(), "revoked") || strings.Contains(out.String(), "active") {
+		t.Errorf("the undelivered session was left live:\n%s", out.String())
+	}
+}
+
+// Listening on every interface says nothing about the address kubectl
+// should dial, so there is no safe --server default.
+func TestSessionNewNeedsServerWhenListeningEverywhere(t *testing.T) {
+	for _, listen := range []string{"0.0.0.0:8443", "[::]:8443", ":8443"} {
+		dir := t.TempDir()
+		env := func(k string) string {
+			return map[string]string{"BLASTGATE_DATA_DIR": dir, "BLASTGATE_LISTEN": listen, "BLASTGATE_ALLOW_REMOTE": "1"}[k]
+		}
+		var out, errb bytes.Buffer
+		if code := run([]string{"session", "new", "--human", "alice", "--agent", "x"}, env, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--server") || out.Len() != 0 {
+			t.Errorf("%s: exit = %d, stdout %d bytes, stderr %q", listen, code, out.Len(), errb.String())
+		}
+		out.Reset()
+		errb.Reset()
+		if code := run([]string{"session", "new", "--human", "alice", "--agent", "x", "--server", "https://gate.internal:8443"}, env, &out, &errb); code != 0 {
+			t.Errorf("%s with --server: exit = %d: %s", listen, code, errb.String())
+		}
+	}
+}
+
+// A data dir created by hand with the umask's 0755 holds the database and
+// the CA key's directory; openStore tightens it rather than trusting it.
+func TestAnExistingDataDirIsMadePrivate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"session", "list"}, func(k string) string {
+		if k == "BLASTGATE_DATA_DIR" {
+			return dir
+		}
+		return ""
+	}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d: %s", code, errb.String())
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Errorf("data dir mode = %v, want 0700", fi.Mode().Perm())
 	}
 }
