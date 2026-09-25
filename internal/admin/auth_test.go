@@ -121,10 +121,17 @@ type loginResult struct {
 	csrf   string
 }
 
+func jsonHdr() map[string]string { return map[string]string{"Content-Type": "application/json"} }
+
 func (f *fixture) login(t *testing.T, tok string) loginResult {
 	t.Helper()
+	return f.loginWith(t, tok, jsonHdr())
+}
+
+func (f *fixture) loginWith(t *testing.T, tok string, hdr map[string]string) loginResult {
+	t.Helper()
 	b, _ := json.Marshal(map[string]string{"token": tok})
-	resp := f.do(t, "POST", "/api/login", string(b), nil)
+	resp := f.do(t, "POST", "/api/login", string(b), hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("login status %d: %s", resp.StatusCode, readBody(t, resp))
 	}
@@ -199,20 +206,48 @@ func TestLoginRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	unknown, _ := NewLoginToken()
-	cases := map[string]string{
-		"missing body":     "",
-		"not json":         "token=" + tok,
-		"wrong prefix":     `{"token":"` + strings.TrimPrefix(tok, LoginTokenPrefix) + `"}`,
-		"unknown token":    `{"token":"` + unknown + `"}`,
-		"revoked approver": `{"token":"` + revoked + `"}`,
-		"oversized body":   `{"token":"` + tok + `","pad":"` + strings.Repeat("x", 5000) + `"}`,
+	good := `{"token":"` + tok + `"}`
+	const js = "application/json"
+	// Most cases carry the live token, so a refusal proves the check in
+	// question and not merely an unknown token.
+	cases := map[string]struct{ ct, body string }{
+		"missing body":     {js, ""},
+		"not json":         {js, "token=" + tok},
+		"wrong prefix":     {js, `{"token":"` + strings.TrimPrefix(tok, LoginTokenPrefix) + `"}`},
+		"unknown token":    {js, `{"token":"` + unknown + `"}`},
+		"revoked approver": {js, `{"token":"` + revoked + `"}`},
+		"oversized body":   {js, `{"token":"` + tok + `","pad":"` + strings.Repeat("x", 5000) + `"}`},
+		// A cross-site <form enctype="text/plain"> can post a JSON-looking
+		// body; only a script (which the same-origin policy stops at a
+		// preflight) can send application/json.
+		"text/plain":         {"text/plain", good},
+		"form encoded":       {"application/x-www-form-urlencoded", good},
+		"no content type":    {"", good},
+		"json lookalike":     {"application/jsonx", good},
+		"unknown field":      {js, `{"token":"` + tok + `","x":1}`},
+		"unknown string key": {js, `{"note":"hi","token":"` + tok + `"}`},
+		"trailing object":    {js, good + good},
+		"trailing garbage":   {js, good + " x"},
+		"duplicate token":    {js, `{"token":"bga_decoy","token":"` + tok + `"}`},
+		"duplicate, same":    {js, `{"token":"` + tok + `","token":"` + tok + `"}`},
+		"case-folded key":    {js, `{"TOKEN":"` + tok + `"}`},
+		"token not string":   {js, `{"token":1}`},
+		"array":              {js, `["` + tok + `"]`},
+		"empty object":       {js, `{}`},
+		"null":               {js, `null`},
 	}
 	var first string
 	i := 0
-	for name, body := range cases {
-		// Each case from its own address so the limiter stays out of it.
+	for name, c := range cases {
+		// A fresh limiter per case: there are more cases than the limit
+		// allows from one address, and every request here comes from the
+		// same loopback host.
 		f.auth.limiter = newLimiter()
-		resp := f.do(t, "POST", "/api/login", body, nil)
+		var hdr map[string]string
+		if c.ct != "" {
+			hdr = map[string]string{"Content-Type": c.ct}
+		}
+		resp := f.do(t, "POST", "/api/login", c.body, hdr)
 		got := readBody(t, resp)
 		if resp.StatusCode != 401 {
 			t.Errorf("%s: status %d", name, resp.StatusCode)
@@ -229,11 +264,47 @@ func TestLoginRefusals(t *testing.T) {
 	}
 }
 
+func TestLoginAcceptsJSONWithParametersAndATrailingNewline(t *testing.T) {
+	f := newFixture(t)
+	tok := f.approver(t, "a1", "alice")
+	if lr := f.loginWith(t, tok, map[string]string{"Content-Type": "application/json; charset=utf-8"}); lr.name != "alice" {
+		t.Errorf("name %q", lr.name)
+	}
+	r := f.do(t, "POST", "/api/login", `{"token":"`+tok+`"}`+"\n", jsonHdr())
+	if r.StatusCode != 200 {
+		t.Errorf("trailing newline: %d", r.StatusCode)
+	}
+}
+
+// Logging in again from a browser that still holds a session ends that
+// session: two live cookies for one browser means the older one, if it
+// was copied somewhere, outlives what the approver thinks is their only
+// session.
+func TestLoginRevokesThePreviousSession(t *testing.T) {
+	f := newFixture(t)
+	tok := f.approver(t, "a1", "alice")
+	old := f.login(t, tok)
+	hdr := jsonHdr()
+	hdr["Cookie"] = SessionCookie + "=" + old.cookie.Value
+	fresh := f.loginWith(t, tok, hdr)
+	if fresh.cookie.Value == old.cookie.Value {
+		t.Fatal("login reused the old session id")
+	}
+	assertCleared(t, "old session", f.do(t, "GET", "/api/me", "", cookieHdr(old.cookie)))
+	if r := f.do(t, "GET", "/api/me", "", cookieHdr(fresh.cookie)); r.StatusCode != 200 {
+		t.Errorf("new session: %d", r.StatusCode)
+	}
+	// A cookie naming nothing does not stop the login.
+	hdr["Cookie"] = SessionCookie + "=bogus"
+	f.loginWith(t, tok, hdr)
+}
+
 func TestLoginIsRateLimitedPerIP(t *testing.T) {
 	f := newFixture(t)
 	bad := `{"token":"bga_nope"}`
 	post := func(ip string) int {
 		req := httptest.NewRequest("POST", "/api/login", strings.NewReader(bad))
+		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = ip + ":40000"
 		w := httptest.NewRecorder()
 		f.auth.Login(w, req)
@@ -252,6 +323,7 @@ func TestLoginIsRateLimitedPerIP(t *testing.T) {
 	}
 	// A different source port is the same host.
 	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(bad))
+	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "10.0.0.1:50000"
 	w := httptest.NewRecorder()
 	f.auth.Login(w, req)
@@ -261,6 +333,7 @@ func TestLoginIsRateLimitedPerIP(t *testing.T) {
 	// Even a valid token is refused while limited: 429 comes before any lookup.
 	tok := f.approver(t, "a1", "alice")
 	req = httptest.NewRequest("POST", "/api/login", strings.NewReader(`{"token":"`+tok+`"}`))
+	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "10.0.0.1:1"
 	w = httptest.NewRecorder()
 	f.auth.Login(w, req)
@@ -395,7 +468,7 @@ func TestLogsNeverContainTheToken(t *testing.T) {
 	unknown, _ := NewLoginToken()
 	lr := f.login(t, tok)
 	for _, bad := range []string{unknown, revoked, strings.TrimPrefix(unknown, LoginTokenPrefix)} {
-		f.do(t, "POST", "/api/login", `{"token":"`+bad+`"}`, nil)
+		f.do(t, "POST", "/api/login", `{"token":"`+bad+`"}`, jsonHdr())
 	}
 	f.do(t, "GET", "/api/me", "", cookieHdr(lr.cookie))
 	f.do(t, "POST", "/api/thing", "", map[string]string{"Cookie": SessionCookie + "=" + lr.cookie.Value, CSRFHeader: "wrong"})

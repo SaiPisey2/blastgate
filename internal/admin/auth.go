@@ -11,7 +11,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -119,18 +121,26 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, errLimited)
 		return
 	}
-	var body struct {
-		Token string `json:"token"`
+	// Only application/json. A cross-site <form enctype="text/plain">
+	// can post a body that parses as JSON without any CORS preflight;
+	// accepting it would let another site log the browser in as the
+	// attacker (login CSRF), after which approvals the victim makes are
+	// recorded under the attacker's name. A script sending
+	// application/json cross-site is stopped at the preflight.
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		a.refuse(w, host, "not application/json")
+		return
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, loginBodyLimit)).Decode(&body); err != nil {
+	token, err := readLoginBody(http.MaxBytesReader(w, r.Body, loginBodyLimit))
+	if err != nil {
 		a.refuse(w, host, "unreadable body")
 		return
 	}
-	if !strings.HasPrefix(body.Token, LoginTokenPrefix) {
+	if !strings.HasPrefix(token, LoginTokenPrefix) {
 		a.refuse(w, host, "not a login token")
 		return
 	}
-	ap, err := a.Store.ApproverByTokenHash(r.Context(), hashOf(body.Token))
+	ap, err := a.Store.ApproverByTokenHash(r.Context(), hashOf(token))
 	if errors.Is(err, store.ErrNotFound) {
 		a.refuse(w, host, "unknown token")
 		return
@@ -143,6 +153,17 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		a.refuse(w, host, "approver revoked")
 		return
 	}
+	// A browser logging in while it still holds a session ends that one
+	// first: otherwise the old cookie, if it was ever copied, stays live
+	// for the rest of its 12 hours beside the session the approver thinks
+	// is their only one. A cookie that names nothing is simply ignored.
+	if c, err := r.Cookie(SessionCookie); err == nil && c.Value != "" {
+		err := a.Store.RevokeUISession(r.Context(), hashOf(c.Value), a.Now())
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			a.internal(w, "revoke previous ui session", err)
+			return
+		}
+	}
 	id, csrf := randomString(), randomString()
 	now := a.Now()
 	u := store.UISession{ApproverID: ap.ID, ApproverName: ap.Name, CSRF: csrf, Created: now, Expires: now.Add(SessionTTL)}
@@ -154,6 +175,47 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	out, _ := json.Marshal(map[string]string{"name": ap.Name, "csrf": csrf})
 	a.Log.Info("login", "remote", host, "approver", ap.Name)
 	writeJSON(w, http.StatusOK, string(out))
+}
+
+var errLoginBody = errors.New("login body must be exactly {\"token\": \"...\"}")
+
+// readLoginBody accepts exactly one JSON object holding exactly one key,
+// "token", with a string value, and nothing after it but whitespace. It
+// walks the tokens itself rather than using Decode into a struct because
+// encoding/json quietly takes the last of duplicate keys and matches keys
+// case-insensitively: {"token":"decoy","TOKEN":"bga_..."} would log in on
+// a value a filter or log reading the first key never saw. Walking the
+// tokens refuses unknown keys, duplicates and trailing data in one place.
+func readLoginBody(r io.Reader) (string, error) {
+	dec := json.NewDecoder(r)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", errLoginBody
+	}
+	token, seen := "", false
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil || k != "token" || seen {
+			return "", errLoginBody
+		}
+		v, err := dec.Token()
+		s, ok := v.(string)
+		if err != nil || !ok {
+			return "", errLoginBody
+		}
+		token, seen = s, true
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return "", errLoginBody
+	}
+	// Anything after the object -- a second object, stray bytes -- is a
+	// body this endpoint did not ask for.
+	if _, err := dec.Token(); err != io.EOF {
+		return "", errLoginBody
+	}
+	if !seen {
+		return "", errLoginBody
+	}
+	return token, nil
 }
 
 func (a *Auth) refuse(w http.ResponseWriter, host, reason string) {
