@@ -88,9 +88,8 @@ func TestServeForwardsASessionEndToEnd(t *testing.T) {
 	var logs syncBuf
 	go func() { done <- serveCmd(ctx, env, &logs) }()
 
-	// Wait for serve to listen before minting a session: both create the CA
-	// on first use, and racing them could leave the kubeconfig trusting a
-	// CA the serving certificate was not issued by.
+	// Wait for serve to listen before the client dials it. (Both paths
+	// create the CA on first use; tlsutil makes that safe to race.)
 	for i := 0; ; i++ {
 		c, err := net.Dial("tcp", addr)
 		if err == nil {

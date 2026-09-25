@@ -2,10 +2,13 @@ package tlsutil
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 func verify(t *testing.T, caPEM []byte, leaf []byte, host string) error {
@@ -90,5 +93,105 @@ func TestANewHostReissuesTheServerCertUnderTheSameCA(t *testing.T) {
 	}
 	if err := verify(t, ca2, cert.Certificate[0], "gate.internal"); err != nil {
 		t.Errorf("new host not covered: %v", err)
+	}
+}
+
+// On a first run `serve` and `session new` can both find no CA and create
+// one. Two CAs meant the kubeconfig trusted one while serve presented a
+// certificate from the other, and kubectl failed TLS with nothing to say
+// why.
+func TestConcurrentFirstRunsAgreeOnOneCA(t *testing.T) {
+	const callers = 8
+	for round := 0; round < 20; round++ {
+		dir := filepath.Join(t.TempDir(), "tls")
+		type result struct {
+			cert tls.Certificate
+			ca   []byte
+			err  error
+		}
+		res := make(chan result, callers)
+		var start sync.WaitGroup
+		start.Add(1)
+		for i := 0; i < callers; i++ {
+			go func() {
+				start.Wait()
+				c, ca, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+				res <- result{c, ca, err}
+			}()
+		}
+		start.Done()
+		var first []byte
+		for i := 0; i < callers; i++ {
+			r := <-res
+			if r.err != nil {
+				t.Fatalf("round %d: %v", round, r.err)
+			}
+			if first == nil {
+				first = r.ca
+			} else if !bytes.Equal(first, r.ca) {
+				t.Fatalf("round %d: two callers returned different CAs", round)
+			}
+			if err := verify(t, r.ca, r.cert.Certificate[0], "127.0.0.1"); err != nil {
+				t.Fatalf("round %d: serving certificate not issued by the CA returned with it: %v", round, err)
+			}
+		}
+		onDisk, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+		if err != nil || !bytes.Equal(onDisk, first) {
+			t.Fatalf("round %d: ca.crt on disk is not the CA every caller returned (%v)", round, err)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, ".*")); len(left) != 0 {
+			t.Fatalf("round %d: temporary files left behind: %v", round, left)
+		}
+	}
+}
+
+// A CA key without its certificate, or the reverse, is a CA that cannot
+// be completed. Replacing it silently would break every kubeconfig that
+// embeds the old certificate, so it is an error a person resolves.
+func TestAnIncompleteCAIsNotReplaced(t *testing.T) {
+	for _, keep := range []string{"ca.key", "ca.crt"} {
+		dir := filepath.Join(t.TempDir(), "tls")
+		if _, _, err := LoadOrCreate(dir, []string{"127.0.0.1"}); err != nil {
+			t.Fatal(err)
+		}
+		other := map[string]string{"ca.key": "ca.crt", "ca.crt": "ca.key"}[keep]
+		before, _ := os.ReadFile(filepath.Join(dir, keep))
+		os.Remove(filepath.Join(dir, other))
+		old := caWait
+		caWait = 100 * time.Millisecond
+		_, _, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+		caWait = old
+		if err == nil {
+			t.Errorf("only %s present: LoadOrCreate succeeded", keep)
+		}
+		after, _ := os.ReadFile(filepath.Join(dir, keep))
+		if !bytes.Equal(before, after) {
+			t.Errorf("only %s present: it was rewritten", keep)
+		}
+	}
+}
+
+// Two processes renewing the serving pair at once can leave one's
+// certificate beside the other's key. That must heal on the next start,
+// not stop serve from starting.
+func TestAMismatchedServerPairIsReissued(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tls")
+	if _, _, err := LoadOrCreate(dir, []string{"127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "tls")
+	if _, _, err := LoadOrCreate(other, []string{"127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	k, _ := os.ReadFile(filepath.Join(other, "server.key"))
+	if err := os.WriteFile(filepath.Join(dir, "server.key"), k, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cert, ca, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("a mismatched pair stopped LoadOrCreate: %v", err)
+	}
+	if err := verify(t, ca, cert.Certificate[0], "127.0.0.1"); err != nil {
+		t.Error(err)
 	}
 }

@@ -4,6 +4,15 @@
 // it would break every session at once. The serving certificate is
 // reissued whenever it no longer covers the configured hosts or is within
 // 30 days of expiry.
+//
+// On a first run `serve` and `session new` may both find no CA. Creation
+// is therefore claimed and published with hard links, which never replace
+// an existing file: the process whose link to ca.key succeeds owns the CA,
+// and only it then links ca.crt. ca.crt existing is the commit mark -- a
+// reader that finds ca.key alone waits for the owner to finish, and a
+// process that loses the claim reads the winner's CA instead of its own.
+// The serving pair is written key first, then certificate, each by
+// temp-file-and-rename, and a pair that does not match is reissued.
 package tlsutil
 
 import (
@@ -42,8 +51,11 @@ func LoadOrCreate(dir string, hosts []string) (tls.Certificate, []byte, error) {
 	}
 	certPEM, keyPEM, err := read(dir, "server")
 	if err == nil && usable(certPEM, ca, hosts) {
-		pair, err := tls.X509KeyPair(certPEM, keyPEM)
-		return pair, caPEM, err
+		// Two processes renewing at once can leave one's certificate
+		// beside the other's key; that is reissued, not fatal.
+		if pair, err := tls.X509KeyPair(certPEM, keyPEM); err == nil {
+			return pair, caPEM, nil
+		}
 	}
 	certPEM, keyPEM, err = issue(ca, caKey, hosts)
 	if err != nil {
@@ -56,15 +68,68 @@ func LoadOrCreate(dir string, hosts []string) (tls.Certificate, []byte, error) {
 	return pair, caPEM, err
 }
 
+// caWait bounds how long a caller waits for another process that has
+// claimed the CA to publish its certificate. A variable so a test of the
+// crashed-owner case need not wait the full time.
+var caWait = 5 * time.Second
+
+var (
+	errNoCA         = errors.New("no CA yet")
+	errCAInProgress = errors.New("CA being created")
+)
+
 func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
-	certPEM, keyPEM, err := read(dir, "ca")
-	if err == nil {
-		cert, key, err := parse(certPEM, keyPEM)
-		return cert, key, certPEM, err
+	deadline := time.Now().Add(caWait)
+	for {
+		certPEM, keyPEM, err := readCA(dir)
+		switch {
+		case err == nil:
+			cert, key, err := parse(certPEM, keyPEM)
+			return cert, key, certPEM, err
+		case errors.Is(err, errNoCA):
+			cert, key, certPEM, err := createCA(dir)
+			if err != nil || cert != nil {
+				return cert, key, certPEM, err
+			}
+			// Another process claimed the CA first; read theirs.
+		case errors.Is(err, errCAInProgress):
+			if time.Now().After(deadline) {
+				return nil, nil, nil, fmt.Errorf("%s exists without ca.crt: a CA was being created and never finished; remove %[1]s to create a new CA", filepath.Join(dir, "ca.key"))
+			}
+			time.Sleep(20 * time.Millisecond)
+		default:
+			return nil, nil, nil, err
+		}
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, nil, err
+}
+
+// readCA tells a finished CA from none, from one still being created.
+// A certificate without its key is never "none": creating a new CA over
+// it would silently break every kubeconfig that embeds the old one.
+func readCA(dir string) ([]byte, []byte, error) {
+	certPEM, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if errors.Is(err, os.ErrNotExist) {
+		if _, kerr := os.Stat(filepath.Join(dir, "ca.key")); kerr == nil {
+			return nil, nil, errCAInProgress
+		} else if errors.Is(kerr, os.ErrNotExist) {
+			return nil, nil, errNoCA
+		} else {
+			return nil, nil, kerr
+		}
 	}
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, "ca.key"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, fmt.Errorf("%s exists without ca.key; restore the key, or remove ca.crt to create a new CA (every session kubeconfig will need reissuing)", filepath.Join(dir, "ca.crt"))
+	}
+	return certPEM, keyPEM, err
+}
+
+// createCA returns a nil certificate and no error when another process
+// claimed the CA first.
+func createCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, err
@@ -83,11 +148,30 @@ func loadOrCreateCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, e
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	certPEM, keyPEM, err = encode(der, key)
+	certPEM, keyPEM, err := encode(der, key)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := write(dir, "ca", certPEM, keyPEM); err != nil {
+	tmpKey, err := temp(dir, "ca.key", keyPEM, 0o600)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer os.Remove(tmpKey)
+	tmpCrt, err := temp(dir, "ca.crt", certPEM, 0o644)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer os.Remove(tmpCrt)
+	// The claim: link fails if ca.key exists, where rename would replace it.
+	if err := os.Link(tmpKey, filepath.Join(dir, "ca.key")); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, nil, nil, nil
+		}
+		return nil, nil, nil, err
+	}
+	// The publish. Only the claim's owner gets here, so ca.crt cannot
+	// exist unless someone put it there by hand -- and then it is kept.
+	if err := os.Link(tmpCrt, filepath.Join(dir, "ca.crt")); err != nil {
 		return nil, nil, nil, err
 	}
 	cert, _ := x509.ParseCertificate(der)
@@ -166,7 +250,15 @@ func parse(certPEM, keyPEM []byte) (*x509.Certificate, *ecdsa.PrivateKey, error)
 		return nil, nil, err
 	}
 	key, err := x509.ParseECPrivateKey(kb.Bytes)
-	return cert, key, err
+	if err != nil {
+		return nil, nil, err
+	}
+	// A CA key that does not sign for the CA certificate would issue
+	// serving certificates no kubeconfig trusts.
+	if !key.PublicKey.Equal(cert.PublicKey) {
+		return nil, nil, errors.New("CA key does not match the CA certificate")
+	}
+	return cert, key, nil
 }
 
 func read(dir, name string) ([]byte, []byte, error) {
@@ -178,9 +270,47 @@ func read(dir, name string) ([]byte, []byte, error) {
 	return c, k, err
 }
 
+// write replaces the pair one file at a time, each atomically, so a reader
+// never sees a half-written file. Key before certificate: a reader that
+// catches the moment between sees a mismatch, which LoadOrCreate reissues.
 func write(dir, name string, certPEM, keyPEM []byte) error {
-	if err := os.WriteFile(filepath.Join(dir, name+".key"), keyPEM, 0o600); err != nil {
-		return err
+	for _, f := range []struct {
+		ext  string
+		data []byte
+		mode os.FileMode
+	}{{".key", keyPEM, 0o600}, {".crt", certPEM, 0o644}} {
+		tmp, err := temp(dir, name+f.ext, f.data, f.mode)
+		if err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, filepath.Join(dir, name+f.ext)); err != nil {
+			os.Remove(tmp)
+			return err
+		}
 	}
-	return os.WriteFile(filepath.Join(dir, name+".crt"), certPEM, 0o644)
+	return nil
+}
+
+// temp writes data to a new hidden file in dir, synced so a link or rename
+// of it never publishes an empty file after a crash, and returns its path.
+func temp(dir, name string, data []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, "."+name+"-*")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }

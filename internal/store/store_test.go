@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -100,5 +102,80 @@ func TestReopenKeepsDataAndMigratesOnce(t *testing.T) {
 	defer s2.Close()
 	if _, err := s2.SessionByTokenHash(ctx, []byte("h1")); err != nil {
 		t.Errorf("after reopen: %v", err)
+	}
+}
+
+// A first run can open the database from two processes at once -- `serve`
+// started in the background and `session new` straight after. Without an
+// immediate transaction around the migration, one of them failed with
+// SQLITE_BUSY, or both tried to create the same table.
+func TestConcurrentFirstOpenMigratesOnce(t *testing.T) {
+	const openers = 8
+	for round := 0; round < 10; round++ {
+		p := filepath.Join(t.TempDir(), "blastgate.db")
+		errs := make(chan error, openers)
+		var start sync.WaitGroup
+		start.Add(1)
+		for i := 0; i < openers; i++ {
+			go func() {
+				start.Wait()
+				s, err := Open(p)
+				if err == nil {
+					err = s.Close()
+				}
+				errs <- err
+			}()
+		}
+		start.Done()
+		for i := 0; i < openers; i++ {
+			if err := <-errs; err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		s, err := Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rows, max int
+		if err := s.db.QueryRow(`SELECT COUNT(*), MAX(version) FROM schema_version`).Scan(&rows, &max); err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+		if rows != len(migrations) || max != len(migrations) {
+			t.Fatalf("round %d: schema_version has %d rows, max %d; want %d", round, rows, max, len(migrations))
+		}
+	}
+}
+
+// Token hashes are not tokens, but the database is nobody else's to read,
+// and in WAL mode most recent writes live in -wal until a checkpoint.
+// SQLite gives -wal and -shm the database file's mode, so a database
+// created group-readable leaked through them even after it was chmodded.
+func TestDatabaseFilesArePrivate(t *testing.T) {
+	s, p := open(t)
+	if err := s.CreateSession(context.Background(), Session{ID: "s1", Human: "a", Agent: "b", Created: t0, Expires: t0.Add(time.Hour)}, []byte("h")); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{p, p + "-wal", p + "-shm"} {
+		fi, err := os.Stat(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := fi.Mode().Perm(); m&0o077 != 0 {
+			t.Errorf("%s has mode %v; want no group or world access", filepath.Base(f), m)
+		}
+	}
+}
+
+// The retry around the migration assumes every connection waits for a
+// lock rather than failing at once; a DSN typo would silently drop that.
+func TestConnectionsWaitForLocks(t *testing.T) {
+	s, _ := open(t)
+	var ms int
+	if err := s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&ms); err != nil {
+		t.Fatal(err)
+	}
+	if ms != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", ms)
 	}
 }

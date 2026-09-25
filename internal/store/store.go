@@ -13,7 +13,8 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -44,7 +45,24 @@ func Open(path string) (*Store, error) {
 	if strings.ContainsAny(path, "?#") {
 		return nil, fmt.Errorf("database path %q may not contain '?' or '#'", path)
 	}
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	// Token hashes are not tokens, but the file is still nobody else's to
+	// read. It is created private before SQLite opens it because SQLite
+	// gives the -wal and -shm files the database's mode: a database left
+	// to the umask and chmodded afterwards kept group-readable -wal and
+	// -shm files, and in WAL mode recent writes live in -wal.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, err
+	}
+	// busy_timeout comes first so it already applies to the journal_mode
+	// switch, which needs a lock. _txlock=immediate takes the write lock
+	// at BEGIN: a deferred transaction that reads and then writes gets
+	// SQLITE_BUSY at once in WAL mode, without waiting at all.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -54,42 +72,68 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrating %s: %w", path, err)
 	}
-	// Token hashes are not tokens, but the file is still nobody else's to read.
-	if err := os.Chmod(path, 0o600); err != nil {
-		db.Close()
-		return nil, err
+	// An older build created the database with the umask's mode, and its
+	// -wal and -shm with it; they are only recreated once every connection
+	// closes, so they are corrected here too.
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// migrateAttempts bounds the retry around a migration that found the
+// database busy. busy_timeout already waits up to 5s for a lock; the retry
+// covers the moments it does not apply, such as two processes switching a
+// brand-new file to WAL at once.
+const migrateAttempts = 10
+
 func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+	var err error
+	for i := 0; i < migrateAttempts; i++ {
+		if err = s.migrateOnce(ctx); err == nil || !isBusy(err) {
+			return err
+		}
+		time.Sleep(time.Duration(i+1) * 20 * time.Millisecond)
+	}
+	return err
+}
+
+// migrateOnce runs every pending migration in one immediate transaction.
+// The schema version is read inside it, after the write lock is held: on a
+// first run `serve` and `session new` can open the database together, and
+// a version read before the lock let both apply migration 1.
+func (s *Store) migrateOnce(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
 		return err
 	}
 	var v int
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v); err != nil {
 		return err
 	}
 	for i := v; i < len(migrations); i++ {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("migration %d: %w", i+1, err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, i+1); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
+}
+
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 func ms(t time.Time) int64 { return t.UnixMilli() }
