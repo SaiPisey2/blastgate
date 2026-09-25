@@ -120,6 +120,12 @@ type UISession struct {
 	ID                             string
 	ApproverID, ApproverName, CSRF string
 	Created, Expires, Revoked      time.Time
+	// ApproverRevoked is the approver's own revocation time, read by
+	// UISessionByHash. RevokeApprover sweeps the approver's sessions, but
+	// a login that read the approver as live just before that sweep and
+	// inserted its session just after leaves a live row under a revoked
+	// approver; only checking this field as well closes that gap.
+	ApproverRevoked time.Time
 }
 
 // CreateUISession inserts a new browser session under an approver. u.ID
@@ -133,19 +139,20 @@ func (s *Store) CreateUISession(ctx context.Context, u UISession, idHash []byte)
 }
 
 // UISessionByHash looks a session up by its cookie hash and joins the
-// approver's current name, so a caller rendering "signed in as alice"
-// never has to make a second query. Like SessionByTokenHash, it returns a
+// approver's current name and revocation time, so a caller rendering
+// "signed in as alice", or refusing a revoked approver, never has to make
+// a second query. Like SessionByTokenHash, it returns a
 // revoked row rather than hiding it: the caller (session middleware)
 // decides what a non-zero Revoked means.
 func (s *Store) UISessionByHash(ctx context.Context, h []byte) (UISession, error) {
 	var u UISession
 	var created, expires int64
-	var revoked sql.NullInt64
+	var revoked, approverRevoked sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT ui_sessions.approver_id, approvers.name, ui_sessions.csrf, ui_sessions.created_at, ui_sessions.expires_at, ui_sessions.revoked_at
+		`SELECT ui_sessions.approver_id, approvers.name, ui_sessions.csrf, ui_sessions.created_at, ui_sessions.expires_at, ui_sessions.revoked_at, approvers.revoked_at
 		 FROM ui_sessions JOIN approvers ON approvers.id = ui_sessions.approver_id
 		 WHERE ui_sessions.id_hash = ?`, h).
-		Scan(&u.ApproverID, &u.ApproverName, &u.CSRF, &created, &expires, &revoked)
+		Scan(&u.ApproverID, &u.ApproverName, &u.CSRF, &created, &expires, &revoked, &approverRevoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UISession{}, ErrNotFound
 	}
@@ -155,6 +162,7 @@ func (s *Store) UISessionByHash(ctx context.Context, h []byte) (UISession, error
 	u.Created = time.UnixMilli(created).UTC()
 	u.Expires = time.UnixMilli(expires).UTC()
 	u.Revoked = fromMS(revoked)
+	u.ApproverRevoked = fromMS(approverRevoked)
 	return u, nil
 }
 

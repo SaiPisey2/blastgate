@@ -45,6 +45,9 @@ func TestRevokingAnApproverRevokesItsSessions(t *testing.T) {
 	if !got.Revoked.Equal(at) {
 		t.Errorf("session revoked = %v, want %v", got.Revoked, at)
 	}
+	if !got.ApproverRevoked.Equal(at) {
+		t.Errorf("approver revoked = %v, want %v", got.ApproverRevoked, at)
+	}
 	if err := s.RevokeApprover(ctx, "ghost", at); !errors.Is(err, ErrNotFound) {
 		t.Errorf("revoking a missing approver: %v", err)
 	}
@@ -64,7 +67,7 @@ func TestUISessionJoinsApproverName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ApproverID != "a1" || got.ApproverName != "alice" || got.CSRF != "csrf1" || !got.Expires.Equal(u.Expires) || !got.Revoked.IsZero() {
+	if got.ApproverID != "a1" || got.ApproverName != "alice" || got.CSRF != "csrf1" || !got.Expires.Equal(u.Expires) || !got.Revoked.IsZero() || !got.ApproverRevoked.IsZero() {
 		t.Errorf("got %+v", got)
 	}
 	if err := s.RevokeUISession(ctx, []byte("sh1"), t0.Add(time.Hour)); err != nil {
