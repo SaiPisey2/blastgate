@@ -30,8 +30,11 @@ import (
 type fakeAuth struct{}
 
 func (fakeAuth) Authenticate(r *http.Request) (store.Session, error) {
-	if r.Header.Get("Authorization") == "Bearer bg_good" {
+	switch r.Header.Get("Authorization") {
+	case "Bearer bg_good":
 		return store.Session{ID: "sess-1", Human: "alice", Agent: "coding-agent"}, nil
+	case "Bearer bg_nohuman":
+		return store.Session{ID: "sess-2", Agent: "coding-agent"}, nil
 	}
 	return store.Session{}, session.ErrUnauthenticated
 }
@@ -237,7 +240,7 @@ func TestStreamingResponsesAreFlushed(t *testing.T) {
 
 func TestUpgradeIsPassedThrough(t *testing.T) {
 	var proto int
-	px, _ := harness(t, func(w http.ResponseWriter, r *http.Request) {
+	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {
 		proto = r.ProtoMajor
 		if r.Header.Get("Upgrade") != "SPDY/3.1" {
 			http.Error(w, "no upgrade", 400)
@@ -278,6 +281,13 @@ func TestUpgradeIsPassedThrough(t *testing.T) {
 	}
 	if proto != 1 {
 		t.Errorf("upgrade reached the upstream over HTTP/%d", proto)
+	}
+	// The 101 goes to the hijacked connection, not through WriteHeader;
+	// the log once called every exec and port-forward a 200.
+	conn.Close()
+	req := line(waitFor(t, logs, `"msg":"request"`), `"msg":"request"`)
+	if !strings.Contains(req, `"status":101`) {
+		t.Errorf("an upgraded request was not logged as 101:\n%s", req)
 	}
 }
 
@@ -508,5 +518,54 @@ func TestRefusalsCarryTheirMessageAsAWarning(t *testing.T) {
 		if len(errs) > 0 || len(ws) != 1 || ws[0].Code != 299 || ws[0].Text != st.Message {
 			t.Errorf("%s: warnings %+v (errors %v), want one 299 carrying %q", name, ws, errs, st.Message)
 		}
+	}
+}
+
+// A refused token is logged -- guessing, or an agent still using a revoked
+// session, must be visible -- but the token itself never is, nor the query.
+func TestUnauthenticatedRequestsAreLoggedWithoutTheToken(t *testing.T) {
+	px, logs := harness(t, func(http.ResponseWriter, *http.Request) {})
+	res := get(t, px.URL+"/api/v1/namespaces/demo/pods?labelSelector=secret-query", "bg_stolen-token-value", nil)
+	res.Body.Close()
+	if res.StatusCode != 401 {
+		t.Fatalf("status %d, want 401", res.StatusCode)
+	}
+	l := line(waitFor(t, logs, `"msg":"unauthenticated"`), `"msg":"unauthenticated"`)
+	for _, want := range []string{`"method":"GET"`, `"path":"/api/v1/namespaces/demo/pods"`, `"remote":"127.0.0.1:`} {
+		if !strings.Contains(l, want) {
+			t.Errorf("unauthenticated line lacks %s:\n%s", want, l)
+		}
+	}
+	for _, leak := range []string{"stolen-token-value", "Bearer", "secret-query"} {
+		if strings.Contains(logs.String(), leak) {
+			t.Errorf("log contains %q:\n%s", leak, logs.String())
+		}
+	}
+}
+
+func TestSessionLookupFailureNamesTheRequest(t *testing.T) {
+	px, logs := harnessWith(t, brokenAuth{}, "", func(http.ResponseWriter, *http.Request) {})
+	get(t, px.URL+"/api/v1/pods?watch=1", "bg_good", nil).Body.Close()
+	l := line(waitFor(t, logs, `"msg":"session lookup failed"`), `"msg":"session lookup failed"`)
+	if !strings.Contains(l, `"method":"GET"`) || !strings.Contains(l, `"path":"/api/v1/pods"`) || strings.Contains(l, "watch=1") {
+		t.Errorf("lookup failure line:\n%s", l)
+	}
+}
+
+// An empty Impersonate-User is not impersonation: the API server would
+// act as blastgate's own service account. Whatever produced such a
+// session, it must never be forwarded.
+func TestASessionWithNoHumanIsNeverForwarded(t *testing.T) {
+	called := false
+	px, _ := harness(t, func(http.ResponseWriter, *http.Request) { called = true })
+	res := get(t, px.URL+"/api", "bg_nohuman", nil)
+	if res.StatusCode != 503 {
+		t.Errorf("status %d, want 503", res.StatusCode)
+	}
+	if st := status(t, res); st.Reason != metav1.StatusReasonServiceUnavailable {
+		t.Errorf("reason = %q", st.Reason)
+	}
+	if called {
+		t.Error("a session with no human reached the upstream")
 	}
 }

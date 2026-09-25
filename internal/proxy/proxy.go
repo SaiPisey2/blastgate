@@ -5,10 +5,12 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"strings"
@@ -99,11 +101,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s, err := p.auth.Authenticate(r)
 	if err != nil {
 		if errors.Is(err, session.ErrUnauthenticated) {
+			// Refused tokens are logged so guessing or a leaked, revoked
+			// token shows up. Never the token or the Authorization header,
+			// and the path without its query, like every other line.
+			p.log.Warn("unauthenticated", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 			WriteStatus(w, http.StatusUnauthorized, metav1.StatusReasonUnauthorized, "Unauthorized")
 			return
 		}
-		p.log.Error("session lookup failed", "err", err.Error())
+		p.log.Error("session lookup failed", "method", r.Method, "path", r.URL.Path, "err", err.Error())
 		WriteStatus(w, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "blastgate: session lookup failed")
+		return
+	}
+	if s.Human == "" {
+		// An empty Impersonate-User is no impersonation at all: the API
+		// server would act as blastgate's own service account. Session
+		// creation refuses an empty human; this holds even for a row that
+		// reached the store some other way.
+		p.log.Error("session has no human", "session", s.ID, "method", r.Method, "path", r.URL.Path)
+		WriteStatus(w, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "blastgate: the session names no human to act as")
 		return
 	}
 	if k, ok := impersonation(r); ok {
@@ -215,12 +230,23 @@ func isUpgrade(h http.Header) bool {
 }
 
 // recorder notes the status for the log. Unwrap lets
-// http.ResponseController reach the real writer's Flush and Hijack, which
-// ReverseProxy needs for streaming and for upgrades.
+// http.ResponseController reach the real writer's Flush, which
+// ReverseProxy needs for streaming.
 type recorder struct {
 	http.ResponseWriter
 	status int
 	wrote  bool
+}
+
+// Hijack is how ReverseProxy completes an upgrade: it writes the 101 to
+// the raw connection, never through WriteHeader, so without this every
+// exec, attach and port-forward was logged as a 200.
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, brw, err := http.NewResponseController(r.ResponseWriter).Hijack()
+	if err == nil && !r.wrote {
+		r.status, r.wrote = http.StatusSwitchingProtocols, true
+	}
+	return conn, brw, err
 }
 
 func (r *recorder) WriteHeader(code int) {

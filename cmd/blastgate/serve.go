@@ -52,8 +52,14 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: watches, logs -f and exec sessions are meant
 		// to outlive any fixed deadline.
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-		ErrorLog:  slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+		//
+		// IdleTimeout closes only a keep-alive connection waiting for its
+		// next request: a streaming response is not idle, and a hijacked
+		// exec or port-forward is no longer the server's. Without it an
+		// idle client holds its connection and goroutine forever.
+		IdleTimeout: 120 * time.Second,
+		TLSConfig:   &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		ErrorLog:    slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
