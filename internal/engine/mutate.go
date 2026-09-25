@@ -388,6 +388,46 @@ func (e *Engine) request(ctx context.Context, a normalize.Action, method string,
 	return r, nil
 }
 
+// Before returns the raw JSON of a's live object, read impersonated as the
+// session's human -- the same object assessMutation's dry-run compared
+// against, so a snapshot and a scored "before" never disagree. It answers
+// (nil, nil) on 404: there is nothing to restore, not a failure to report.
+// Any other non-2xx status, an unsafe path, or no human to impersonate is
+// an error -- the caller (snapshot.Taker) treats a failed snapshot as a
+// reason to refuse forwarding, and a nil result mistaken for "nothing
+// there" would forward a write with no way back.
+func (e *Engine) Before(ctx context.Context, a normalize.Action) ([]byte, error) {
+	if a.Principal.Human == "" {
+		// Without Impersonate-User this would read as blastgate's own
+		// service account, not the human whose write is about to be
+		// forwarded -- the same reason assessMutation refuses it.
+		return nil, errors.New("no human to read the live object as")
+	}
+	r, err := e.request(ctx, a, http.MethodGet, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := e.httpDo(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBody {
+		return nil, errors.New("response larger than 3 MiB")
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("live object read returned %d", resp.StatusCode)
+	}
+	return data, nil
+}
+
 // fetch sends one request and decodes a 2xx answer. A non-2xx status comes
 // back with a nil object and no error; the caller decides what it means.
 func (e *Engine) fetch(ctx context.Context, a normalize.Action, method string, dryRun bool, body []byte) (map[string]any, int, error) {
