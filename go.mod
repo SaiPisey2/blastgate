@@ -3,6 +3,7 @@ module github.com/SaiPisey2/blastgate
 go 1.27.1
 
 require (
+	github.com/SaiPisey2/sounding v1.2.0
 	golang.org/x/net v0.57.0
 	k8s.io/apimachinery v0.37.1
 	k8s.io/apiserver v0.37.1

@@ -20,6 +20,10 @@ type Upstream struct {
 	URL     *url.URL
 	Normal  http.RoundTripper
 	Upgrade http.RoundTripper
+	// Config is what the engine builds its read-only scoring clients from.
+	// It carries only the service account's credential, never a human's,
+	// so scoring reads what the service account may read and writes nothing.
+	Config *rest.Config
 }
 
 func Load(c config.Config) (*Upstream, error) {
@@ -69,5 +73,5 @@ func FromConfig(cfg *rest.Config) (*Upstream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Upstream{URL: u, Normal: normal, Upgrade: upgrade}, nil
+	return &Upstream{URL: u, Normal: normal, Upgrade: upgrade, Config: cfg}, nil
 }
