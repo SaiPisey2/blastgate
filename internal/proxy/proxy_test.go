@@ -3,8 +3,10 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,7 +37,11 @@ func (fakeAuth) Authenticate(r *http.Request) (store.Session, error) {
 
 // harness returns a proxy server in front of an h2-capable TLS upstream
 // running h, plus the log the proxy writes.
-func harness(t *testing.T, h http.HandlerFunc) (*httptest.Server, *bytes.Buffer) {
+func harness(t *testing.T, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
+	return harnessWith(t, fakeAuth{}, h)
+}
+
+func harnessWith(t *testing.T, auth Authenticator, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
 	t.Helper()
 	up := httptest.NewUnstartedServer(h)
 	up.EnableHTTP2 = true
@@ -45,10 +52,54 @@ func harness(t *testing.T, h http.HandlerFunc) (*httptest.Server, *bytes.Buffer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var logs bytes.Buffer
-	px := httptest.NewServer(New(fakeAuth{}, u, slog.New(slog.NewJSONHandler(&logs, nil))))
+	logs := &syncBuffer{}
+	px := httptest.NewServer(New(auth, u, slog.New(slog.NewJSONHandler(logs, nil))))
 	t.Cleanup(px.Close)
-	return px, &logs
+	return px, logs
+}
+
+// syncBuffer is the proxy's log sink. Some tests read it while a handler
+// goroutine may still be writing, after the client has gone away.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitFor polls the log until it holds want, because the lines tested here
+// are written after the client has already stopped listening.
+func waitFor(t *testing.T, logs *syncBuffer, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := logs.String(); strings.Contains(s, want) {
+			return s
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("log never contained %s:\n%s", want, logs.String())
+	return ""
+}
+
+// line returns the first log line containing msg.
+func line(logs, msg string) string {
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, msg) {
+			return l
+		}
+	}
+	return ""
 }
 
 func get(t *testing.T, url, token string, hdr map[string]string) *http.Response {
@@ -230,14 +281,24 @@ func TestUpgradeIsPassedThrough(t *testing.T) {
 func TestUpstreamFailureIsAStatus(t *testing.T) {
 	// ErrAbortHandler resets the stream under both HTTP/1.1 and HTTP/2;
 	// hijacking would not work here, since the normal transport speaks h2.
-	px, _ := harness(t, func(w http.ResponseWriter, r *http.Request) {
+	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	})
-	res := get(t, px.URL+"/api", "bg_good", nil)
+	res := get(t, px.URL+"/api/v1/namespaces/demo/pods/web/exec?command=SECRET", "bg_good", nil)
 	if res.StatusCode != 502 {
 		t.Errorf("status %d, want 502", res.StatusCode)
 	}
 	status(t, res)
+	all := waitFor(t, logs, `"msg":"request"`)
+	if strings.Contains(all, "SECRET") || strings.Contains(all, "command=") {
+		t.Errorf("an upstream failure logged the query string:\n%s", all)
+	}
+	errLine := line(all, `"msg":"upstream error"`)
+	for _, want := range []string{`"session":"sess-1"`, `"human":"alice"`, `"agent":"coding-agent"`, `"method":"GET"`, `"path":"/api/v1/namespaces/demo/pods/web/exec"`} {
+		if !strings.Contains(errLine, want) {
+			t.Errorf("upstream error line lacks %s:\n%s", want, all)
+		}
+	}
 }
 
 func TestLogsCarryNoTokenAndNoQuery(t *testing.T) {
@@ -251,5 +312,156 @@ func TestLogsCarryNoTokenAndNoQuery(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"human":"alice"`) || !strings.Contains(logs.String(), "/exec") {
 		t.Errorf("log lacks who and what:\n%s", logs.String())
+	}
+}
+
+// http.Server runs ReverseProxy, which panics with ErrAbortHandler when
+// the client leaves mid-stream. A log call placed after the proxy is
+// skipped by that panic, and every watch or logs -f a client stops would
+// vanish from the record.
+func TestStreamEndedByClientIsStillLogged(t *testing.T) {
+	release := make(chan struct{})
+	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"type":"ADDED"}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	conn, err := net.Dial("tcp", strings.TrimPrefix(px.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(conn, "GET /api/v1/pods?watch=true HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer bg_good\r\n\r\n")
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, err := bufio.NewReader(res.Body).ReadString('\n'); err != nil || !strings.Contains(l, "ADDED") {
+		t.Fatalf("first event = %q, %v", l, err)
+	}
+	conn.Close()
+	req := line(waitFor(t, logs, `"msg":"request"`), `"msg":"request"`)
+	for _, want := range []string{`"human":"alice"`, `"aborted":true`} {
+		if !strings.Contains(req, want) {
+			t.Errorf("request line lacks %s: %s", want, req)
+		}
+	}
+}
+
+// A client that gives up before the response says nothing about whether
+// the API server acted: a create may already be committed. Recording it
+// as a 502 would claim a failure that may not have happened.
+func TestClientCancelIsOutcomeUnknown(t *testing.T) {
+	arrived, release := make(chan struct{}), make(chan struct{})
+	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", px.URL+"/api/v1/namespaces/demo/pods", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	go func() {
+		<-arrived
+		cancel()
+	}()
+	if res, err := http.DefaultClient.Do(req); err == nil {
+		res.Body.Close()
+		t.Fatal("the request completed; the cancel did not happen")
+	}
+	all := waitFor(t, logs, `"msg":"request"`)
+	if strings.Contains(all, `"msg":"upstream error"`) {
+		t.Errorf("a client cancel was logged as an upstream failure:\n%s", all)
+	}
+	for _, msg := range []string{`"msg":"client cancelled; outcome unknown"`, `"msg":"request"`} {
+		l := line(all, msg)
+		for _, want := range []string{`"session":"sess-1"`, `"human":"alice"`, `"agent":"coding-agent"`, `"method":"POST"`, "outcome unknown"} {
+			if !strings.Contains(l, want) {
+				t.Errorf("%s line lacks %s:\n%s", msg, want, all)
+			}
+		}
+	}
+	if strings.Contains(line(all, `"msg":"request"`), `"status":502`) {
+		t.Errorf("request line claims a 502:\n%s", all)
+	}
+}
+
+type brokenAuth struct{}
+
+func (brokenAuth) Authenticate(*http.Request) (store.Session, error) {
+	return store.Session{}, errors.New("database is locked")
+}
+
+// A store failure is not the caller's fault; 401 would tell kubectl to
+// re-authenticate with a token that is in fact valid.
+func TestSessionLookupFailureIsUnavailable(t *testing.T) {
+	called := false
+	px, _ := harnessWith(t, brokenAuth{}, func(http.ResponseWriter, *http.Request) { called = true })
+	res := get(t, px.URL+"/api", "bg_good", nil)
+	if res.StatusCode != 503 {
+		t.Errorf("status %d, want 503", res.StatusCode)
+	}
+	if st := status(t, res); st.Reason != metav1.StatusReasonServiceUnavailable {
+		t.Errorf("reason = %q", st.Reason)
+	}
+	if called {
+		t.Error("a request with no session reached the upstream")
+	}
+}
+
+func TestImpersonationRefusalIsAForbiddenStatusAndLogsNoValue(t *testing.T) {
+	px, logs := harness(t, func(http.ResponseWriter, *http.Request) {})
+	res := get(t, px.URL+"/api", "bg_good", map[string]string{"Impersonate-User": "system:admin"})
+	if res.StatusCode != 403 {
+		t.Errorf("status %d, want 403", res.StatusCode)
+	}
+	if st := status(t, res); st.Reason != metav1.StatusReasonForbidden {
+		t.Errorf("reason = %q", st.Reason)
+	}
+	all := waitFor(t, logs, `"msg":"refused client impersonation"`)
+	if strings.Contains(all, "system:admin") {
+		t.Errorf("the refusal logged the header's value:\n%s", all)
+	}
+}
+
+// A declared trailer is a header that arrives after the body, and
+// ReverseProxy forwards trailers. Checking only the headers would let an
+// impersonation header in at the end of a chunked request.
+func TestRejectsImpersonationDeclaredAsATrailer(t *testing.T) {
+	called := false
+	px, _ := harness(t, func(http.ResponseWriter, *http.Request) { called = true })
+	addr := strings.TrimPrefix(px.URL, "http://")
+	for _, req := range []string{
+		"Transfer-Encoding: chunked\r\nTrailer: Impersonate-User\r\n\r\n0\r\nImpersonate-User: system:admin\r\n\r\n",
+		"Transfer-Encoding: chunked\r\ntrailer: content-md5, impersonate-group\r\n\r\n0\r\nimpersonate-group: system:masters\r\n\r\n",
+		"Transfer-Encoding: chunked\r\nTrailer: X-REMOTE-USER\r\n\r\n0\r\n\r\n",
+		// Without chunking the server keeps Trailer as an ordinary header.
+		"Content-Length: 0\r\nTrailer: Impersonate-Uid\r\n\r\n",
+	} {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(conn, "POST /api HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer bg_good\r\nConnection: close\r\n%s", req)
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != 403 {
+			t.Errorf("%q: status %d, want 403", req, res.StatusCode)
+		}
+		res.Body.Close()
+		conn.Close()
+	}
+	if called {
+		t.Error("a request declaring an impersonation trailer reached the upstream")
 	}
 }
