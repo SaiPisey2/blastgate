@@ -16,6 +16,15 @@ import (
 	"github.com/SaiPisey2/blastgate/internal/upstream"
 )
 
+// Assessment is an action's impact plus the labels of the namespace it
+// touches, which policy reads.
+//
+// NamespaceLabels is nil when the labels are unknown: the lookup failed
+// (client, RBAC, timeout, not found), there is no namespace to look up, or
+// the action is a read and is never evaluated. Policy must hold a rule that
+// reads labels it does not have, because a failed lookup that looked like
+// "no labels" would let a production namespace pass as an ordinary one.
+// An empty, non-nil map means the namespace was read and has no labels.
 type Assessment struct {
 	Impact          Impact
 	NamespaceLabels map[string]string
@@ -31,11 +40,15 @@ type Engine struct {
 	// httpDo sends an impersonated request to the API server (dry-runs and
 	// "before" reads). A field for the same reason.
 	httpDo func(*http.Request) (*http.Response, error)
+	// labelsFn reads a namespace's labels. A field so tests can see which
+	// namespace is looked up, and whether one is, without a cluster.
+	labelsFn func(ctx context.Context, ns string) (map[string]string, error)
 }
 
 func New(up *upstream.Upstream, budget time.Duration) *Engine {
 	e := &Engine{up: up, budget: budget}
 	e.scoreFn = e.soundingScore
+	e.labelsFn = e.readNamespaceLabels
 	e.httpDo = func(r *http.Request) (*http.Response, error) { return up.Normal.RoundTrip(r) }
 	return e
 }
@@ -43,12 +56,21 @@ func New(up *upstream.Upstream, budget time.Duration) *Engine {
 // Assess scores a within the time budget. It never fails: anything it
 // cannot measure -- a refusal, an error, the budget running out -- comes
 // back as Unmeasured, which policy holds.
-func (e *Engine) Assess(ctx context.Context, a normalize.Action, body []byte) Assessment {
+func (e *Engine) Assess(parent context.Context, a normalize.Action, body []byte) Assessment {
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, e.budget)
+	ctx, cancel := context.WithTimeout(parent, e.budget)
 	defer cancel()
 	var i Impact
 	switch {
+	// The two cases below come before the read case on purpose: kubectl
+	// opens exec, attach and port-forward as a WebSocket GET, which
+	// normalises to verb "get", and a proxied GET can reach anything the
+	// pod or service serves. Letting IsRead see them first would pass an
+	// arbitrary command through as a measured READ.
+	case a.Subresource == "proxy":
+		i = Unmeasured("a proxied request cannot be measured")
+	case a.Resource == "pods" && (a.Subresource == "exec" || a.Subresource == "attach" || a.Subresource == "portforward"):
+		i = assessExec(a)
 	case a.IsRead():
 		i = Impact{Class: ClassRead, Measured: true, Undo: "none"}
 	case a.Verb == "delete" && a.Subresource == "":
@@ -59,8 +81,6 @@ func (e *Engine) Assess(ctx context.Context, a normalize.Action, body []byte) As
 		d := a
 		d.Verb, d.Subresource = "delete", ""
 		i = e.assessDelete(ctx, d)
-	case a.Resource == "pods" && (a.Subresource == "exec" || a.Subresource == "attach" || a.Subresource == "portforward"):
-		i = assessExec(a)
 	case a.Verb == "create" || a.Verb == "update" || a.Verb == "patch":
 		i = e.assessMutation(ctx, a, body)
 	default:
@@ -74,7 +94,12 @@ func (e *Engine) Assess(ctx context.Context, a normalize.Action, body []byte) As
 		i.Reason = "scoring exceeded the time budget"
 	}
 	i.Elapsed = time.Since(start)
-	return Assessment{Impact: i, NamespaceLabels: e.namespaceLabels(a.Namespace)}
+	if i.Class == ClassRead {
+		// Reads are never evaluated by policy, so their labels are not worth
+		// a request to the API server.
+		return Assessment{Impact: i}
+	}
+	return Assessment{Impact: i, NamespaceLabels: e.namespaceLabels(parent, a)}
 }
 
 // clients builds sounding's read-only clients from the service account's
@@ -89,22 +114,42 @@ func (e *Engine) clients() (*cluster.Clients, error) {
 	return cluster.NewForConfig(e.up.Config)
 }
 
-func (e *Engine) namespaceLabels(ns string) map[string]string {
-	if ns == "" || e.up == nil || e.up.Config == nil {
+// namespaceLabels returns the labels of the namespace a touches, or nil
+// when they are unknown (see Assessment).
+func (e *Engine) namespaceLabels(parent context.Context, a normalize.Action) map[string]string {
+	ns := a.Namespace
+	if a.Resource == "namespaces" && a.Group == "" && a.Subresource == "" {
+		// A namespace is cluster-scoped: its own name is the namespace whose
+		// labels matter. Without this, deleting a production namespace would
+		// be evaluated with no labels at all.
+		ns = a.Name
+	}
+	if ns == "" || e.labelsFn == nil {
+		return nil
+	}
+	// Bounded by the caller's context, so a request the client abandoned
+	// does not keep a lookup running; not by the score budget, which may
+	// already be spent.
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	l, err := e.labelsFn(ctx, ns)
+	if err != nil {
+		return nil
+	}
+	if l == nil {
 		return map[string]string{}
 	}
+	return l
+}
+
+func (e *Engine) readNamespaceLabels(ctx context.Context, ns string) (map[string]string, error) {
 	c, err := e.clients()
 	if err != nil {
-		return map[string]string{}
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	n, err := c.Typed.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
-	if err != nil || n.Labels == nil {
-		// Missing labels are an empty map, not an error: the default policy
-		// tests membership with "in", and a lookup failure must not make an
-		// ordinary namespace look like production or like anything else.
-		return map[string]string{}
+	if err != nil {
+		return nil, err
 	}
-	return n.Labels
+	return n.Labels, nil
 }

@@ -24,7 +24,7 @@ const (
 
 type Effect struct {
 	Kind        string `json:"kind"`
-	Object      string `json:"object"` // Kind/namespace/name
+	Object      string `json:"object"` // group/Kind/namespace/name; core objects omit the group
 	Explanation string `json:"explanation,omitempty"`
 }
 
@@ -43,8 +43,11 @@ type Impact struct {
 }
 
 // Unmeasured is the impact of anything this build could not measure. It is
-// TERMINAL -- the worst class -- so a policy, a replay or a person reading
-// the audit never mistakes "we did not look" for "nothing happens".
+// TERMINAL -- treated as the worst measured-destruction class, the one that
+// cannot be undone -- so a policy, a replay or a person reading the audit
+// never mistakes "we did not look" for "nothing happens". (sounding ranks
+// AUTHORITY above it, but that class says who gains power, not what is
+// lost; an unmeasured action is not claimed to grant anything.)
 func Unmeasured(reason string) Impact {
 	return Impact{Class: ClassTerminal, Measured: false, Reason: reason, Undo: "none"}
 }
@@ -63,7 +66,12 @@ func (i Impact) Digest() string {
 		if c.Effects[a].Object != c.Effects[b].Object {
 			return c.Effects[a].Object < c.Effects[b].Object
 		}
-		return c.Effects[a].Kind < c.Effects[b].Kind
+		if c.Effects[a].Kind != c.Effects[b].Kind {
+			return c.Effects[a].Kind < c.Effects[b].Kind
+		}
+		// Without this tie-break, two effects on one object with the same
+		// kind could sort either way and the same impact digest two ways.
+		return c.Effects[a].Explanation < c.Effects[b].Explanation
 	})
 	b, _ := json.Marshal(c)
 	sum := sha256.Sum256(b)
@@ -75,7 +83,12 @@ func (i Impact) Digest() string {
 // the agent can write to, and client messages carry no data blastgate did
 // not generate itself.
 func (i Impact) Summary() string {
-	emptied := 0
+	emptied, unknownFate := 0, 0
+	for _, ef := range i.Effects {
+		if ef.Kind == "unknown-data-fate" {
+			unknownFate++
+		}
+	}
 	for _, n := range i.EndpointsLeft {
 		if n == 0 {
 			emptied++
@@ -84,6 +97,11 @@ func (i Impact) Summary() string {
 	parts := []string{i.Class, plural(len(i.Effects), "object")}
 	if i.DataDestroyed > 0 {
 		parts = append(parts, plural(i.DataDestroyed, "volume")+" with data destroyed")
+	}
+	if unknownFate > 0 {
+		// A volume whose fate sounding could not determine may lose its
+		// data; saying nothing would read as "no data at risk".
+		parts = append(parts, plural(unknownFate, "volume")+" with unknown data fate")
 	}
 	if emptied > 0 {
 		parts = append(parts, plural(emptied, "service")+" left with no backends")

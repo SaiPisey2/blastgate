@@ -135,3 +135,153 @@ func TestDeleteCollectionIsUnmeasured(t *testing.T) {
 func actDelete(resource, ns, name string) normalize.Action {
 	return normalize.Action{Verb: "delete", Version: "v1", Resource: resource, Namespace: ns, Name: name}
 }
+
+func noScore(t *testing.T) func(context.Context, model.Action) (model.Finding, disruption.Report, error) {
+	return func(context.Context, model.Action) (model.Finding, disruption.Report, error) {
+		t.Fatal("scored an action that must not be")
+		return model.Finding{}, disruption.Report{}, nil
+	}
+}
+
+// kubectl opens exec, attach and port-forward as a WebSocket GET; a GET
+// must not reach the read case and pass an arbitrary command as READ.
+func TestExecAttachPortforwardAreUnmeasuredForAnyVerb(t *testing.T) {
+	e := &Engine{budget: time.Second, scoreFn: noScore(t)}
+	for _, sub := range []string{"exec", "attach", "portforward"} {
+		for _, verb := range []string{"get", "create"} {
+			a := actDelete("pods", "demo", "web-1")
+			a.Verb, a.Subresource = verb, sub
+			if i := e.Assess(context.Background(), a, nil).Impact; i.Measured || i.Class != ClassTerminal {
+				t.Errorf("%s pods/%s: %+v", verb, sub, i)
+			}
+		}
+	}
+}
+
+func TestProxyIsUnmeasuredForAnyVerb(t *testing.T) {
+	e := &Engine{budget: time.Second, scoreFn: noScore(t)}
+	for _, res := range []string{"pods", "services", "nodes"} {
+		for _, verb := range []string{"get", "create", "delete"} {
+			a := actDelete(res, "demo", "x")
+			a.Verb, a.Subresource = verb, "proxy"
+			if i := e.Assess(context.Background(), a, nil).Impact; i.Measured || !strings.Contains(i.Reason, "proxied") {
+				t.Errorf("%s %s/proxy: %+v", verb, res, i)
+			}
+		}
+	}
+}
+
+func terminalScore(context.Context, model.Action) (model.Finding, disruption.Report, error) {
+	return finding(model.ClassTerminal), disruption.Report{}, nil
+}
+
+func TestNamespaceDeleteLooksUpItsOwnName(t *testing.T) {
+	var looked []string
+	e := &Engine{budget: time.Second, scoreFn: terminalScore,
+		labelsFn: func(ctx context.Context, ns string) (map[string]string, error) {
+			if _, ok := ctx.Deadline(); !ok {
+				t.Error("label lookup has no deadline")
+			}
+			looked = append(looked, ns)
+			return map[string]string{"env": "prod"}, nil
+		}}
+	a := actDelete("namespaces", "", "payments")
+	got := e.Assess(context.Background(), a, nil)
+	if len(looked) != 1 || looked[0] != "payments" || got.NamespaceLabels["env"] != "prod" {
+		t.Errorf("looked up %v, labels %v", looked, got.NamespaceLabels)
+	}
+}
+
+func TestReadSkipsLabelLookup(t *testing.T) {
+	e := &Engine{budget: time.Second, scoreFn: noScore(t),
+		labelsFn: func(context.Context, string) (map[string]string, error) {
+			t.Fatal("a read looked up namespace labels")
+			return nil, nil
+		}}
+	a := actDelete("pods", "demo", "web-1")
+	a.Verb = "get"
+	if got := e.Assess(context.Background(), a, nil); got.NamespaceLabels != nil {
+		t.Errorf("read labels = %v", got.NamespaceLabels)
+	}
+}
+
+// A failed lookup must be nil (unknown), never an empty map that reads as
+// "this namespace has no labels"; an empty map is only a namespace that
+// was read and has none.
+func TestLabelLookupFailureIsNilAndNoLabelsIsEmpty(t *testing.T) {
+	e := &Engine{budget: time.Second, scoreFn: terminalScore,
+		labelsFn: func(context.Context, string) (map[string]string, error) {
+			return nil, errors.New("forbidden")
+		}}
+	if got := e.Assess(context.Background(), actDelete("pods", "demo", "web-1"), nil); got.NamespaceLabels != nil {
+		t.Errorf("failed lookup labels = %#v, want nil", got.NamespaceLabels)
+	}
+	e.labelsFn = func(context.Context, string) (map[string]string, error) { return nil, nil }
+	got := e.Assess(context.Background(), actDelete("pods", "demo", "web-1"), nil)
+	if got.NamespaceLabels == nil || len(got.NamespaceLabels) != 0 {
+		t.Errorf("unlabelled namespace labels = %#v, want empty non-nil", got.NamespaceLabels)
+	}
+}
+
+func TestSummaryCountsUnknownDataFate(t *testing.T) {
+	i := fromFinding(finding(model.ClassTerminal,
+		eff("unknown-data-fate", "PersistentVolumeClaim", "data"),
+		eff("unknown-data-fate", "PersistentVolume", "pv-2")), disruption.Report{})
+	if s := i.Summary(); !strings.Contains(s, "2 volumes with unknown data fate") || strings.Contains(s, "pv-2") {
+		t.Errorf("summary = %q", s)
+	}
+}
+
+func TestFromFindingUnknownClassIsUnmeasured(t *testing.T) {
+	i := fromFinding(finding(model.Class(99)), disruption.Report{})
+	if i.Measured || i.Class != ClassTerminal {
+		t.Errorf("impact = %+v", i)
+	}
+}
+
+func TestEffectObjectCarriesGroup(t *testing.T) {
+	d := eff("destroys", "Deployment", "web")
+	d.Object.Group = "apps"
+	i := fromFinding(finding(model.ClassReversible, d, eff("destroys", "Pod", "web-1")), disruption.Report{})
+	if i.Effects[0].Object != "apps/Deployment/demo/web" || i.Effects[1].Object != "Pod/demo/web-1" {
+		t.Errorf("objects = %q, %q", i.Effects[0].Object, i.Effects[1].Object)
+	}
+}
+
+func TestDigestTieBreaksOnExplanation(t *testing.T) {
+	a := Impact{Class: ClassTerminal, Measured: true,
+		Effects: []Effect{{"destroys", "Pod/demo/x", "one"}, {"destroys", "Pod/demo/x", "two"}}}
+	b := a
+	b.Effects = []Effect{{"destroys", "Pod/demo/x", "two"}, {"destroys", "Pod/demo/x", "one"}}
+	if a.Digest() != b.Digest() {
+		t.Error("order of same-object same-kind effects changed the digest")
+	}
+}
+
+// A scorer that ignores its context and comes back late with a measured
+// answer must not be believed: parts of the measurement may be stale.
+func TestMeasuredAfterDeadlineIsUnmeasured(t *testing.T) {
+	e := &Engine{budget: 20 * time.Millisecond, scoreFn: func(context.Context, model.Action) (model.Finding, disruption.Report, error) {
+		time.Sleep(100 * time.Millisecond)
+		return finding(model.ClassReversible, eff("destroys", "Pod", "web-1")), disruption.Report{}, nil
+	}}
+	i := e.Assess(context.Background(), actDelete("pods", "demo", "web-1"), nil).Impact
+	if i.Measured || i.Class != ClassTerminal || !strings.Contains(i.Reason, "budget") {
+		t.Errorf("impact = %+v", i)
+	}
+}
+
+func TestEvictionIsScoredAsDeleteOfThatPod(t *testing.T) {
+	var got model.Action
+	e := &Engine{budget: time.Second, scoreFn: func(_ context.Context, act model.Action) (model.Finding, disruption.Report, error) {
+		got = act
+		return finding(model.ClassReversible, eff("destroys", "Pod", "web-1")), disruption.Report{}, nil
+	}}
+	a := actDelete("pods", "demo", "web-1")
+	a.Verb, a.Subresource = "create", "eviction"
+	i := e.Assess(context.Background(), a, nil).Impact
+	want := model.Target{Version: "v1", Resource: "pods", Namespace: "demo", Name: "web-1"}
+	if got.Verb != "delete" || got.Target != want || !i.Measured || i.Class != ClassReversible {
+		t.Errorf("scored %+v, impact %+v", got, i)
+	}
+}

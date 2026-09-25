@@ -53,6 +53,13 @@ func (e *Engine) soundingScore(ctx context.Context, act model.Action) (model.Fin
 }
 
 func fromFinding(f model.Finding, r disruption.Report) Impact {
+	switch f.Class {
+	case model.ClassRead, model.ClassReversible, model.ClassCompensable, model.ClassTerminal, model.ClassAuthority:
+	default:
+		// A class this build does not know (a newer sounding) would reach
+		// policy as a string no rule matches. Unmeasured holds it instead.
+		return Unmeasured(fmt.Sprintf("sounding returned an unknown class %d", int(f.Class)))
+	}
 	i := Impact{Class: f.Class.String(), Measured: true, Undo: "objects"}
 	for _, ef := range f.Effects {
 		if ef.Kind == "destroys-data" {
@@ -60,7 +67,7 @@ func fromFinding(f model.Finding, r disruption.Report) Impact {
 		}
 		i.Effects = append(i.Effects, Effect{
 			Kind:        ef.Kind,
-			Object:      ef.Object.Kind + "/" + ef.Object.Namespace + "/" + ef.Object.Name,
+			Object:      objectRef(ef.Object),
 			Explanation: ef.Explanation,
 		})
 	}
@@ -72,4 +79,15 @@ func fromFinding(f model.Finding, r disruption.Report) Impact {
 	}
 	i.PDBViolations = r.Violated()
 	return i
+}
+
+// objectRef names an effect's object. The group is part of it because two
+// kinds of the same name in different groups (a CRD shadowing a built-in)
+// are different objects, and the digest must tell them apart.
+func objectRef(t model.Target) string {
+	ref := t.Kind + "/" + t.Namespace + "/" + t.Name
+	if t.Group != "" {
+		ref = t.Group + "/" + ref
+	}
+	return ref
 }
