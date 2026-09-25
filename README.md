@@ -51,8 +51,9 @@ blastgate never reads your default kubeconfig.
 
 `make fixture-up fixture-test` runs the real kubectl through blastgate against a kind
 cluster: get, watch, server-side apply, delete, logs and `logs -f`, exec with stdin
-over WebSocket and SPDY, and port-forward over both. Added latency on a list call:
-p50 **-73µs**, p95 **487µs** — noise-level, as expected for a local reverse proxy.
+over WebSocket and SPDY, and port-forward over both. On a list call against that
+cluster: direct p50 861µs, p95 1.530ms; through blastgate p50 1.455ms, p95 1.993ms.
+Added latency: p50 **594µs**, p95 **463µs**.
 
 ## License
 

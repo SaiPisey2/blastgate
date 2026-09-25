@@ -390,13 +390,19 @@ func timeLists(t *testing.T, kc string) []time.Duration {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Otherwise client-go's default client-side rate limiter (QPS 5, burst
+	// 10) throttles both legs to one request per 200ms after warm-up, and
+	// the test measures the throttle instead of the network.
+	cfg.QPS = -1
 	c, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	for i := 0; i < 10; i++ { // warm connections and caches
-		c.CoreV1().Pods("demo").List(ctx, metav1.ListOptions{})
+		if _, err := c.CoreV1().Pods("demo").List(ctx, metav1.ListOptions{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	out := make([]time.Duration, 0, 200)
 	for i := 0; i < 200; i++ {
