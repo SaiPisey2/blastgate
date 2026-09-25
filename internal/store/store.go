@@ -96,6 +96,39 @@ var migrations = []string{
 		created_at   INTEGER NOT NULL,
 		delivered_at INTEGER
 	);`,
+	`CREATE TABLE approvers (
+		id         TEXT PRIMARY KEY,
+		name       TEXT NOT NULL,
+		token_hash BLOB NOT NULL UNIQUE,
+		created_at INTEGER NOT NULL,
+		revoked_at INTEGER
+	);
+	CREATE UNIQUE INDEX approvers_live_name ON approvers(name) WHERE revoked_at IS NULL;
+	CREATE TABLE ui_sessions (
+		id_hash     BLOB PRIMARY KEY,
+		approver_id TEXT NOT NULL REFERENCES approvers(id),
+		csrf        TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		expires_at  INTEGER NOT NULL,
+		revoked_at  INTEGER
+	);
+	CREATE TABLE bypass (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		at          INTEGER NOT NULL,
+		user        TEXT NOT NULL,
+		groups_json BLOB NOT NULL,
+		verb        TEXT NOT NULL,
+		grp         TEXT NOT NULL,
+		resource    TEXT NOT NULL,
+		subresource TEXT NOT NULL,
+		namespace   TEXT NOT NULL,
+		name        TEXT NOT NULL,
+		uid         TEXT NOT NULL,
+		dry_run     INTEGER NOT NULL
+	);
+	CREATE INDEX bypass_at ON bypass(at);
+	CREATE TRIGGER bypass_no_update BEFORE UPDATE ON bypass BEGIN SELECT RAISE(ABORT, 'bypass is append-only'); END;
+	CREATE TRIGGER bypass_no_delete BEFORE DELETE ON bypass BEGIN SELECT RAISE(ABORT, 'bypass is append-only'); END;`,
 }
 
 func Open(path string) (*Store, error) {

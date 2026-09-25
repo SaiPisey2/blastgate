@@ -11,6 +11,10 @@ import (
 // field is stored, never derived, so the trail reads the same after the
 // policy or scorer that produced it has changed.
 type AuditRow struct {
+	// ID is the audit table's rowid: zero on a row not yet read back, since
+	// AppendAudit never learns it (the insert doesn't ask for it) and
+	// paging needs it as the cursor, not the row's content.
+	ID        int64
 	At        time.Time
 	Kind      string // "decision" | "result"
 	RequestID string
@@ -49,6 +53,10 @@ const auditCols = `at, kind, request_id, session_id, human, agent, source,
 	class, measured, rule, decision, approval_id,
 	status, outcome, latency_ms, snapshot`
 
+// auditSelectCols adds the rowid to auditCols for reads; inserts never use
+// it since `id` is autoincrement and not supplied by the caller.
+const auditSelectCols = `id, ` + auditCols
+
 // AppendAudit writes one row. There is no update path: the table's
 // UPDATE/DELETE triggers abort, so a correction is a new row, not an edit
 // of history.
@@ -73,7 +81,7 @@ func scanAudit(row interface{ Scan(...any) error }) (AuditRow, error) {
 	var r AuditRow
 	var at int64
 	var measured int
-	if err := row.Scan(&at, &r.Kind, &r.RequestID, &r.Session, &r.Human, &r.Agent, &r.Source,
+	if err := row.Scan(&r.ID, &at, &r.Kind, &r.RequestID, &r.Session, &r.Human, &r.Agent, &r.Source,
 		&r.Verb, &r.Group, &r.Resource, &r.Subresource, &r.Namespace, &r.Name,
 		&r.RequestDigest, &r.ActionJSON, &r.ImpactJSON, &r.LabelsJSON,
 		&r.Class, &measured, &r.Rule, &r.Decision, &r.ApprovalID,
@@ -89,7 +97,7 @@ func scanAudit(row interface{ Scan(...any) error }) (AuditRow, error) {
 // replay history in the order it happened, not the order sqlite happened
 // to store it. kind == "" returns every kind.
 func (s *Store) AuditSince(ctx context.Context, since time.Time, kind string) ([]AuditRow, error) {
-	q := `SELECT ` + auditCols + ` FROM audit WHERE at >= ?`
+	q := `SELECT ` + auditSelectCols + ` FROM audit WHERE at >= ?`
 	args := []any{ms(since)}
 	if kind != "" {
 		q += ` AND kind = ?`
