@@ -1,6 +1,7 @@
 // Command blastgate sits between AI agents and a Kubernetes API server.
-// This build forwards every request as the human who owns the agent's
-// session; scoring what a request would destroy comes next.
+// Every request is forwarded as the human who owns the agent's session;
+// every write is first measured, put to the policy, and allowed, refused,
+// or held until a human approves it.
 package main
 
 import (
@@ -18,9 +19,14 @@ var version = "dev"
 const usage = `usage: blastgate <command>
 
 commands:
-  serve     run the proxy
-  session   new | list | revoke
-  version   print the version`
+  serve       run the proxy
+  session     new | list | revoke
+  approvals   list approvals [--status pending]
+  approve     approve a held request: approve <id> --by <name>
+  deny        deny a held request: deny <id> --by <name>
+  replay      re-evaluate past decisions under a policy: replay --policy <file> [--since 168h]
+  audit       export [--since 24h]: the audit trail as JSON lines
+  version     print the version`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
@@ -44,6 +50,14 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 0
 	case "session":
 		return sessionCmd(args[1:], getenv, stdout, stderr)
+	case "approvals":
+		return approvalsCmd(args[1:], getenv, stdout, stderr)
+	case "approve", "deny":
+		return decideCmd(args[0], args[1:], getenv, stdout, stderr)
+	case "replay":
+		return replayCmd(args[1:], getenv, stdout, stderr)
+	case "audit":
+		return auditCmd(args[1:], getenv, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s\n", args[0], usage)
 		return 2

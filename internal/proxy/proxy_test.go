@@ -695,6 +695,47 @@ func TestBodyReachesDeciderAndUpstreamIntact(t *testing.T) {
 	}
 }
 
+// A chunked body (no Content-Length, as kubectl streams some requests) is
+// buffered whole: the decider scores every byte, and the upstream gets the
+// same bytes with their length declared, so nothing can arrive after the
+// decision that the decision did not see.
+func TestChunkedBodyReachesDeciderAndUpstreamIntact(t *testing.T) {
+	d := allowAll()
+	var got []byte
+	var gotLen int64
+	var gotTE []string
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		gotLen, gotTE = r.ContentLength, r.TransferEncoding
+	})
+	body := `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"settings"},"data":{"k":"` + strings.Repeat("v", 64<<10) + `"}}`
+	// MultiReader hides the length, so the client sends it chunked.
+	req, _ := http.NewRequest("POST", px.URL+"/api/v1/namespaces/demo/configmaps", io.MultiReader(strings.NewReader(body)))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	if req.ContentLength != 0 {
+		t.Fatalf("request declares length %d; the test needs a chunked body", req.ContentLength)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	_, _, _, bodies := d.snapshot()
+	if len(bodies) != 1 || string(bodies[0]) != body {
+		t.Errorf("decider saw %d bodies (first %d bytes), want one of %d bytes", len(bodies), lenFirst(bodies), len(body))
+	}
+	if string(got) != body || gotLen != int64(len(body)) || len(gotTE) != 0 {
+		t.Errorf("upstream read %d bytes, ContentLength %d, Transfer-Encoding %v; want %d bytes with that length, not chunked", len(got), gotLen, gotTE, len(body))
+	}
+}
+
+func lenFirst(b [][]byte) int {
+	if len(b) == 0 {
+		return -1
+	}
+	return len(b[0])
+}
+
 // A chunked body has no declared length, so the limit has to be on what is
 // read, not on Content-Length.
 func TestOversizedBodyIsRefused(t *testing.T) {
