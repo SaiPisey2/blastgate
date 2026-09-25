@@ -88,6 +88,7 @@ const (
 	msgApprovals   = "blastgate: could not check approvals, so the request was not forwarded"
 	msgChanged     = " The measured impact changed since the last approval."
 	defaultPoll    = 500 * time.Millisecond
+	auditTimeout   = 5 * time.Second
 )
 
 // Decide runs the whole decision for one request. It never returns
@@ -182,13 +183,27 @@ func (g *Gate) recheck(ctx context.Context, v Verdict, body []byte, changed bool
 		// leave it for the agent's retry to spend instead.
 		return g.ticket(ctx, v, v.approvalID, changed)
 	}
+	v.imp, v.labels = asm.Impact, asm.NamespaceLabels
+	// The approval covers the hold, not a refusal: if the cluster has
+	// moved so that policy now denies this request outright, no human
+	// "yes" given for the earlier measurement may override that.
+	pv := g.Policy.Evaluate(ctx, v.act, asm.Impact, asm.NamespaceLabels)
+	switch pv.Decision {
+	case policy.Allow:
+		// Still passes through the approval: releasing without spending
+		// it would leave a live token for a request that has already run.
+	case policy.Hold:
+		v.rule = pv.Rule
+	default:
+		v.rule, v.decision = pv.Rule, string(pv.Decision)
+		return g.refuse(ctx, v, http.StatusForbidden, metav1.StatusReasonForbidden, "blastgate: refused by policy rule "+pv.Rule)
+	}
 	s := v.sess
 	out, ap, err := g.Approvals.Check(ctx, s.ID, s.Human, s.Agent, v.digest, asm.Impact.Digest())
 	if err != nil {
 		g.log().Error("approval check failed", "request", v.requestID, "err", err)
 		return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
 	}
-	v.imp, v.labels = asm.Impact, asm.NamespaceLabels
 	switch out {
 	case approval.Release:
 		v.approvalID = ap.ID
@@ -196,17 +211,19 @@ func (g *Gate) recheck(ctx context.Context, v Verdict, body []byte, changed bool
 	case approval.Denied:
 		v.approvalID = ap.ID
 		return g.denied(ctx, v)
-	case approval.Void:
-		// Superseded by Check: a ticket naming it would send the human to
-		// approve something that can no longer be approved.
+	case approval.Pending:
+		return g.ticket(ctx, v, v.approvalID, changed)
+	default:
+		// Void (superseded by this Check), None (spent by a concurrent
+		// identical request, expired, or otherwise gone) or unknown: the
+		// old approval can never be approved again, so a ticket naming it
+		// would send the human to approve something impossible.
 		id, err := g.createPending(ctx, v)
 		if err != nil {
 			return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
 		}
 		v.approvalID = id
-		return g.ticket(ctx, v, id, true)
-	default:
-		return g.ticket(ctx, v, v.approvalID, changed)
+		return g.ticket(ctx, v, id, out == approval.Void || changed)
 	}
 }
 
@@ -281,7 +298,7 @@ func (g *Gate) forward(ctx context.Context, v Verdict) Verdict {
 		return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgSnapshot)
 	}
 	v.snapshot = path
-	if err := g.Audit.AppendAudit(ctx, g.row(v, "decision")); err != nil {
+	if err := g.appendAudit(ctx, g.row(v, "decision")); err != nil {
 		g.log().Error("decision audit failed", "request", v.requestID, "err", err)
 		// No second attempt at the decision row: the write just failed, and
 		// the result row from Complete still records the refusal.
@@ -310,7 +327,7 @@ func (g *Gate) ticket(ctx context.Context, v Verdict, id string, changed bool) V
 // either way, and the result row still records it.
 func (g *Gate) refuse(ctx context.Context, v Verdict, code int, reason metav1.StatusReason, msg string) Verdict {
 	v = g.status(v, code, reason, msg)
-	if err := g.Audit.AppendAudit(ctx, g.row(v, "decision")); err != nil {
+	if err := g.appendAudit(ctx, g.row(v, "decision")); err != nil {
 		g.log().Error("decision audit failed", "request", v.requestID, "err", err)
 	}
 	return v
@@ -327,7 +344,7 @@ func (g *Gate) status(v Verdict, code int, reason metav1.StatusReason, msg strin
 func (g *Gate) Complete(ctx context.Context, v Verdict, status int, outcome string, latency time.Duration) {
 	r := g.row(v, "result")
 	r.Status, r.Outcome, r.LatencyMS = status, outcome, latency.Milliseconds()
-	if err := g.Audit.AppendAudit(ctx, r); err != nil {
+	if err := g.appendAudit(ctx, r); err != nil {
 		g.log().Error("result audit failed", "request", v.requestID, "err", err)
 	}
 }
@@ -339,12 +356,24 @@ func (g *Gate) Complete(ctx context.Context, v Verdict, status int, outcome stri
 func (g *Gate) row(v Verdict, kind string) store.AuditRow {
 	a := v.act
 	r := store.AuditRow{
-		At: g.now(), Kind: kind, RequestID: v.requestID,
-		Session: v.sess.ID, Human: v.sess.Human, Agent: v.sess.Agent, Source: a.Source,
-		Verb: a.Verb, Group: a.Group, Resource: a.Resource, Subresource: a.Subresource,
-		Namespace: a.Namespace, Name: a.Name,
+		At:            g.now(),
+		Kind:          kind,
+		RequestID:     v.requestID,
+		Session:       v.sess.ID,
+		Human:         v.sess.Human,
+		Agent:         v.sess.Agent,
+		Source:        a.Source,
+		Verb:          a.Verb,
+		Group:         a.Group,
+		Resource:      a.Resource,
+		Subresource:   a.Subresource,
+		Namespace:     a.Namespace,
+		Name:          a.Name,
 		RequestDigest: v.digest,
-		Rule:          v.rule, Decision: v.decision, ApprovalID: v.approvalID, Snapshot: v.snapshot,
+		Rule:          v.rule,
+		Decision:      v.decision,
+		ApprovalID:    v.approvalID,
+		Snapshot:      v.snapshot,
 	}
 	if a.Verb != "" {
 		r.ActionJSON, _ = json.Marshal(a)
@@ -357,6 +386,16 @@ func (g *Gate) row(v Verdict, kind string) store.AuditRow {
 		r.LabelsJSON, _ = json.Marshal(v.labels)
 	}
 	return r
+}
+
+// appendAudit detaches the write from the request's cancellation: a
+// client that gives up mid-hold is exactly the request whose held
+// decision must still reach the trail, and a cancelled ctx would drop it.
+// The timeout keeps a wedged database from pinning the request forever.
+func (g *Gate) appendAudit(ctx context.Context, r store.AuditRow) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	return g.Audit.AppendAudit(ctx, r)
 }
 
 func (g *Gate) now() time.Time {

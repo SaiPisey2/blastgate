@@ -23,10 +23,14 @@ type fakeEngine struct {
 	imp   engine.Impact
 	calls int
 	later *engine.Impact // when set, returned from the second call on
+	hook  func(call int) // when set, runs at the start of every call
 }
 
 func (f *fakeEngine) Assess(context.Context, normalize.Action, []byte) engine.Assessment {
 	f.calls++
+	if f.hook != nil {
+		f.hook(f.calls)
+	}
 	if f.later != nil && f.calls > 1 {
 		return engine.Assessment{Impact: *f.later, NamespaceLabels: map[string]string{}}
 	}
@@ -49,9 +53,14 @@ type fakeAudit struct {
 	err  error
 }
 
-func (f *fakeAudit) AppendAudit(_ context.Context, r store.AuditRow) error {
+// AppendAudit fails on a cancelled ctx, as database/sql does: the gate
+// must record decisions for clients that have already gone away.
+func (f *fakeAudit) AppendAudit(ctx context.Context, r store.AuditRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -65,12 +74,17 @@ type fakeApprovals struct {
 	created  []store.Approval
 	status   map[string]string
 	checks   [][]string // session, human, agent, requestDigest, impactDigest per Check
+	checkErr error
+	makeErr  error
 }
 
 func (f *fakeApprovals) Check(_ context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checks = append(f.checks, []string{session, human, agent, requestDigest, impactDigest})
+	if f.checkErr != nil {
+		return approval.None, store.Approval{}, f.checkErr
+	}
 	o := f.outcomes[0]
 	if len(f.outcomes) > 1 {
 		f.outcomes = f.outcomes[1:]
@@ -80,6 +94,9 @@ func (f *fakeApprovals) Check(_ context.Context, session, human, agent, requestD
 func (f *fakeApprovals) CreatePending(_ context.Context, a store.Approval) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.makeErr != nil {
+		return f.makeErr
+	}
 	f.created = append(f.created, a)
 	if f.status == nil {
 		f.status = map[string]string{}
@@ -148,7 +165,7 @@ func TestHeldRequestTimesOutWithATicket(t *testing.T) {
 
 func TestApprovalInsideTheWindowReleasesInline(t *testing.T) {
 	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
-	g, _, fs, _ := newGate(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1}, ap)
+	g, fe, fs, _ := newGate(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1}, ap)
 	g.Hold = 2 * time.Second
 	go func() {
 		for {
@@ -163,8 +180,8 @@ func TestApprovalInsideTheWindowReleasesInline(t *testing.T) {
 		}
 	}()
 	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
-	if !v.Forward || fs.taken != 1 {
-		t.Errorf("verdict %+v, snapshots %d", v, fs.taken)
+	if !v.Forward || fs.taken != 1 || fe.calls != 2 {
+		t.Errorf("verdict %+v, snapshots %d, engine calls %d", v, fs.taken, fe.calls)
 	}
 }
 
@@ -203,9 +220,12 @@ func TestClientLeavingEndsTheWait(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	g.Decide(ctx, alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	v := g.Decide(ctx, alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
 	if time.Since(start) > 2*time.Second {
 		t.Error("kept waiting after the client left")
+	}
+	if v.Forward || v.Code != 403 || v.Ticket == "" {
+		t.Errorf("verdict %+v", v)
 	}
 }
 
@@ -264,10 +284,13 @@ func approveWhenCreated(ap *fakeApprovals, status string) {
 		for {
 			time.Sleep(10 * time.Millisecond)
 			ap.mu.Lock()
-			n := len(ap.created)
+			var id string
+			if len(ap.created) >= 1 {
+				id = ap.created[0].ID
+			}
 			ap.mu.Unlock()
-			if n >= 1 {
-				ap.set(ap.created[0].ID, status)
+			if id != "" {
+				ap.set(id, status)
 				return
 			}
 		}
@@ -377,5 +400,93 @@ func TestUnparseableIsAuditedAsADeny(t *testing.T) {
 	g.Decide(context.Background(), alice, req("POST", "/version"), nil)
 	if fe.calls != 0 || len(fa.rows) != 1 || fa.rows[0].Decision != "deny" || fa.rows[0].Rule != "unparseable" || fa.rows[0].Session != "s1" {
 		t.Errorf("audit %+v", fa.rows)
+	}
+}
+
+func TestClientLeavingMidHoldStillRecordsTheHold(t *testing.T) {
+	g, _, _, fa := newGate(terminal, nil)
+	g.Hold = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	v := g.Decide(ctx, alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	g.Complete(ctx, v, v.Code, "", time.Millisecond)
+	if len(fa.rows) != 2 || fa.rows[0].Kind != "decision" || fa.rows[0].Decision != "hold" || fa.rows[0].ApprovalID != v.Ticket ||
+		fa.rows[1].Kind != "result" || fa.rows[1].Status != 403 {
+		t.Errorf("audit %+v", fa.rows)
+	}
+}
+
+func TestInlineReleaseHonoursAPolicyDenyOnTheFreshMeasurement(t *testing.T) {
+	p, err := policy.Load([]byte("rules:\n  - name: too-much\n    when: impact.dataDestroyed > 1\n    then: deny\n  - name: some\n    when: impact.dataDestroyed > 0\n    then: hold\ndefault: hold\nunmeasured: hold\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
+	g, fe, fs, fa := newGate(terminal, ap)
+	g.Policy = p
+	worse := terminal
+	worse.DataDestroyed = 2
+	fe.later = &worse
+	g.Hold = 2 * time.Second
+	approveWhenCreated(ap, "approved")
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 403 || v.Message != "blastgate: refused by policy rule too-much" || fs.taken != 0 || len(ap.checks) != 1 {
+		t.Errorf("verdict %+v, snapshots %d, checks %v", v, fs.taken, ap.checks)
+	}
+	if len(fa.rows) != 1 || fa.rows[0].Decision != "deny" || fa.rows[0].Rule != "too-much" {
+		t.Errorf("audit %+v", fa.rows)
+	}
+}
+
+func TestInlineReleaseOfAGoneApprovalTicketsANewOne(t *testing.T) {
+	// Approved, but a concurrent identical request spent it first: the
+	// recheck's Check finds nothing usable.
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.None}}
+	g, _, fs, _ := newGate(terminal, ap)
+	g.Hold = 2 * time.Second
+	approveWhenCreated(ap, "approved")
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || fs.taken != 0 || len(ap.created) != 2 || v.Ticket != ap.created[1].ID || strings.Contains(v.Message, ap.created[0].ID) {
+		t.Errorf("verdict %+v created %+v", v, ap.created)
+	}
+}
+
+func TestClientLeavingDuringTheRescoreSpendsNothing(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
+	g, fe, fs, _ := newGate(terminal, ap)
+	g.Hold = 2 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fe.hook = func(call int) {
+		if call == 2 {
+			cancel()
+		}
+	}
+	approveWhenCreated(ap, "approved")
+	v := g.Decide(ctx, alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || fs.taken != 0 || len(ap.checks) != 1 || len(ap.created) != 1 || v.Ticket != ap.created[0].ID {
+		t.Errorf("verdict %+v, checks %v, created %+v", v, ap.checks, ap.created)
+	}
+}
+
+func TestApprovalCheckFailureRefuses(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Release}, checkErr: errors.New("db locked")}
+	g, _, fs, _ := newGate(terminal, ap)
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 503 || fs.taken != 0 || strings.Contains(v.Message, "locked") {
+		t.Errorf("verdict %+v", v)
+	}
+}
+
+func TestCreatePendingFailureRefuses(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None}, makeErr: errors.New("disk full")}
+	g, _, fs, _ := newGate(terminal, ap)
+	start := time.Now()
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 503 || v.Ticket != "" || fs.taken != 0 || strings.Contains(v.Message, "disk") {
+		t.Errorf("verdict %+v", v)
+	}
+	if time.Since(start) > 150*time.Millisecond {
+		t.Error("waited on an approval that was never created")
 	}
 }
