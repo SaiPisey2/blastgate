@@ -70,6 +70,14 @@ func (t *Taker) Take(ctx context.Context, requestID string, a normalize.Action, 
 		return "", fmt.Errorf("snapshot: %q is not a valid request id", requestID)
 	}
 
+	if a.Resource == "pods" && a.Subresource == "eviction" && a.Verb == "create" {
+		// Engine.Assess scores an eviction as a delete of the pod it
+		// evicts; Take must snapshot the same normalisation, or an
+		// approved COMPENSABLE/TERMINAL eviction would fall through this
+		// switch below with no undo bundle at all.
+		a.Verb, a.Subresource = "delete", ""
+	}
+
 	switch {
 	case a.Verb == "delete":
 		if i.Class != engine.ClassCompensable && i.Class != engine.ClassTerminal {
@@ -100,8 +108,10 @@ func (t *Taker) takeDelete(ctx context.Context, requestID string, a normalize.Ac
 	if err := t.SoundingScore(ctx, act, dir); err != nil {
 		// sounding writes its bundle incrementally; a failure partway
 		// through can leave one behind that looks complete but is not.
-		// The caller refuses to forward on this error regardless, so the
-		// half-written directory is never mistaken for a usable snapshot.
+		// The caller refuses to forward on this error regardless, but the
+		// directory itself must not survive to be found later and mistaken
+		// for a usable snapshot.
+		cleanup(dir)
 		return "", fmt.Errorf("snapshot: sounding: %w", err)
 	}
 	return dir, nil
@@ -127,12 +137,22 @@ func (t *Taker) takeBefore(ctx context.Context, requestID string, a normalize.Ac
 	// 0600: the live object's full spec (Secrets included) must not be
 	// world- or group-readable on disk.
 	if err := os.WriteFile(filepath.Join(dir, "before.json"), before, 0o600); err != nil {
+		cleanup(dir)
 		return "", fmt.Errorf("snapshot: writing before.json: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "RESTORE.txt"), []byte(restoreNote), 0o600); err != nil {
+		cleanup(dir)
 		return "", fmt.Errorf("snapshot: writing RESTORE.txt: %w", err)
 	}
 	return dir, nil
+}
+
+// cleanup removes an already-made snapshot directory, best effort, after a
+// step past mkdir fails: the caller is already returning the real error,
+// and a half-written directory left behind could otherwise be found later
+// and mistaken for a complete snapshot.
+func cleanup(dir string) {
+	_ = os.RemoveAll(dir)
 }
 
 // mkdir makes this request's snapshot directory, mode 0700: only blastgate

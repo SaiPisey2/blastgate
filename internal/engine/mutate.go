@@ -412,18 +412,32 @@ func (e *Engine) Before(ctx context.Context, a normalize.Action) ([]byte, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	data, err := readLimitedBody(resp)
 	if err != nil {
 		return nil, err
-	}
-	if len(data) > maxBody {
-		return nil, errors.New("response larger than 3 MiB")
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("live object read returned %d", resp.StatusCode)
+	}
+	return data, nil
+}
+
+// readLimitedBody reads resp's body up to maxBody -- the API server's own
+// request limit, applied to its responses too, because an object it stored
+// larger than its own limit could not have been written by a client. The
+// one place this is enforced: Before and fetch both read a response back
+// and must refuse the same way past that size, not each carry their own
+// copy of the check to fall out of step.
+func readLimitedBody(resp *http.Response) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBody {
+		return nil, errors.New("response larger than 3 MiB")
 	}
 	return data, nil
 }
@@ -440,12 +454,9 @@ func (e *Engine) fetch(ctx context.Context, a normalize.Action, method string, d
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	data, err := readLimitedBody(resp)
 	if err != nil {
 		return nil, 0, err
-	}
-	if len(data) > maxBody {
-		return nil, 0, errors.New("response larger than 3 MiB")
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, resp.StatusCode, nil

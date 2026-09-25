@@ -404,3 +404,26 @@ func TestCreateBodyNameWinsOverGenerateName(t *testing.T) {
 		t.Errorf("effects = %+v", i.Effects)
 	}
 }
+
+// Before must refuse before it ever dials out: sending the GET anyway
+// would read the object impersonating nobody, which is to say as
+// blastgate's own service account, not the human whose write this "before"
+// is meant to snapshot for.
+func TestBeforeRefusesWithoutHuman(t *testing.T) {
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"kind":"ConfigMap"}`)
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	e := New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, 5*time.Second)
+	a := normalize.Action{Verb: "update", Version: "v1", Resource: "configmaps", Namespace: "demo", Name: "cfg"}
+	if _, err := e.Before(context.Background(), a); err == nil {
+		t.Error("Before with no human to impersonate succeeded")
+	}
+	if hit {
+		t.Error("Before with no human to impersonate reached the server")
+	}
+}

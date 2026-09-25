@@ -69,12 +69,15 @@ func TestSoundingFailureIsAnError(t *testing.T) {
 	}
 }
 
-// apiServer answers every GET with cm's body, regardless of path -- Before's
-// own path building is exercised in the engine package; here only that
-// Take writes what Before returns.
-func apiServer(t *testing.T, body string) *engine.Engine {
+// apiServer answers every GET with body's content, regardless of path --
+// Before's own path building is exercised in the engine package; here only
+// that Take writes what Before returns, and (via lastRequest) that Before
+// sent it impersonated.
+func apiServer(t *testing.T, body string) (*engine.Engine, func() *http.Request) {
 	t.Helper()
+	var last *http.Request
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		last = r.Clone(context.Background())
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, body)
 	}))
@@ -83,12 +86,13 @@ func apiServer(t *testing.T, body string) *engine.Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return engine.New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, time.Second)
+	e := engine.New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, time.Second)
+	return e, func() *http.Request { return last }
 }
 
 func TestPatchWritesBeforeObject(t *testing.T) {
 	cm := `{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"cfg","namespace":"demo"},"data":{"k":"v"}}`
-	e := apiServer(t, cm)
+	e, lastRequest := apiServer(t, cm)
 	tk := &Taker{Dir: t.TempDir(), Engine: e}
 	a := normalize.Action{
 		Verb: "patch", Version: "v1", Resource: "configmaps", Namespace: "demo", Name: "cfg",
@@ -111,6 +115,9 @@ func TestPatchWritesBeforeObject(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "RESTORE.txt")); err != nil {
 		t.Errorf("RESTORE.txt missing: %v", err)
 	}
+	if got := lastRequest().Header.Get("Impersonate-User"); got != "alice" {
+		t.Errorf("Impersonate-User = %q, want alice", got)
+	}
 }
 
 func TestUpdateOfMissingObjectTakesNothing(t *testing.T) {
@@ -129,6 +136,92 @@ func TestUpdateOfMissingObjectTakesNothing(t *testing.T) {
 	out, err := tk.Take(context.Background(), "0123456789abcdef0123456789abcdef", a, engine.Impact{Class: engine.ClassReversible, Measured: true})
 	if err != nil || out != "" {
 		t.Errorf("take = %q, %v, want nothing taken for an object that does not exist yet", out, err)
+	}
+}
+
+// An eviction is a create of pods/x/eviction; Engine.Assess scores it as a
+// delete of the pod it evicts (mutate.go, the eviction case in Assess), and
+// Take must snapshot the same normalisation -- otherwise an approved
+// COMPENSABLE/TERMINAL eviction falls through Take's switch as an
+// unrecognised verb and gets no undo bundle at all.
+func TestEvictionIsSnapshottedAsDelete(t *testing.T) {
+	dir := t.TempDir()
+	var got model.Action
+	tk := &Taker{Dir: dir, SoundingScore: func(_ context.Context, act model.Action, d string) error {
+		got = act
+		return nil
+	}}
+	a := normalize.Action{Verb: "create", Resource: "pods", Subresource: "eviction", Version: "v1", Namespace: "demo", Name: "web-1"}
+	out, err := tk.Take(context.Background(), "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7", a, engine.Impact{Class: engine.ClassCompensable, Measured: true})
+	if err != nil || out == "" {
+		t.Fatalf("take = %q, %v", out, err)
+	}
+	if got.Verb != "delete" || got.Target.Resource != "pods" || got.Target.Name != "web-1" {
+		t.Errorf("sounding got %+v, want a plain delete of the evicted pod", got)
+	}
+}
+
+// Take must refuse an update/patch snapshot the same way Before itself
+// does -- and, just as important, without ever sending the GET Before
+// would have sent.
+func TestTakeRefusesUpdateWithoutHuman(t *testing.T) {
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"kind":"ConfigMap"}`)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	e := engine.New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, time.Second)
+	tk := &Taker{Dir: t.TempDir(), Engine: e}
+	a := normalize.Action{Verb: "patch", Version: "v1", Resource: "configmaps", Namespace: "demo", Name: "cfg"}
+	if _, err := tk.Take(context.Background(), "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4", a, engine.Impact{Class: engine.ClassReversible, Measured: true}); err == nil {
+		t.Error("Take for a patch with no human to impersonate succeeded")
+	}
+	if hit {
+		t.Error("Take for a patch with no human to impersonate reached the server")
+	}
+}
+
+// A sounding failure must not leave the directory it was about to fill
+// behind: a later look at snapshots/<id> must find either a complete
+// bundle or nothing, never a stub that looks like one.
+func TestFailedDeleteSnapshotRemovesPartialDirectory(t *testing.T) {
+	dir := t.TempDir()
+	requestID := "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+	tk := &Taker{Dir: dir, SoundingScore: func(context.Context, model.Action, string) error { return os.ErrPermission }}
+	a := normalize.Action{Verb: "delete", Version: "v1", Resource: "persistentvolumeclaims", Namespace: "demo", Name: "data"}
+	if _, err := tk.Take(context.Background(), requestID, a, engine.Impact{Class: engine.ClassTerminal, Measured: true}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, requestID)); !os.IsNotExist(err) {
+		t.Errorf("partial snapshot directory still exists (stat err = %v)", err)
+	}
+}
+
+// Same as above for the update/patch path: a write failure after mkdir
+// must not leave a partial before.json/RESTORE.txt behind either.
+func TestFailedBeforeWriteRemovesPartialDirectory(t *testing.T) {
+	e, _ := apiServer(t, `{"kind":"ConfigMap"}`)
+	dir := t.TempDir()
+	requestID := "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+	// A directory already sitting where before.json needs to go forces
+	// os.WriteFile to fail, without depending on filesystem permission
+	// behaviour that differs across platforms.
+	if err := os.MkdirAll(filepath.Join(dir, requestID, "before.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tk := &Taker{Dir: dir, Engine: e}
+	a := normalize.Action{
+		Verb: "patch", Version: "v1", Resource: "configmaps", Namespace: "demo", Name: "cfg",
+		Principal: normalize.Principal{Human: "alice"},
+	}
+	if _, err := tk.Take(context.Background(), requestID, a, engine.Impact{Class: engine.ClassReversible, Measured: true}); err == nil {
+		t.Fatal("expected an error writing before.json")
+	}
+	if _, err := os.Stat(filepath.Join(dir, requestID)); !os.IsNotExist(err) {
+		t.Errorf("partial snapshot directory still exists (stat err = %v)", err)
 	}
 }
 
