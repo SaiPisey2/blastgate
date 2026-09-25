@@ -19,10 +19,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -372,4 +377,47 @@ func TestServerSideApplyAndDelete(t *testing.T) {
 		t.Errorf("apply: %q", out)
 	}
 	must(t)(kubectl(t, kc, nil, "", "delete", "configmap", "e2e-apply", "-n", "demo"))
+}
+
+func percentiles(d []time.Duration) (p50, p95 time.Duration) {
+	sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+	return d[len(d)/2], d[len(d)*95/100]
+}
+
+func timeLists(t *testing.T, kc string) []time.Duration {
+	t.Helper()
+	cfg, err := clientcmd.BuildConfigFromFlags("", kc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 10; i++ { // warm connections and caches
+		c.CoreV1().Pods("demo").List(ctx, metav1.ListOptions{})
+	}
+	out := make([]time.Duration, 0, 200)
+	for i := 0; i < 200; i++ {
+		s := time.Now()
+		if _, err := c.CoreV1().Pods("demo").List(ctx, metav1.ListOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, time.Since(s))
+	}
+	return out
+}
+
+// Reads must add close to nothing (design §9). Printed on every run so the
+// number is visible; the bound only catches something pathological, since
+// shared CI runners are too noisy for a tight one.
+func TestAddedLatencyOnReads(t *testing.T) {
+	g := start(t)
+	d50, d95 := percentiles(timeLists(t, adminKC))
+	p50, p95 := percentiles(timeLists(t, g.session(t, "alice")))
+	t.Logf("direct p50 %v p95 %v | via blastgate p50 %v p95 %v | added p50 %v p95 %v", d50, d95, p50, p95, p50-d50, p95-d95)
+	if p95-d95 > 50*time.Millisecond {
+		t.Errorf("blastgate adds %v at p95", p95-d95)
+	}
 }
