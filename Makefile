@@ -31,6 +31,8 @@ fixture-up:
 	$(KC) -n demo wait --for=jsonpath='{.status.phase}'=Bound pvc/data --timeout=120s
 	sh fixture/mkupstream.sh $(ADMIN_KC) $(UP_KC)
 
+# The suite deletes the demo claim and changes the demo workloads, so a
+# second run needs a fresh fixture: make fixture-down; make fixture-up.
 fixture-test: build
 	cd e2e && BLASTGATE_E2E_ADMIN=$(ADMIN_KC) BLASTGATE_E2E_UPSTREAM=$(UP_KC) go test -tags=e2e -count=1 -v .
 

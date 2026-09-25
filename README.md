@@ -13,20 +13,38 @@ cannot be measured is held.
 
 ## Try it
 
+Two shells, ideally as two OS users: one runs blastgate and holds its secrets, the
+other is the agent's and holds nothing but a session kubeconfig.
+
 ```sh
+# Shell 1 -- blastgate's user. The signing key and data directory stay here.
 export BLASTGATE_DATA_DIR=~/.blastgate
 export BLASTGATE_SIGNING_KEY=$(openssl rand -hex 32)
 export BLASTGATE_UPSTREAM_KUBECONFIG=./blastgate-sa.kubeconfig   # see below
-# The kubeconfig holds the session token: keep it private to you.
+# The kubeconfig holds the session token: hand it to the agent and no one else.
 (umask 077; blastgate session new --human alice@example.com --agent coding-agent --ttl 8h > agent.kubeconfig)
-blastgate serve &
-KUBECONFIG=agent.kubeconfig kubectl get pods              # reads pass straight through
-KUBECONFIG=agent.kubeconfig kubectl delete pvc data       # destroys a volume's data: held
+blastgate serve
+```
+
+```sh
+# Shell 2 -- the agent's user. Only the session kubeconfig, copied over.
+export KUBECONFIG=agent.kubeconfig
+kubectl get pods              # reads pass straight through
+kubectl delete pvc data       # destroys a volume's data: held
 # Error from server (Forbidden): blastgate: held for approval 3f9c… (rule data-destruction:
-#   TERMINAL, 2 objects, 1 volume with data destroyed). Approve with `blastgate approve 3f9c…`, then retry.
+#   TERMINAL, 2 objects, 1 volume with data destroyed). Ask a person to approve it with
+#   `blastgate approve 3f9c… --by <name>`, then retry.
+```
+
+```sh
+# Shell 3 -- a person, as blastgate's user (same data directory and signing key).
 blastgate approvals --status pending
 blastgate approve 3f9c… --by bob
-KUBECONFIG=agent.kubeconfig kubectl delete pvc data       # the retry is re-measured, then forwarded
+```
+
+```sh
+# Shell 2 again
+kubectl delete pvc data       # the retry is re-measured, then forwarded
 ```
 
 Whichever command runs first creates the data directory, its database and a local CA
@@ -37,6 +55,14 @@ kubectl should dial.
 
 `BLASTGATE_SIGNING_KEY` signs approval tokens: `serve` and `approve`/`deny` must
 share it (and the data directory).
+
+**Keep the agent out of blastgate's trust.** Anyone holding the signing key and the data
+directory can approve anything. Run `serve`, `approve` and `deny` as a different OS
+user from the agent; never put `BLASTGATE_SIGNING_KEY`, the data directory or the
+upstream kubeconfig in the agent's environment or anywhere it can read. The agent gets
+its session kubeconfig and nothing else. The ticket it receives asks for a person for
+this reason: an agent that could run `blastgate approve` itself would be approving its
+own writes.
 
 | Variable | Default | |
 |---|---|---|
@@ -59,7 +85,11 @@ blastgate never reads your default kubeconfig.
 ## How a request is decided
 
 - **Reads** (`get`, `list`, `watch`, logs) are forwarded at once and audited. They are
-  never measured or held.
+  never measured or held. A request that upgrades its connection (`Connection: Upgrade`)
+  is never a read, whatever its verb or subresource: it opens a stream (a VM console,
+  say) and is measured, or held unmeasured, like a write. A path with a `.`, `..` or
+  empty segment is refused, since a server that cleans paths would resolve it to a
+  different object than the one decided on.
 - **Writes** are measured first, within `BLASTGATE_SCORE_BUDGET`:
   - a **delete** (and an eviction) by [sounding](https://github.com/SaiPisey2/sounding),
     which walks what it would take with it: owned objects, volumes whose data goes, Services
@@ -73,7 +103,18 @@ blastgate never reads your default kubeconfig.
     so they are measured as reads;
   - **exec, attach, port-forward and proxied requests are not measured**: what a shell
     does inside a container cannot be seen from outside it. The command line is checked for
-    a database client or SQL, which the policy can name.
+    a database client or SQL, which the policy can name. exec, attach and port-forward are
+    `create` whichever transport kubectl uses (WebSocket, or SPDY on fallback), as the API
+    server itself authorises them, so one command is one approval;
+  - **`kubectl debug`** (an update or patch of `pods/<x>/ephemeralcontainers`) starts a
+    command of its choosing in the pod, so it is unmeasured like exec, with the same SQL
+    check over the ephemeral containers' `command` and `args`.
+- Creating a workload — a Pod, Job or Deployment — is measured as the object it creates,
+  not as what its containers then run: the command in its spec runs unmeasured by
+  blastgate. Hold or deny those creates in policy if that matters to you.
+- An agent's own `--dry-run=server` write is scored like the real write and may be held:
+  blastgate measures what the request would do, and does not special-case the agent's
+  `dryRun`.
 - The measurement has a class — `READ`, `REVERSIBLE`, `COMPENSABLE`, `TERMINAL` or
   `AUTHORITY` — and anything that could not be measured (an error, the budget running
   out, a dry-run refused for a reason the real request might not be) is `TERMINAL` and
@@ -93,7 +134,7 @@ the original request goes through and the agent never notices. Otherwise the age
 gets a `403` whose message is the ticket:
 
 ```
-blastgate: held for approval 3f9c0e…(32 hex) (rule data-destruction: TERMINAL, 2 objects, 1 volume with data destroyed). Approve with `blastgate approve 3f9c0e…`, then retry.
+blastgate: held for approval 3f9c0e…(32 hex) (rule data-destruction: TERMINAL, 2 objects, 1 volume with data destroyed). Ask a person to approve it with `blastgate approve 3f9c0e… --by <name>`, then retry.
 ```
 
 The ticket carries only what blastgate generated: the approval ID, the rule name, the
@@ -119,7 +160,8 @@ be measured: approve it while the command waits, or approve and retry.
 
 ## Policy
 
-The built-in policy, verbatim (`internal/policy/default.yaml`):
+The built-in policy's rules as shipped (`internal/policy/default.yaml`, whose header
+comment, left out here, explains why the prod rule checks `"env" in ns.labels` first):
 
 ```yaml
 rules:
@@ -186,21 +228,33 @@ since moved.
 
 ## Audit and undo
 
-Every authenticated request gets one `result` row in the audit table; every write also gets a
-`decision` row before it is forwarded (or refused), with its class, rule, decision and
-approval. The table is append-only: `UPDATE` and `DELETE` on it abort. Request bodies
+Every request that reaches the decision step gets one `result` row in the audit table;
+every write also gets a `decision` row before it is forwarded (or refused), with its
+class, rule, decision and approval. Requests refused before that step — an unknown or
+revoked session, a client impersonation header, a body over 3 MiB — are logged, not
+audited. The table is append-only: `UPDATE` and `DELETE` on it abort. Request bodies
 are never stored, only their digest.
+
+The audit rows and pending approvals do store the parsed request (the action JSON),
+which includes its semantic query — for exec, the **full command line**. Treat the
+data directory as holding whatever your agents put on a command line.
 
 ```sh
 blastgate audit export --since 24h > audit.jsonl    # one JSON object per row
 ```
 
 Before a risky write is forwarded, blastgate snapshots what it would change under
-`<data dir>/snapshots/<request id>`: for a `COMPENSABLE` or `TERMINAL` delete, sounding's
-manifests of every object the delete takes with it, with the order to restore them in;
-for an update or patch, the object as it was (`before.json`, with a `RESTORE.txt`). A
-snapshot restores **objects, not data**: the contents of a deleted volume are gone.
-A write whose snapshot fails is not forwarded.
+`<data dir>/snapshots/<request id>`: for a measured `COMPENSABLE` or `TERMINAL` delete,
+sounding's manifests of every object the delete takes with it, with the order to restore
+them in; for a delete sounding could not measure (a cluster-scoped object other than a
+namespace), the object itself (`before.json`); for a `deletecollection`, the collection
+as the API server lists it with the same selectors (`list.json`); for an update or patch,
+the object as it was (`before.json`). Each comes with a `RESTORE.txt`. A snapshot
+restores **objects, not data**: the contents of a deleted volume are gone.
+
+A write whose snapshot fails, or does not finish within `BLASTGATE_SCORE_BUDGET`, is not
+forwarded. An approval is spent only after its request's snapshot and decision row are
+written, so a failed snapshot leaves the approval for the agent's next retry.
 
 ## Who can issue sessions
 
@@ -251,7 +305,7 @@ A session for anyone else is then refused by the API server itself.
 - See exec stdin: SQL piped into `kubectl exec -i … psql` is invisible to the SQL
   check, which reads the command line only.
 - Measure `deletecollection`, or cluster-scoped deletes other than namespaces: they are
-  unmeasured, and so held.
+  unmeasured, and so held (and snapshotted, once approved).
 - Measure a create or update sent as protobuf. kubectl's own generators
   (`kubectl create configmap`, `kubectl create deployment`) send protobuf, which a dry-run
   cannot replay faithfully, so they are held; `kubectl apply -f` sends JSON and is measured.
@@ -272,9 +326,12 @@ over WebSocket and SPDY, and port-forward over both. And the decisions: a pod it
 ReplicaSet recreates is deleted unasked; deleting a claim whose volume is reclaimed
 with `Delete` is held, approved and retried; an approval given before a second Service
 started selecting the pods is void on retry; an exec approved while it waits
-completes; an exec running `psql`, once denied, stays refused; a held server-side apply
-is released by its approval on kubectl's retry; and replay reports what a candidate
-policy would change. On a list call against that cluster: direct p50 877µs, p95
+completes; an exec running `psql`, once denied, stays refused and leaves no second
+approval pending; a held server-side apply is released by its approval on kubectl's
+retry; an approved `deletecollection` and an approved cluster-scoped delete are
+snapshotted and forwarded; `kubectl debug` is held; and replay reports what a candidate
+policy would change. The suite deletes the claim and changes the demo workloads, so run
+it on a fresh fixture: `make fixture-down; make fixture-up && make fixture-test`. On a list call against that cluster: direct p50 877µs, p95
 1.416ms; through blastgate p50 1.474ms, p95 2.133ms. Added latency: p50 **597µs**,
 p95 **717µs**.
 

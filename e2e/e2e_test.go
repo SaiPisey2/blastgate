@@ -194,6 +194,11 @@ var approvalID = regexp.MustCompile(`[0-9a-f]{32}`)
 // attach and port-forward is unmeasured and so held; the compatibility
 // tests are about the streams working through blastgate once released,
 // so a person approving inline stands in for the one who would.
+//
+// It fails the test if two approvals are ever pending at once: the tests
+// run one command at a time, so a second pending approval is a twin --
+// kubectl's WebSocket attempt and its SPDY fallback digesting differently
+// (final review I1) -- which approving everything would otherwise hide.
 func (g *gate) approveWhileHeld(t *testing.T) (stop func()) {
 	t.Helper()
 	done, finished := make(chan struct{}), make(chan struct{})
@@ -207,7 +212,11 @@ func (g *gate) approveWhileHeld(t *testing.T) (stop func()) {
 			case <-time.After(200 * time.Millisecond):
 			}
 			list, _ := g.run(t, "approvals", "--status", "pending")
-			for _, id := range approvalID.FindAllString(list, -1) {
+			ids := approvalID.FindAllString(list, -1)
+			if len(ids) > 1 {
+				t.Errorf("%d approvals pending at once for one command:\n%s", len(ids), list)
+			}
+			for _, id := range ids {
 				if !seen[id] {
 					seen[id] = true
 					g.run(t, "approve", id, "--by", "bob")
