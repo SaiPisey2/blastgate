@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -193,5 +194,36 @@ func TestAMismatchedServerPairIsReissued(t *testing.T) {
 	}
 	if err := verify(t, ca, cert.Certificate[0], "127.0.0.1"); err != nil {
 		t.Error(err)
+	}
+}
+
+// LoadCA is for commands that only print the CA (webhook-config): it
+// must neither create a CA nor touch the serving pair serve is using.
+func TestLoadCAReadsWithoutWriting(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tls")
+	if _, err := LoadCA(dir); !errors.Is(err, ErrNoCA) {
+		t.Fatalf("absent CA: err = %v, want ErrNoCA", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("LoadCA created the directory: %v", err)
+	}
+	_, want, err := LoadOrCreate(dir, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"server.crt", "server.key"} {
+		if err := os.Remove(filepath.Join(dir, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := LoadCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("LoadCA returned a different CA")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "server.crt")); !os.IsNotExist(err) {
+		t.Errorf("LoadCA wrote a serving certificate: %v", err)
 	}
 }

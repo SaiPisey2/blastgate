@@ -50,6 +50,31 @@ func newHandler(rec Recorder) *Handler {
 	return &Handler{Rec: rec, Ignore: DefaultIgnore, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Now: func() time.Time { return t0 }}
 }
 
+// logged returns a handler whose log lines land in the returned buffer.
+func logged(rec Recorder) (*Handler, *syncBuf) {
+	h := newHandler(rec)
+	b := &syncBuf{}
+	h.Log = slog.New(slog.NewTextHandler(b, nil))
+	return h, b
+}
+
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 func review(uid, user string, extra map[string]authenticationv1.ExtraValue) []byte {
 	dry := false
 	ar := admissionv1.AdmissionReview{
@@ -169,13 +194,98 @@ func TestWebhookBodyLimit(t *testing.T) {
 	rec := &fakeRec{}
 	body := review("u-big", "alice", nil)
 	// Pad inside a valid JSON document so only the size can be the reason.
-	big := append([]byte(`{"pad":"`+strings.Repeat("x", 4<<20)+`",`), body[1:]...)
-	w := post(t, newHandler(rec), big)
+	big := append([]byte(`{"pad":"`+strings.Repeat("x", 9<<20)+`",`), body[1:]...)
+	h, logs := logged(rec)
+	w := post(t, h, big)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", w.Code)
 	}
 	if n := len(rec.got()); n != 0 {
 		t.Errorf("rows = %d, want 0", n)
+	}
+	if l := logs.String(); !strings.Contains(l, "too large") || strings.Contains(l, "xxxx") {
+		t.Errorf("413 must be logged without the body: %q", l)
+	}
+}
+
+func TestAnUpdateCarryingTwoLargeObjectsIsObserved(t *testing.T) {
+	// The API server caps a client body at 3 MiB, but an UPDATE review
+	// carries object and oldObject: over 3 MiB here is legitimate, and
+	// dropping it would let a padded object escape the record.
+	rec := &fakeRec{}
+	var ar admissionv1.AdmissionReview
+	_ = json.Unmarshal(review("u-upd", "alice", nil), &ar)
+	obj := []byte(`{"data":"` + strings.Repeat("y", 3<<20-100) + `"}`)
+	ar.Request.Operation = admissionv1.Update
+	ar.Request.Object.Raw, ar.Request.OldObject.Raw = obj, obj
+	b, _ := json.Marshal(ar)
+	if len(b) <= 6<<20 {
+		t.Fatalf("review is only %d bytes", len(b))
+	}
+	allowed(t, post(t, newHandler(rec), b), "u-upd")
+	if n := len(rec.got()); n != 1 {
+		t.Errorf("rows = %d, want 1", n)
+	}
+}
+
+// blockingRec holds every AppendBypass until release is closed.
+type blockingRec struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingRec) AppendBypass(ctx context.Context, _ store.BypassRow) error {
+	select {
+	case b.started <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+func TestAFloodIsAnsweredBusyNotQueued(t *testing.T) {
+	rec := &blockingRec{started: make(chan struct{}, maxInFlight), release: make(chan struct{})}
+	h, logs := logged(rec)
+	var wg sync.WaitGroup
+	codes := make([]int, maxInFlight)
+	for i := range maxInFlight {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = post(t, h, review("u-held", "alice", nil)).Code
+		}()
+	}
+	for range maxInFlight {
+		<-rec.started
+	}
+	if w := post(t, h, review("u-over", "alice", nil)); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("request over the bound: status = %d, want 503", w.Code)
+	}
+	if !strings.Contains(logs.String(), "busy") {
+		t.Errorf("503 not logged: %q", logs.String())
+	}
+	close(rec.release)
+	wg.Wait()
+	for i, c := range codes {
+		if c != http.StatusOK {
+			t.Errorf("held request %d: status = %d", i, c)
+		}
+	}
+	// The slots come back: the next review is handled again.
+	rec2 := &fakeRec{}
+	h.Rec = rec2
+	allowed(t, post(t, h, review("u-after", "alice", nil)), "u-after")
+}
+
+func TestNoRecorderStillAllows(t *testing.T) {
+	h, logs := logged(nil)
+	allowed(t, post(t, h, review("u-1", "alice", nil)), "u-1")
+	if !strings.Contains(logs.String(), "no recorder") {
+		t.Errorf("missing recorder not logged: %q", logs.String())
 	}
 }
 
@@ -223,8 +333,12 @@ func TestAMalformedRequestWithAUIDIsStillAllowed(t *testing.T) {
 	// readable: answer allowed so the API server does not log an error.
 	body := []byte(`{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","request":{"uid":"u-odd","operation":7}}`)
 	rec := &fakeRec{}
-	allowed(t, post(t, newHandler(rec), body), "u-odd")
+	h, logs := logged(rec)
+	allowed(t, post(t, h, body), "u-odd")
 	if n := len(rec.got()); n != 0 {
 		t.Errorf("rows = %d, want 0", n)
+	}
+	if l := logs.String(); !strings.Contains(l, "level=WARN") || !strings.Contains(l, "u-odd") {
+		t.Errorf("undecodable review not logged with its uid: %q", l)
 	}
 }

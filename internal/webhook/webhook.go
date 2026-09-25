@@ -3,6 +3,20 @@
 // that reached the cluster without passing through blastgate, so an
 // operator can see a kubeconfig that goes around the gateway. It never
 // denies: a bug or outage here must not be able to break the cluster.
+//
+// What it can and cannot tell apart:
+//
+//   - ViaBlastgate trusts the blastgate-session user extra. The proxy sets
+//     it by impersonation, but so can anyone the cluster allows to
+//     impersonate userextras/blastgate-session: cluster-admin, or whoever
+//     holds blastgate's own credential. Such a caller can mark a write as
+//     having gone through blastgate and it will not be recorded. The
+//     record is evidence against a kubeconfig that skips the gateway, not
+//     against someone who already holds impersonation rights.
+//   - DefaultIgnore hides every kube-system service account, not only the
+//     controllers. A workload or agent running as a service account in
+//     kube-system is not recorded; keep agents out of kube-system, or
+//     narrow the ignore list.
 package webhook
 
 import (
@@ -13,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -28,11 +43,20 @@ import (
 // keys, and passes them to admission unchanged.
 const SessionExtra = "blastgate-session"
 
-// maxBody bounds one AdmissionReview. The API server caps a request
-// object at 3 MiB (etcd's limit sits just above), so anything larger is
-// not a review it sent, and reading it unbounded would let a flood of
-// huge bodies exhaust memory.
-const maxBody = 3 << 20
+// maxBody bounds one AdmissionReview. The API server's 3 MiB cap is on
+// the client's request body, but the review it sends here carries up to
+// two objects (an UPDATE has object and oldObject) plus the envelope and
+// user info, so a 3 MiB limit would drop legitimate reviews, and an agent
+// could pad an object to slip its write past the record. 8 MiB covers two
+// full-size objects; reading unbounded would let a flood of huge bodies
+// exhaust memory.
+const maxBody = 8 << 20
+
+// maxInFlight bounds reviews handled at once. Beyond it the answer is an
+// immediate 503, which failurePolicy: Ignore turns into an allowed write:
+// a flood costs missed records, never memory (32 x 8 MiB at most) or a
+// queue of goroutines each holding a body.
+const maxInFlight = 32
 
 // recordTimeout bounds the synchronous write of one bypass row, well
 // inside the configuration's timeoutSeconds: 5, so a slow disk turns into
@@ -53,12 +77,16 @@ type Recorder interface {
 	AppendBypass(ctx context.Context, b store.BypassRow) error
 }
 
-// Handler serves POST /validate. Log and Now may be nil.
+// Handler serves POST /validate. Log and Now may be nil. Use it by
+// pointer: it holds the in-flight semaphore.
 type Handler struct {
 	Rec    Recorder
 	Ignore []string
 	Log    *slog.Logger
 	Now    func() time.Time
+
+	once sync.Once
+	sem  chan struct{}
 }
 
 // ViaBlastgate reports whether the request carried a blastgate session.
@@ -93,10 +121,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Taken before the body is read, so the bound covers the memory the
+	// bodies hold, not just the recording.
+	h.once.Do(func() { h.sem = make(chan struct{}, maxInFlight) })
+	select {
+	case h.sem <- struct{}{}:
+		defer func() { <-h.sem }()
+	default:
+		h.logger().Warn("webhook busy, review not observed", "in_flight", maxInFlight, "remote", r.RemoteAddr)
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
+			// The write goes through unobserved (failurePolicy: Ignore);
+			// the log line is the only trace of it. No body: it is
+			// whatever the sender chose to put there.
+			h.logger().Warn("admission review too large, not observed", "content_length", r.ContentLength,
+				"limit", maxBody, "remote", r.RemoteAddr)
 			http.Error(w, "admission review too large", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -121,6 +165,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not an AdmissionReview", http.StatusBadRequest)
 			return
 		}
+		h.logger().Warn("admission review did not decode, allowed without observing", "uid", probe.Request.UID,
+			"remote", r.RemoteAddr)
 		h.allow(w, types.UID(probe.Request.UID))
 		return
 	}
@@ -143,6 +189,12 @@ func (h *Handler) bypassed(req *admissionv1.AdmissionRequest) bool {
 }
 
 func (h *Handler) record(ctx context.Context, req *admissionv1.AdmissionRequest) {
+	if h.Rec == nil {
+		// A wiring mistake must cost the record, not panic the handler
+		// (net/http would recover it, but the review would get no answer).
+		h.logger().Error("webhook has no recorder; bypass not recorded", "user", req.UserInfo.Username, "uid", string(req.UID))
+		return
+	}
 	now := time.Now
 	if h.Now != nil {
 		now = h.Now

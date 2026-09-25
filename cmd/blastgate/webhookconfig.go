@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -36,18 +37,27 @@ func webhookConfigCmd(args []string, getenv func(string) string, stdout, stderr 
 	}
 	u, err := url.Parse(*rawURL)
 	// The API server refuses a webhook URL that is not https or carries
-	// user info; catching it here beats a kubectl apply error later.
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
-		fmt.Fprintf(stderr, "--url %q must be https://<host>[:<port>]/<path>, without user info\n", *rawURL)
+	// user info or a fragment; catching it here beats a kubectl apply
+	// error later. The handler only answers /validate, so any other path
+	// (or a query it would ignore) would register a webhook that 404s on
+	// every review and, under failurePolicy Ignore, records nothing.
+	if err == nil && u.Path == "" && u.RawPath == "" {
+		u.Path = "/validate"
+	}
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.Path != "/validate" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		fmt.Fprintf(stderr, "--url %q must be https://<host>[:<port>]/validate, without user info, query or fragment\n", *rawURL)
 		return 2
 	}
+	// Rebuilt from the checked parts so nothing the checks did not look
+	// at reaches the printed configuration.
+	webhookURL := (&url.URL{Scheme: "https", Host: u.Host, Path: "/validate"}).String()
 	cfg, err := config.LoadLocal(getenv)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	// Checked before the CA is loaded or created, so a refused run leaves
-	// no files behind. Without it the configuration would apply cleanly
+	// Without it the configuration would apply cleanly
 	// and every review would then fail TLS verification; with
 	// failurePolicy: Ignore that failure is silent, and the webhook
 	// would observe nothing while looking installed.
@@ -56,12 +66,21 @@ func webhookConfigCmd(args []string, getenv func(string) string, stdout, stderr 
 			u.Hostname(), strings.Join(cfg.TLSHosts, ","))
 		return 2
 	}
-	_, caPEM, err := tlsutil.LoadOrCreate(filepath.Join(cfg.DataDir, "tls"), cfg.TLSHosts)
+	// Read-only: this command never creates the CA or (re)issues the
+	// serving certificate. Doing so here would rewrite the pair under a
+	// running serve, and a CA created by a command that only prints it is
+	// one nobody meant to create. serve, or session new, creates it.
+	caPEM, err := tlsutil.LoadCA(filepath.Join(cfg.DataDir, "tls"))
+	if errors.Is(err, tlsutil.ErrNoCA) {
+		fmt.Fprintf(stderr, "no certificate authority in %s yet; run `blastgate serve` once (it creates the CA and the serving certificate for BLASTGATE_TLS_HOSTS), then run webhook-config again\n",
+			filepath.Join(cfg.DataDir, "tls"))
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	out, err := yaml.Marshal(observeConfig(u.String(), caPEM))
+	out, err := yaml.Marshal(observeConfig(webhookURL, caPEM))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

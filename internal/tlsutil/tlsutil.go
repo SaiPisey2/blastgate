@@ -68,6 +68,31 @@ func LoadOrCreate(dir string, hosts []string) (tls.Certificate, []byte, error) {
 	return pair, caPEM, err
 }
 
+// ErrNoCA is LoadCA finding no finished CA in dir.
+var ErrNoCA = errors.New("no certificate authority yet")
+
+// LoadCA returns the CA certificate PEM without creating anything: no
+// directory, no CA, and no serving certificate. It is for commands that
+// only hand the CA to someone else (webhook-config's caBundle); going
+// through LoadOrCreate there would reissue the serving pair under a
+// running serve whenever the command's host list differed from serve's.
+// A CA still being created counts as absent. The key is read and checked
+// against the certificate so a half-restored CA is caught here, not when
+// the API server first fails to verify the webhook.
+func LoadCA(dir string) ([]byte, error) {
+	certPEM, keyPEM, err := readCA(dir)
+	if errors.Is(err, errNoCA) || errors.Is(err, errCAInProgress) {
+		return nil, ErrNoCA
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := parse(certPEM, keyPEM); err != nil {
+		return nil, fmt.Errorf("certificate authority: %w", err)
+	}
+	return certPEM, nil
+}
+
 // caWait bounds how long a caller waits for another process that has
 // claimed the CA to publish its certificate. A variable so a test of the
 // crashed-owner case need not wait the full time.

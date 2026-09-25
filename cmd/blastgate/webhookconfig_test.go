@@ -10,10 +10,37 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	"sigs.k8s.io/yaml"
+
+	"github.com/SaiPisey2/blastgate/internal/tlsutil"
 )
+
+// withCA creates the CA the way serve does, then removes the serving
+// pair so a test can tell whether webhook-config wrote one.
+func withCA(t *testing.T, dir string) {
+	t.Helper()
+	tlsDir := filepath.Join(dir, "tls")
+	if _, _, err := tlsutil.LoadOrCreate(tlsDir, []string{"127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"server.crt", "server.key"} {
+		if err := os.Remove(filepath.Join(tlsDir, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func noServingCert(t *testing.T, dir string) {
+	t.Helper()
+	for _, f := range []string{"server.crt", "server.key"} {
+		if _, err := os.Stat(filepath.Join(dir, "tls", f)); !os.IsNotExist(err) {
+			t.Errorf("webhook-config wrote tls/%s: %v", f, err)
+		}
+	}
+}
 
 func TestWebhookConfigPinsFailurePolicyIgnore(t *testing.T) {
 	dir := t.TempDir()
+	withCA(t, dir)
 	env := func(k string) string {
 		return map[string]string{"BLASTGATE_DATA_DIR": dir, "BLASTGATE_TLS_HOSTS": "127.0.0.1,gate.internal"}[k]
 	}
@@ -21,6 +48,7 @@ func TestWebhookConfigPinsFailurePolicyIgnore(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
+	noServingCert(t, dir)
 	var cfg admissionregistrationv1.ValidatingWebhookConfiguration
 	if err := yaml.UnmarshalStrict([]byte(out), &cfg); err != nil {
 		t.Fatalf("output is not a ValidatingWebhookConfiguration: %v\n%s", err, out)
@@ -94,20 +122,49 @@ func TestWebhookConfigRefusesAnUncoveredHost(t *testing.T) {
 }
 
 func TestWebhookConfigRefusals(t *testing.T) {
-	env := tempEnv(t)
+	dir := t.TempDir()
+	withCA(t, dir)
+	env := func(k string) string { return map[string]string{"BLASTGATE_DATA_DIR": dir}[k] }
 	for name, args := range map[string][]string{
-		"no url":     {"webhook-config"},
-		"plain http": {"webhook-config", "--url", "http://127.0.0.1:8445/validate"},
-		"no host":    {"webhook-config", "--url", "https:///validate"},
-		"stray arg":  {"webhook-config", "--url", "https://127.0.0.1:8445/validate", "extra"},
-		"userinfo":   {"webhook-config", "--url", "https://u:p@127.0.0.1:8445/validate"},
+		"no url":       {"webhook-config"},
+		"plain http":   {"webhook-config", "--url", "http://127.0.0.1:8445/validate"},
+		"no host":      {"webhook-config", "--url", "https:///validate"},
+		"stray arg":    {"webhook-config", "--url", "https://127.0.0.1:8445/validate", "extra"},
+		"userinfo":     {"webhook-config", "--url", "https://u:p@127.0.0.1:8445/validate"},
+		"other path":   {"webhook-config", "--url", "https://127.0.0.1:8445/mutate"},
+		"root path":    {"webhook-config", "--url", "https://127.0.0.1:8445/"},
+		"subpath":      {"webhook-config", "--url", "https://127.0.0.1:8445/validate/x"},
+		"encoded path": {"webhook-config", "--url", "https://127.0.0.1:8445/valid%61te"},
+		"query":        {"webhook-config", "--url", "https://127.0.0.1:8445/validate?x=1"},
+		"empty query":  {"webhook-config", "--url", "https://127.0.0.1:8445/validate?"},
+		"fragment":     {"webhook-config", "--url", "https://127.0.0.1:8445/validate#x"},
 	} {
 		if code, out, _ := runCLI(env, args...); code != 2 || out != "" {
 			t.Errorf("%s: exit %d, out %q; want 2 and nothing printed", name, code, out)
 		}
 	}
-	// A covered IP, written differently, is still the same address.
-	if code, _, errs := runCLI(env, "webhook-config", "--url", "https://127.0.0.1:8445/validate"); code != 0 {
-		t.Errorf("loopback default refused: %s", errs)
+	// No path means /validate, the only path the handler answers.
+	code, out, errs := runCLI(env, "webhook-config", "--url", "https://127.0.0.1:8445")
+	if code != 0 {
+		t.Fatalf("no path refused: %s", errs)
+	}
+	if !strings.Contains(out, "url: https://127.0.0.1:8445/validate\n") {
+		t.Errorf("empty path not defaulted to /validate:\n%s", out)
+	}
+	noServingCert(t, dir)
+}
+
+func TestWebhookConfigNeedsAnExistingCA(t *testing.T) {
+	dir := t.TempDir()
+	env := func(k string) string { return map[string]string{"BLASTGATE_DATA_DIR": dir}[k] }
+	code, out, errs := runCLI(env, "webhook-config", "--url", "https://127.0.0.1:8445/validate")
+	if code != 1 || out != "" {
+		t.Errorf("exit %d, out %q; want 1 and nothing printed", code, out)
+	}
+	if !strings.Contains(errs, "blastgate serve") {
+		t.Errorf("must say how to create the CA: %q", errs)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tls")); !os.IsNotExist(err) {
+		t.Errorf("webhook-config created TLS files: %v", err)
 	}
 }
