@@ -40,7 +40,23 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "refusing: admin kubeconfig context is %q, not kind-blastgate-fixture\n", ctx)
 		os.Exit(1)
 	}
+	// blastgate forwards with the upstream kubeconfig, so that is the file
+	// that decides which cluster the tests touch. It must point at the
+	// same API server as the fixture's admin kubeconfig.
+	adminServer, upServer := server(adminKC), server(upstreamKC)
+	if adminServer == "" || upServer == "" || adminServer != upServer {
+		fmt.Fprintf(os.Stderr, "refusing: upstream kubeconfig server %q is not the fixture's server %q\n", upServer, adminServer)
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
+}
+
+func server(kubeconfig string) string {
+	out, err := exec.Command("kubectl", "--kubeconfig", kubeconfig, "config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 type logBuf struct {
@@ -207,12 +223,23 @@ func TestClientImpersonationIsRefused(t *testing.T) {
 	}
 }
 
+// kubectl never prints the body of a 401 on discovery, its first request;
+// it prints a fixed "provide credentials" line, as it does for the API
+// server's own 401s. "Unauthorized" reaches the output only through the
+// Warning header blastgate adds to every Status it writes.
 func TestRevokedSessionIsRejected(t *testing.T) {
 	g := start(t)
 	kc := g.session(t, "alice")
 	must(t)(kubectl(t, kc, nil, "", "get", "pods", "-n", "demo"))
-	list, _ := g.run(t, "session", "list")
-	id := strings.Fields(strings.Split(strings.TrimSpace(list), "\n")[1])[0]
+	list, err := g.run(t, "session", "list")
+	if err != nil {
+		t.Fatalf("session list: %v", err)
+	}
+	rows := strings.Split(strings.TrimSpace(list), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("session list: want a header and one session:\n%s", list)
+	}
+	id := strings.Fields(rows[1])[0]
 	if _, err := g.run(t, "session", "revoke", id); err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +352,9 @@ func TestLogsAndFollow(t *testing.T) {
 	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc, "logs", "-f", "-n", "demo", "deploy/web")
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + t.TempDir()}
 	stdout, _ := cmd.StdoutPipe()
-	cmd.Start()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
 	defer cmd.Process.Kill()
 	first, _ := bufio.NewReader(stdout).ReadString('\n')
 	if !strings.Contains(first, "started") {

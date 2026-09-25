@@ -31,5 +31,7 @@ fixture-test: build
 	cd e2e && BLASTGATE_E2E_ADMIN=$(ADMIN_KC) BLASTGATE_E2E_UPSTREAM=$(UP_KC) go test -tags=e2e -count=1 -v .
 
 fixture-down:
-	kind delete cluster --name $(CLUSTER)
+	# --kubeconfig: without it kind removes the context from the default
+	# kubeconfig, which means opening, locking and rewriting that file.
+	kind delete cluster --name $(CLUSTER) --kubeconfig $(ADMIN_KC)
 	rm -f $(ADMIN_KC) $(UP_KC)
