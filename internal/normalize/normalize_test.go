@@ -277,3 +277,19 @@ func TestDotAndEmptySegmentsAreRefused(t *testing.T) {
 	act(t, "GET", "/", nil)                             // the root is not an empty segment
 	act(t, "GET", "/api/v1/namespaces/demo/pods/", nil) // a cleaner resolves this to the same object
 }
+
+// Residual fix: checkSegments alone splits the escaped path, so an encoded
+// slash inside one of its segments hides the ".." that appears once the
+// path is decoded -- the path RequestInfoFactory actually parses.
+func TestEncodedSlashHidingDotDotIsRefused(t *testing.T) {
+	for _, target := range []string{
+		"/api/v1/namespaces/demo/pods/x%2F..%2Fsecrets",
+		"/api/v1/namespaces/demo%2F..%2Fkube-system/secrets/s",
+	} {
+		r := httptest.NewRequest("GET", target, nil)
+		if a, err := FromRequest(r, p); err == nil {
+			t.Errorf("%s normalised to %+v", target, a)
+		}
+	}
+	act(t, "GET", "/api/v1/namespaces/demo/pods/", nil) // trailing slash still works
+}

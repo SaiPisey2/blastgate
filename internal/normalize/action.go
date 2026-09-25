@@ -75,6 +75,9 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	if err := checkSegments(r.URL.EscapedPath()); err != nil {
 		return Action{}, err
 	}
+	if err := checkDecodedSegments(r.URL.Path); err != nil {
+		return Action{}, err
+	}
 	info, err := infoFactory.NewRequestInfo(r)
 	if err != nil {
 		return Action{}, fmt.Errorf("parsing request: %w", err)
@@ -147,14 +150,7 @@ var streamSubresources = map[string]bool{"exec": true, "attach": true, "portforw
 // unscored, so the parse is all that stands between it and the wrong
 // object.
 func checkSegments(escaped string) error {
-	// One trailing slash is not refused: a cleaner resolves .../web/ to
-	// .../web, the same object the parser reads, and apiPath already
-	// accepts it (TestAPIPathAgreesWithNormalize). "/" alone is the root.
-	trimmed := strings.TrimSuffix(strings.TrimPrefix(escaped, "/"), "/")
-	if trimmed == "" && (escaped == "/" || escaped == "") {
-		return nil
-	}
-	for _, seg := range strings.Split(trimmed, "/") {
+	for _, seg := range splitPath(escaped) {
 		u, err := url.PathUnescape(seg)
 		if err != nil {
 			return fmt.Errorf("path segment not decodable: %w", err)
@@ -164,6 +160,36 @@ func checkSegments(escaped string) error {
 		}
 	}
 	return nil
+}
+
+// checkDecodedSegments repeats the same check against r.URL.Path -- the
+// already-decoded path RequestInfoFactory itself parses. An escaped slash
+// inside one segment of the escaped path (pods/x%2F..%2Fsecrets) decodes to
+// a literal "/", so splitting the escaped path merges what become three
+// decoded segments -- "x", "..", "secrets" -- into one that reads as
+// harmless. checkSegments alone would miss it; splitting the decoded path
+// directly (with no further unescaping -- it is already decoded) catches
+// it. Chosen over refusing every encoded slash outright, which would also
+// hold requests whose proxy sub-path legitimately encodes one.
+func checkDecodedSegments(decoded string) error {
+	for _, seg := range splitPath(decoded) {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("path has an empty, \".\" or \"..\" segment")
+		}
+	}
+	return nil
+}
+
+// splitPath returns path's segments, allowing one trailing slash (a cleaner
+// resolves .../web/ to .../web, the same object the parser reads, and
+// apiPath already accepts it -- TestAPIPathAgreesWithNormalize). "/" alone,
+// or "", is the root and has no segments.
+func splitPath(path string) []string {
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/")
+	if trimmed == "" && (path == "/" || path == "") {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
 }
 
 // normalizePatchType strips parameters (e.g. "; charset=utf-8") from a
