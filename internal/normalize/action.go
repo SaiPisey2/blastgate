@@ -8,6 +8,7 @@ package normalize
 
 import (
 	"fmt"
+	"mime"
 	"net/http"
 	"sort"
 
@@ -18,17 +19,30 @@ import (
 type Principal struct{ Session, Human, Agent string }
 
 type Action struct {
-	Verb        string              `json:"verb"`
-	Group       string              `json:"group"`
-	Version     string              `json:"version"`
-	Resource    string              `json:"resource"`
-	Subresource string              `json:"subresource"`
-	Namespace   string              `json:"namespace"`
-	Name        string              `json:"name"`
-	PatchType   string              `json:"patchType,omitempty"`
-	Query       map[string][]string `json:"query,omitempty"`
-	Principal   Principal           `json:"principal"`
-	Source      string              `json:"source"`
+	Verb        string `json:"verb"`
+	Group       string `json:"group"`
+	Version     string `json:"version"`
+	Resource    string `json:"resource"`
+	Subresource string `json:"subresource"`
+	Namespace   string `json:"namespace"`
+	Name        string `json:"name"`
+	// Path is the request's escaped URL path. RequestInfo does not expose
+	// the sub-path after a proxy subresource (pods/x/proxy/<anything>,
+	// services/x/proxy/..., nodes/x/proxy/...) -- two different proxied
+	// endpoints otherwise share one Action, so an approval for one would
+	// silently cover the other. Kept for every request, not only proxy
+	// ones, since the path is what fully determines the target.
+	Path string `json:"path"`
+	// RawQuery is the full, unparsed query string. Only set for a proxy
+	// subresource: the proxy target is chosen by the backend, from
+	// whatever it finds in the query, not only from the semantic
+	// parameters blastgate otherwise recognises -- the same sub-path with
+	// a different query can be a different backend endpoint.
+	RawQuery  string              `json:"rawQuery,omitempty"`
+	PatchType string              `json:"patchType,omitempty"`
+	Query     map[string][]string `json:"query,omitempty"`
+	Principal Principal           `json:"principal"`
+	Source    string              `json:"source"`
 }
 
 var infoFactory = &request.RequestInfoFactory{
@@ -54,7 +68,7 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	if err != nil {
 		return Action{}, fmt.Errorf("parsing request: %w", err)
 	}
-	a := Action{Principal: p, Source: "proxy"}
+	a := Action{Principal: p, Source: "proxy", Path: r.URL.EscapedPath()}
 	if !info.IsResourceRequest {
 		// Discovery, /version, /openapi: harmless to read, meaningless to
 		// write. A write here is nothing this build can score.
@@ -73,8 +87,14 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	if a.Resource == "namespaces" && a.Subresource == "" {
 		a.Namespace = ""
 	}
+	if a.Subresource == "proxy" {
+		// RequestInfo has no field for the sub-path or query after
+		// .../proxy/ -- the backend the proxy dials is chosen from both,
+		// so both must be part of what the digest binds an approval to.
+		a.RawQuery = r.URL.RawQuery
+	}
 	if a.Verb == "patch" {
-		a.PatchType = r.Header.Get("Content-Type")
+		a.PatchType = normalizePatchType(r.Header.Get("Content-Type"))
 	}
 	q := r.URL.Query()
 	for _, k := range semanticQuery {
@@ -94,7 +114,34 @@ func FromRequest(r *http.Request, p Principal) (Action, error) {
 	return a, nil
 }
 
+// normalizePatchType strips parameters (e.g. "; charset=utf-8") from a
+// Content-Type so the same patch type sent with different parameters still
+// binds to the same digest. A header mime can't parse is kept verbatim --
+// it's not one of the four patch types anyway, so it can't collide with one.
+func normalizePatchType(contentType string) string {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return contentType
+	}
+	return mediaType
+}
+
+// interactiveSubresources reach an arbitrary backend or open a bidirectional
+// stream, never merely reading a stored object -- kubectl's exec (1.30+)
+// and port-forward (1.31+) are a WebSocket opened with an HTTP GET, so
+// RequestInfoFactory reports verb "get" for them exactly as it would for a
+// read. Controller ruling P1-R6: IsRead must not trust the verb alone here.
+var interactiveSubresources = map[string]bool{
+	"exec":        true,
+	"attach":      true,
+	"portforward": true,
+	"proxy":       true,
+}
+
 func (a Action) IsRead() bool {
+	if interactiveSubresources[a.Subresource] {
+		return false
+	}
 	switch a.Verb {
 	case "get", "list", "watch":
 		return true

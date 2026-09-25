@@ -10,19 +10,21 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// RequestDigest identifies what a request would do: target, verb, the
-// semantic query and the body -- not who sent it, and not the body's
-// formatting. An approval is bound to it, so an agent's identical retry
-// must produce the same digest even when kubectl re-serialises the body
-// with keys in a different order, and a request that changes anything
-// that matters must not.
+// RequestDigest identifies what a request would do: target (including the
+// full path, so a different proxy sub-path is never mistaken for the same
+// request), verb, the semantic query (plus the full query for a proxy
+// subresource, whose backend the query itself can select) and the body --
+// not who sent it, and not the body's formatting. An approval is bound to
+// it, so an agent's identical retry must produce the same digest even when
+// kubectl re-serialises the body with keys in a different order, and a
+// request that changes anything that matters must not.
 func RequestDigest(a Action, body []byte) string {
 	id := struct {
-		Verb, Group, Version, Resource, Subresource, Namespace, Name, PatchType string
-		Query                                                                   map[string][]string
-		Body                                                                    json.RawMessage
-		RawBody                                                                 string `json:",omitempty"`
-	}{a.Verb, a.Group, a.Version, a.Resource, a.Subresource, a.Namespace, a.Name, a.PatchType, a.Query, nil, ""}
+		Verb, Group, Version, Resource, Subresource, Namespace, Name, Path, RawQuery, PatchType string
+		Query                                                                                   map[string][]string
+		Body                                                                                    json.RawMessage
+		RawBody                                                                                 string `json:",omitempty"`
+	}{a.Verb, a.Group, a.Version, a.Resource, a.Subresource, a.Namespace, a.Name, a.Path, a.RawQuery, a.PatchType, a.Query, nil, ""}
 	if canon, ok := canonicalBody(a.PatchType, body); ok {
 		id.Body = canon
 	} else if len(body) > 0 {

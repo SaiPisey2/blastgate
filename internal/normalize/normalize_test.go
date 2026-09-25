@@ -55,6 +55,26 @@ func TestIsRead(t *testing.T) {
 	}
 }
 
+// Controller ruling P1-R6: kubectl's exec (1.30+) and port-forward (1.31+)
+// open over WebSocket, which is an HTTP GET -- RequestInfoFactory reports
+// verb "get" for them just as it would for a genuine read, and a proxy
+// subresource can likewise be a GET that reaches an arbitrary endpoint.
+// None of these may be treated as a read regardless of verb.
+func TestInteractiveSubresourcesAreNotReadsEvenAsGET(t *testing.T) {
+	for _, target := range []string{
+		"/api/v1/namespaces/demo/pods/web-1/exec?command=sh",
+		"/api/v1/namespaces/demo/pods/web-1/attach",
+		"/api/v1/namespaces/demo/pods/web-1/portforward",
+		"/api/v1/namespaces/demo/pods/web-1/proxy/x",
+		"/api/v1/namespaces/demo/services/web/proxy/x",
+	} {
+		a := act(t, "GET", target, nil)
+		if a.IsRead() {
+			t.Errorf("GET %s: %+v treated as a read", target, a)
+		}
+	}
+}
+
 // Discovery and non-resource paths (/api, /apis, /version, /openapi/v3)
 // are reads with no resource; they must not error.
 func TestNonResourceRequestsAreReads(t *testing.T) {
@@ -134,5 +154,56 @@ func TestDigestOfUnparseableBodyIsStable(t *testing.T) {
 	}
 	if RequestDigest(a, []byte("{not json")) == RequestDigest(a, []byte("{not json!")) {
 		t.Error("different raw bodies collided")
+	}
+}
+
+// Controller ruling P1-R5: RequestInfo has no field for what follows a
+// proxy subresource, so two different proxied endpoints with the same
+// empty body would otherwise digest identically -- one approval could
+// release a request to a different endpoint than the one it was approved
+// for.
+func TestDigestSeparatesProxySubPaths(t *testing.T) {
+	foo := act(t, "POST", "/api/v1/namespaces/demo/pods/web-1/proxy/foo", nil)
+	bar := act(t, "POST", "/api/v1/namespaces/demo/pods/web-1/proxy/bar", nil)
+	if RequestDigest(foo, nil) == RequestDigest(bar, nil) {
+		t.Error("different proxy sub-paths produced the same digest")
+	}
+
+	q1 := act(t, "POST", "/api/v1/namespaces/demo/pods/web-1/proxy/foo?port=8080", nil)
+	q2 := act(t, "POST", "/api/v1/namespaces/demo/pods/web-1/proxy/foo?port=9090", nil)
+	if RequestDigest(q1, nil) == RequestDigest(q2, nil) {
+		t.Error("same proxy sub-path with a different query produced the same digest")
+	}
+}
+
+func TestIdenticalRetryDigestsEqual(t *testing.T) {
+	a1 := act(t, "PATCH", "/apis/apps/v1/namespaces/demo/deployments/web?fieldManager=kubectl",
+		map[string]string{"Content-Type": "application/apply-patch+yaml"})
+	a2 := act(t, "PATCH", "/apis/apps/v1/namespaces/demo/deployments/web?fieldManager=kubectl",
+		map[string]string{"Content-Type": "application/apply-patch+yaml"})
+	body := []byte("kind: Deployment\nspec:\n  replicas: 0\n")
+	if RequestDigest(a1, body) != RequestDigest(a2, body) {
+		t.Error("an identical retry, including path, produced a different digest")
+	}
+}
+
+func TestPatchTypeNormalizesMediaTypeParameters(t *testing.T) {
+	a := act(t, "PATCH", "/apis/apps/v1/namespaces/demo/deployments/web",
+		map[string]string{"Content-Type": "application/merge-patch+json; charset=utf-8"})
+	if a.PatchType != "application/merge-patch+json" {
+		t.Errorf("patch type %q; charset parameter should be stripped", a.PatchType)
+	}
+	bare := act(t, "PATCH", "/apis/apps/v1/namespaces/demo/deployments/web",
+		map[string]string{"Content-Type": "application/merge-patch+json"})
+	if RequestDigest(a, []byte("{}")) != RequestDigest(bare, []byte("{}")) {
+		t.Error("charset parameter changed the digest")
+	}
+}
+
+func TestPatchTypeKeptVerbatimOnParseError(t *testing.T) {
+	a := act(t, "PATCH", "/apis/apps/v1/namespaces/demo/deployments/web",
+		map[string]string{"Content-Type": "not a media type;;;"})
+	if a.PatchType != "not a media type;;;" {
+		t.Errorf("patch type %q; unparseable content-type should be kept as-is", a.PatchType)
 	}
 }
