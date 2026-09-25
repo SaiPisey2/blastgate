@@ -113,6 +113,37 @@ func TestScaleSubresourceUsesStatusSelector(t *testing.T) {
 	}
 }
 
+// autoscaling/v1 Scale's spec.replicas is an omitempty int32, so the
+// dry-run of a scale to zero answers with no replicas at all. Found live:
+// `kubectl scale --replicas=0` of a prod Service's only backend was
+// allowed as a plain change.
+func TestScaleSubresourceToZeroIsAScaleDown(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, `{"kind":"Scale","spec":{"replicas":1},"status":{"selector":"app=web"}}`, `{"kind":"Scale","spec":{},"status":{"selector":"app=web"}}`, 200, &seen)
+	look := &fakeLook{report: disruption.Report{Services: []disruption.Service{{Name: "web", Ready: 1, Left: 0}}}}
+	e.look = look
+	a := normalize.Action{Verb: "patch", Group: "apps", Version: "v1", Resource: "deployments", Subresource: "scale", Namespace: "demo", Name: "web", PatchType: "application/merge-patch+json", Principal: alice}
+	i := e.assessMutation(context.Background(), a, []byte(`{"spec":{"replicas":0}}`))
+	if look.lastRm.Count != 1 {
+		t.Fatalf("removal = %+v", look.lastRm)
+	}
+	if left, ok := i.EndpointsLeft["web"]; !i.Measured || !ok || left != 0 {
+		t.Errorf("impact = %+v", i)
+	}
+}
+
+// A workload whose dry-run answer lost spec.replicas cannot be assumed
+// not to have scaled down.
+func TestReplicasMissingFromTheDryRunIsUnmeasured(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, deployment(2, `{"app":"web"}`), `{"kind":"Deployment","spec":{"selector":{"matchLabels":{"app":"web"}},"template":{"metadata":{"labels":{"app":"web"}}}}}`, 200, &seen)
+	e.look = &fakeLook{}
+	a := normalize.Action{Verb: "patch", Group: "apps", Version: "v1", Resource: "deployments", Namespace: "demo", Name: "web", PatchType: "application/merge-patch+json", Principal: alice}
+	if i := e.assessMutation(context.Background(), a, []byte(`{}`)); i.Measured {
+		t.Errorf("impact = %+v", i)
+	}
+}
+
 func TestTemplateRelabelOrphansService(t *testing.T) {
 	var seen []*http.Request
 	e := apiServer(t, deployment(1, `{"app":"web"}`), deployment(1, `{"app":"web2"}`), 200, &seen)

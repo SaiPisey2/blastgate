@@ -232,10 +232,27 @@ func (e *Engine) assessMutation(ctx context.Context, a normalize.Action, body []
 func (e *Engine) scaleDown(ctx context.Context, a normalize.Action, before, after map[string]any, i *Impact) string {
 	b, okb := nestedInt(before, "spec", "replicas")
 	n, oka := nestedInt(after, "spec", "replicas")
+	isScale := a.Subresource == "scale"
+	if isScale {
+		// autoscaling/v1 Scale's spec.replicas is an omitempty int32: the
+		// API server writes a Scale of zero replicas with no replicas at
+		// all. Read as "not a scale-down", a scale to zero passed as a
+		// plain change.
+		if _, ok := nested(before, "spec"); ok && !okb {
+			b, okb = 0, true
+		}
+		if _, ok := nested(after, "spec"); ok && !oka {
+			n, oka = 0, true
+		}
+	}
+	if okb && !oka {
+		// The live object had replicas and the dry-run's answer has none:
+		// whatever it would do to them is unknown, not "unchanged".
+		return fmt.Sprintf("replicas missing from the dry-run of %s", a.Resource)
+	}
 	if !okb || !oka || n >= b {
 		return ""
 	}
-	isScale := a.Subresource == "scale"
 	if !isScale && !(a.Subresource == "" && hasPodSelector(a)) {
 		return fmt.Sprintf("replicas decrease on %s, whose pods this build cannot find", a.Resource)
 	}
