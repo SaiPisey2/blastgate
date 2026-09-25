@@ -77,7 +77,11 @@ type gate struct {
 	logs *logBuf
 }
 
-func start(t *testing.T) *gate {
+// start runs blastgate serve with a 3s hold, so a held request's ticket
+// comes back quickly; extra env entries (for example a longer
+// BLASTGATE_HOLD) override the defaults, since exec keeps the last of
+// duplicate keys.
+func start(t *testing.T, extra ...string) *gate {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -95,7 +99,9 @@ func start(t *testing.T) *gate {
 		"BLASTGATE_LISTEN=" + addr,
 		"BLASTGATE_UPSTREAM_KUBECONFIG=" + upstreamKC,
 		"BLASTGATE_SIGNING_KEY=" + hex.EncodeToString(key),
+		"BLASTGATE_HOLD=3s",
 	}}
+	g.env = append(g.env, extra...)
 	cmd := exec.Command("../blastgate", "serve")
 	cmd.Env, cmd.Stderr = g.env, g.logs
 	if err := cmd.Start(); err != nil {
@@ -171,10 +177,60 @@ func must(t *testing.T) func(string, error) string {
 	}
 }
 
-func TestTheServiceAccountAloneCannotRead(t *testing.T) {
-	out, err := kubectl(t, upstreamKC, nil, "", "get", "pods", "-n", "demo")
-	if err == nil || !strings.Contains(out, "forbidden") {
-		t.Fatalf("the service account can read pods by itself, so the other tests prove nothing:\n%s", out)
+// writeTemp writes content to a private file in the test's temp dir.
+func writeTemp(t *testing.T, content string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "file.yaml")
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+var approvalID = regexp.MustCompile(`[0-9a-f]{32}`)
+
+// approveWhileHeld approves every pending approval as it appears, until
+// the returned function is called. Under the default policy every exec,
+// attach and port-forward is unmeasured and so held; the compatibility
+// tests are about the streams working through blastgate once released,
+// so a person approving inline stands in for the one who would.
+func (g *gate) approveWhileHeld(t *testing.T) (stop func()) {
+	t.Helper()
+	done, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(finished)
+		seen := map[string]bool{}
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
+			list, _ := g.run(t, "approvals", "--status", "pending")
+			for _, id := range approvalID.FindAllString(list, -1) {
+				if !seen[id] {
+					seen[id] = true
+					g.run(t, "approve", id, "--by", "bob")
+				}
+			}
+		}
+	}()
+	return func() { close(done); <-finished }
+}
+
+// With read access (for scoring) the service account could read the demo
+// namespace by itself; what must stay true is that it cannot write there,
+// so every write that lands does so as the impersonated human.
+func TestTheServiceAccountAloneCannotWrite(t *testing.T) {
+	pod := strings.TrimPrefix(strings.TrimSpace(must(t)(kubectl(t, adminKC, nil, "", "get", "pods", "-n", "demo", "-l", "app=web", "-o", "name"))), "pod/")
+	for _, args := range [][]string{
+		{"delete", "pod", pod, "-n", "demo", "--dry-run=server"},
+		{"create", "configmap", "e2e-sa-write", "-n", "demo", "--dry-run=server"},
+	} {
+		out, err := kubectl(t, upstreamKC, nil, "", args...)
+		if err == nil || !strings.Contains(out, "forbidden") {
+			t.Errorf("the service account can %s by itself, so the other tests prove nothing:\n%s", args[0], out)
+		}
 	}
 }
 
@@ -296,8 +352,9 @@ func TestWatchStreamsEvents(t *testing.T) {
 }
 
 func TestExecOverWebSocketAndSPDY(t *testing.T) {
-	g := start(t)
+	g := start(t, "BLASTGATE_HOLD=10s")
 	kc := g.session(t, "alice")
+	defer g.approveWhileHeld(t)()
 	for _, ws := range []string{"true", "false"} {
 		env := []string{"KUBECTL_REMOTE_COMMAND_WEBSOCKETS=" + ws}
 		out := must(t)(kubectl(t, kc, env, "", "exec", "-n", "demo", "deploy/web", "--", "echo", "hello-"+ws))
@@ -312,8 +369,9 @@ func TestExecOverWebSocketAndSPDY(t *testing.T) {
 }
 
 func TestPortForward(t *testing.T) {
-	g := start(t)
+	g := start(t, "BLASTGATE_HOLD=10s")
 	kc := g.session(t, "alice")
+	defer g.approveWhileHeld(t)()
 	for _, ws := range []string{"true", "false"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kc, "port-forward", "-n", "demo", "deploy/web", ":8080")
@@ -370,11 +428,21 @@ func TestLogsAndFollow(t *testing.T) {
 func TestServerSideApplyAndDelete(t *testing.T) {
 	g := start(t)
 	kc := g.session(t, "alice")
-	f := filepath.Join(t.TempDir(), "cm.yaml")
-	os.WriteFile(f, []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: e2e-apply\n  namespace: demo\ndata:\n  k: v\n"), 0o600)
+	f := writeTemp(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: e2e-apply\n  namespace: demo\ndata:\n  k: v\n")
 	out := must(t)(kubectl(t, kc, nil, "", "apply", "--server-side", "-f", f))
 	if !strings.Contains(out, "serverside-applied") {
 		t.Errorf("apply: %q", out)
+	}
+	// Deleting a ConfigMap is COMPENSABLE (it can be recreated from the
+	// snapshot, but whatever read it notices), and the default policy
+	// holds what it does not name as safe: held, approved, retried.
+	out, err := kubectl(t, kc, nil, "", "delete", "configmap", "e2e-apply", "-n", "demo")
+	m := ticket.FindStringSubmatch(out)
+	if err == nil || m == nil {
+		t.Fatalf("configmap delete was not held with a ticket:\n%s", out)
+	}
+	if _, err := g.run(t, "approve", m[1], "--by", "bob"); err != nil {
+		t.Fatal(err)
 	}
 	must(t)(kubectl(t, kc, nil, "", "delete", "configmap", "e2e-apply", "-n", "demo"))
 }

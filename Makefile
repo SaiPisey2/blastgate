@@ -27,6 +27,8 @@ fixture-up:
 	$(KC) wait --for=condition=Ready node --all --timeout=120s
 	$(KC) apply -f fixture/manifests/
 	$(KC) -n demo rollout status deploy/web --timeout=180s
+	$(KC) -n demo rollout status deploy/db --timeout=180s
+	$(KC) -n demo wait --for=jsonpath='{.status.phase}'=Bound pvc/data --timeout=120s
 	sh fixture/mkupstream.sh $(ADMIN_KC) $(UP_KC)
 
 fixture-test: build

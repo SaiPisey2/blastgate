@@ -2,9 +2,13 @@ apiVersion: v1
 kind: Namespace
 metadata: {name: blastgate-system}
 ---
+# env: prod is what the default policy's leaves-a-service-empty-in-prod
+# rule reads; without it, scaling web to zero would not be held.
 apiVersion: v1
 kind: Namespace
-metadata: {name: demo}
+metadata:
+  name: demo
+  labels: {env: prod}
 ---
 apiVersion: v1
 kind: Namespace
