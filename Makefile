@@ -16,12 +16,14 @@ KC       := kubectl --kubeconfig $(ADMIN_KC)
 
 .PHONY: fixture-up fixture-test fixture-down
 
+# umask 077 and chmod: the admin kubeconfig is cluster-admin on the
+# fixture, and a redirect into an existing file keeps that file's mode.
 fixture-up:
-	@if ! kind get clusters | grep -qx '$(CLUSTER)'; then \
+	@umask 077; if ! kind get clusters | grep -qx '$(CLUSTER)'; then \
 		kind create cluster --name $(CLUSTER) --config fixture/kind.yaml --kubeconfig $(ADMIN_KC); \
 	else \
 		kind get kubeconfig --name $(CLUSTER) > $(ADMIN_KC); \
-	fi
+	fi; chmod 600 $(ADMIN_KC)
 	$(KC) wait --for=condition=Ready node --all --timeout=120s
 	$(KC) apply -f fixture/manifests/
 	$(KC) -n demo rollout status deploy/web --timeout=180s
