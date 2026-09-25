@@ -1,14 +1,17 @@
 // Package proxy is front-end ① in the design: the one front-end that
-// enforces, because every request kubectl makes passes through it. This
-// build authenticates the session, refuses requests that try to choose
-// their own identity, and forwards as the session's human.
+// enforces, because every request kubectl makes passes through it. It
+// authenticates the session, refuses requests that try to choose their
+// own identity, asks the gate whether to forward, and forwards as the
+// session's human.
 package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 
+	"github.com/SaiPisey2/blastgate/internal/gate"
 	"github.com/SaiPisey2/blastgate/internal/session"
 	"github.com/SaiPisey2/blastgate/internal/store"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
@@ -34,11 +38,29 @@ type Authenticator interface {
 	Authenticate(*http.Request) (store.Session, error)
 }
 
+// Decider is the gate as the proxy sees it. Decide says whether one
+// request may be forwarded; Complete records how it ended, and is called
+// exactly once for every request Decide saw.
+type Decider interface {
+	Decide(ctx context.Context, s store.Session, r *http.Request, body []byte) gate.Verdict
+	Complete(ctx context.Context, v gate.Verdict, status int, outcome string, latency time.Duration)
+}
+
 type Proxy struct {
 	auth Authenticator
+	d    Decider
 	rp   *httputil.ReverseProxy
 	log  *slog.Logger
 }
+
+// maxBody is the API server's own request-body limit. A larger body could
+// not succeed upstream anyway, and buffering without a bound would let one
+// client exhaust blastgate's memory.
+const maxBody = 3 << 20
+
+// outcomeAborted marks a stream that ended mid-response: the client or the
+// upstream went away, and what the client received was cut short.
+const outcomeAborted = "aborted"
 
 // outcomeUnknown marks a request whose client left before the API server
 // answered. The server may have acted anyway (a create can be committed
@@ -58,8 +80,13 @@ type request struct {
 	cancelled bool
 }
 
-func New(auth Authenticator, up *upstream.Upstream, log *slog.Logger) *Proxy {
-	p := &Proxy{auth: auth, log: log}
+func New(auth Authenticator, d Decider, up *upstream.Upstream, log *slog.Logger) *Proxy {
+	if d == nil {
+		// A proxy with no decision step forwards everything: every write
+		// an agent sends would reach the cluster unscored and unaudited.
+		panic("proxy: New needs a Decider")
+	}
+	p := &Proxy{auth: auth, d: d, log: log}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(up.URL)
@@ -122,10 +149,49 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k, ok := impersonation(r); ok {
-		// The header name only: its value is whoever the caller tried to
-		// become, and need not be a harmless string.
-		p.log.Warn("refused client impersonation", "session", s.ID, "human", s.Human, "agent", s.Agent, "header", k)
-		WriteStatus(w, http.StatusForbidden, metav1.StatusReasonForbidden, "blastgate: requests may not carry impersonation headers; the session already says who is acting")
+		p.refuseImpersonation(w, s, k)
+		return
+	}
+	body, err := readBody(r)
+	if errors.Is(err, errTooLarge) {
+		p.log.Warn("refused oversized body", "session", s.ID, "human", s.Human, "agent", s.Agent, "method", r.Method, "path", r.URL.Path)
+		WriteStatus(w, http.StatusRequestEntityTooLarge, metav1.StatusReasonRequestEntityTooLarge, "blastgate: request bodies over 3 MiB are refused")
+		return
+	}
+	if err != nil {
+		// A body that did not arrive whole cannot be scored, and forwarding
+		// the part that did would send a request the agent never made.
+		p.log.Warn("request body unreadable", "session", s.ID, "human", s.Human, "agent", s.Agent, "method", r.Method, "path", r.URL.Path)
+		WriteStatus(w, http.StatusBadRequest, metav1.StatusReasonBadRequest, "blastgate: the request body could not be read")
+		return
+	}
+	// Checked again now the body has been read: trailers arrive after it,
+	// and Go keeps undeclared ones too. Before buffering, ReverseProxy
+	// cloned the request before any trailer existed; now it would clone
+	// them and HTTP/2 would send them upstream.
+	if k, ok := impersonation(r); ok {
+		p.refuseImpersonation(w, s, k)
+		return
+	}
+	v := p.d.Decide(r.Context(), s, r, body)
+	if !v.Forward {
+		code := v.Code
+		if code < 400 || code > 599 {
+			// A refusal without an error code is a gate bug. WriteHeader
+			// panics on 0 and a 2xx would read to kubectl as success; the
+			// request is refused either way, so say so as a 503.
+			code = http.StatusServiceUnavailable
+		}
+		WriteStatus(w, code, v.Reason, v.Message)
+		attrs := []any{"session", s.ID, "human", s.Human, "agent", s.Agent,
+			"method", r.Method, "path", r.URL.Path, "code", code}
+		if v.Ticket != "" {
+			attrs = append(attrs, "ticket", v.Ticket)
+		}
+		p.log.Warn("refused", attrs...)
+		// Background: a client that gave up during a hold has cancelled
+		// r.Context(), and its result row must still be written.
+		p.d.Complete(context.Background(), v, code, "", time.Since(start))
 		return
 	}
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
@@ -133,6 +199,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Deferred because ReverseProxy panics with ErrAbortHandler when the
 	// client leaves mid-stream; a log call after it would be skipped for
 	// every watch or logs -f the client stops.
+	verdict := v
 	defer func() {
 		v := recover()
 		// Path only: exec and attach carry the command in the query string,
@@ -147,8 +214,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if v != nil {
 			attrs = append(attrs, "aborted", true)
 		}
-		attrs = append(attrs, "upgrade", isUpgrade(r.Header), "ms", time.Since(start).Milliseconds())
+		latency := time.Since(start)
+		attrs = append(attrs, "upgrade", isUpgrade(r.Header), "ms", latency.Milliseconds())
 		p.log.Info("request", attrs...)
+		status, outcome := rec.status, ""
+		switch {
+		case rq.cancelled:
+			status, outcome = 0, outcomeUnknown
+		case v != nil:
+			outcome = outcomeAborted
+		}
+		// Background, not the request's context: a cancelled request is
+		// exactly the one whose result row must still be written.
+		p.d.Complete(context.Background(), verdict, status, outcome, latency)
 		if v != nil {
 			// http.Server still has to see the panic to drop the
 			// connection instead of ending the stream as if complete.
@@ -156,6 +234,38 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	p.rp.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestKey{}, rq)))
+}
+
+func (p *Proxy) refuseImpersonation(w http.ResponseWriter, s store.Session, k string) {
+	// The header name only: its value is whoever the caller tried to
+	// become, and need not be a harmless string.
+	p.log.Warn("refused client impersonation", "session", s.ID, "human", s.Human, "agent", s.Agent, "header", k)
+	WriteStatus(w, http.StatusForbidden, metav1.StatusReasonForbidden, "blastgate: requests may not carry impersonation headers; the session already says who is acting")
+}
+
+var errTooLarge = errors.New("request body too large")
+
+// readBody buffers the body so the gate can score exactly the bytes that
+// will be forwarded, then puts it back for ReverseProxy. The body is
+// never logged or stored; the gate keeps only its digest.
+func readBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	r.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBody {
+		return nil, errTooLarge
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	// The length is known now; forwarding it chunked would only hide that.
+	r.TransferEncoding = nil
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	return body, nil
 }
 
 // impersonation reports the first header, or declared trailer, that tries
@@ -196,8 +306,11 @@ func impersonation(r *http.Request) (string, bool) {
 // Warning, a refusal there prints as "Error from server (Forbidden):
 // unknown" -- the same thing kubectl prints for the API server's own
 // refusals on discovery. Because msg is echoed into a header as well as
-// the body, callers must pass only constant blastgate text, never
-// anything derived from the request or the session.
+// the body, and the agent reads both, callers pass only blastgate's
+// constant text plus values blastgate generated or validated itself:
+// approval IDs, counts, class names and validated rule names. Never
+// request, session or cluster data (object names, error text), which the
+// agent could have chosen.
 func WriteStatus(w http.ResponseWriter, code int, reason metav1.StatusReason, msg string) {
 	// A message a Warning cannot carry (control characters, invalid UTF-8)
 	// still goes in the body; it only loses the header.

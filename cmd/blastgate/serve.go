@@ -12,9 +12,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/SaiPisey2/blastgate/internal/approval"
 	"github.com/SaiPisey2/blastgate/internal/config"
+	"github.com/SaiPisey2/blastgate/internal/engine"
+	"github.com/SaiPisey2/blastgate/internal/gate"
+	"github.com/SaiPisey2/blastgate/internal/normalize"
+	"github.com/SaiPisey2/blastgate/internal/policy"
 	"github.com/SaiPisey2/blastgate/internal/proxy"
 	"github.com/SaiPisey2/blastgate/internal/session"
+	"github.com/SaiPisey2/blastgate/internal/store"
 	"github.com/SaiPisey2/blastgate/internal/tlsutil"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
 )
@@ -47,8 +53,17 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		return 2
 	}
 	auth := &session.Authenticator{Store: st, Now: time.Now}
+	g := &gate.Gate{
+		Engine:    engine.New(up, scoreBudget),
+		Policy:    policy.Default(),
+		Approvals: unavailable{},
+		Audit:     st,
+		Snapshots: unavailable{},
+		Hold:      holdWindow,
+		Log:       log,
+	}
 	srv := &http.Server{
-		Handler:           proxy.New(auth, up, log),
+		Handler:           proxy.New(auth, g, up, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: watches, logs -f and exec sessions are meant
 		// to outlive any fixed deadline.
@@ -87,3 +102,32 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		return 1
 	}
 }
+
+// Until the configuration for them exists, the score budget and hold
+// window are the documented defaults.
+const (
+	scoreBudget = 5 * time.Second
+	holdWindow  = 45 * time.Second
+)
+
+var errUnavailable = errors.New("not available in this build")
+
+// unavailable stands in for the approval store and the snapshotter until
+// they are wired. Every call fails, and the gate refuses on each failure:
+// a write policy allows is refused because it cannot be snapshotted, and
+// a held write because its approvals cannot be checked. Reads, which need
+// neither, still pass and are audited. Nothing is forwarded that the
+// finished wiring would refuse.
+type unavailable struct{}
+
+func (unavailable) Take(context.Context, string, normalize.Action, engine.Impact) (string, error) {
+	return "", errUnavailable
+}
+
+func (unavailable) Check(context.Context, string, string, string, string, string) (approval.Outcome, store.Approval, error) {
+	return approval.None, store.Approval{}, errUnavailable
+}
+
+func (unavailable) CreatePending(context.Context, store.Approval) error { return errUnavailable }
+
+func (unavailable) Status(context.Context, string) (string, error) { return "", errUnavailable }

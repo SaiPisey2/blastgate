@@ -22,6 +22,7 @@ import (
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/rest"
 
+	"github.com/SaiPisey2/blastgate/internal/gate"
 	"github.com/SaiPisey2/blastgate/internal/session"
 	"github.com/SaiPisey2/blastgate/internal/store"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
@@ -49,6 +50,12 @@ func harness(t *testing.T, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
 // shape of an API server reached through a gateway such as Rancher's.
 func harnessWith(t *testing.T, auth Authenticator, prefix string, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
 	t.Helper()
+	return harnessDecider(t, auth, allowAll(), prefix, h)
+}
+
+// harnessDecider also takes the gate, for the tests of the decision step.
+func harnessDecider(t *testing.T, auth Authenticator, d Decider, prefix string, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
+	t.Helper()
 	up := httptest.NewUnstartedServer(h)
 	up.EnableHTTP2 = true
 	up.StartTLS()
@@ -59,9 +66,63 @@ func harnessWith(t *testing.T, auth Authenticator, prefix string, h http.Handler
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	px := httptest.NewServer(New(auth, u, slog.New(slog.NewJSONHandler(logs, nil))))
+	px := httptest.NewServer(New(auth, d, u, slog.New(slog.NewJSONHandler(logs, nil))))
 	t.Cleanup(px.Close)
 	return px, logs
+}
+
+// recordingDecider is the gate stand-in. The mutex is there because
+// Complete for a forwarded request runs after the response has reached
+// the client, on the handler's goroutine, while the test reads.
+type recordingDecider struct {
+	mu        sync.Mutex
+	verdict   gate.Verdict
+	decided   []string
+	completed []int
+	outcomes  []string
+	bodies    [][]byte
+}
+
+func (d *recordingDecider) Decide(_ context.Context, _ store.Session, r *http.Request, body []byte) gate.Verdict {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.decided = append(d.decided, r.Method+" "+r.URL.Path)
+	d.bodies = append(d.bodies, body)
+	return d.verdict
+}
+
+func (d *recordingDecider) Complete(_ context.Context, _ gate.Verdict, status int, outcome string, _ time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.completed = append(d.completed, status)
+	d.outcomes = append(d.outcomes, outcome)
+}
+
+func (d *recordingDecider) snapshot() (decided []string, completed []int, outcomes []string, bodies [][]byte) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.decided...), append([]int(nil), d.completed...),
+		append([]string(nil), d.outcomes...), append([][]byte(nil), d.bodies...)
+}
+
+// waitCompleted polls until Complete has been called n times, then waits
+// a little longer so a second, wrong call would be seen too.
+func (d *recordingDecider) waitCompleted(t *testing.T, n int) ([]int, []string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, c, _, _ := d.snapshot(); len(c) >= n {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	_, c, o, _ := d.snapshot()
+	return c, o
+}
+
+func allowAll() *recordingDecider {
+	return &recordingDecider{verdict: gate.Verdict{Forward: true}}
 }
 
 // syncBuffer is the proxy's log sink. Some tests read it while a handler
@@ -567,5 +628,266 @@ func TestASessionWithNoHumanIsNeverForwarded(t *testing.T) {
 	}
 	if called {
 		t.Error("a session with no human reached the upstream")
+	}
+}
+
+// The refusal is the gate's; the proxy only has to deliver it the way
+// kubectl can print it, and never let the request through.
+func TestRefusedVerdictIsWrittenAsAStatusAndNotForwarded(t *testing.T) {
+	d := &recordingDecider{verdict: gate.Verdict{Forward: false, Code: 403, Reason: metav1.StatusReasonForbidden, Message: "blastgate: held for approval abc", Ticket: "abc"}}
+	called := false
+	px, logs := harnessDecider(t, fakeAuth{}, d, "", func(http.ResponseWriter, *http.Request) { called = true })
+	req, _ := http.NewRequest("DELETE", px.URL+"/api/v1/namespaces/demo/pods/web", nil)
+	req.Header.Set("Authorization", "Bearer bg_good")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 403 {
+		t.Errorf("status %d, want 403", res.StatusCode)
+	}
+	st := status(t, res)
+	if st.Message != "blastgate: held for approval abc" || st.Reason != metav1.StatusReasonForbidden || st.Code != 403 {
+		t.Errorf("status = %+v", st)
+	}
+	ws, errs := utilnet.ParseWarningHeaders(res.Header.Values("Warning"))
+	if len(errs) > 0 || len(ws) != 1 || ws[0].Text != st.Message {
+		t.Errorf("warnings %+v (errors %v), want one carrying %q", ws, errs, st.Message)
+	}
+	if called {
+		t.Error("a refused request reached the upstream")
+	}
+	if c, _ := d.waitCompleted(t, 1); len(c) != 1 || c[0] != 403 {
+		t.Errorf("completed = %v, want [403]", c)
+	}
+	l := line(logs.String(), `"msg":"refused"`)
+	for _, want := range []string{`"session":"sess-1"`, `"human":"alice"`, `"agent":"coding-agent"`, `"method":"DELETE"`, `"path":"/api/v1/namespaces/demo/pods/web"`, `"code":403`, `"ticket":"abc"`} {
+		if !strings.Contains(l, want) {
+			t.Errorf("refused line lacks %s:\n%s", want, logs.String())
+		}
+	}
+}
+
+// The gate scores the bytes it is given; if the upstream received any
+// others, what was approved would not be what ran.
+func TestBodyReachesDeciderAndUpstreamIntact(t *testing.T) {
+	d := allowAll()
+	var got []byte
+	var gotLen int64
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		gotLen = r.ContentLength
+	})
+	body := `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web"},"spec":{"replicas":0}}`
+	req, _ := http.NewRequest("PUT", px.URL+"/apis/apps/v1/namespaces/demo/deployments/web", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	_, _, _, bodies := d.snapshot()
+	if len(bodies) != 1 || string(bodies[0]) != body {
+		t.Errorf("decider saw %q, want %q", bodies, body)
+	}
+	if string(got) != body || gotLen != int64(len(body)) {
+		t.Errorf("upstream read %q (length %d), want %q", got, gotLen, body)
+	}
+}
+
+// A chunked body has no declared length, so the limit has to be on what is
+// read, not on Content-Length.
+func TestOversizedBodyIsRefused(t *testing.T) {
+	for name, chunked := range map[string]bool{"content-length": false, "chunked": true} {
+		t.Run(name, func(t *testing.T) {
+			d := allowAll()
+			called := false
+			px, _ := harnessDecider(t, fakeAuth{}, d, "", func(http.ResponseWriter, *http.Request) { called = true })
+			var body io.Reader = bytes.NewReader(make([]byte, 3<<20+1))
+			if chunked {
+				body = io.MultiReader(body) // hides the length, so the client chunks
+			}
+			req, _ := http.NewRequest("POST", px.URL+"/api/v1/namespaces/demo/configmaps", body)
+			req.Header.Set("Authorization", "Bearer bg_good")
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.StatusCode != 413 {
+				t.Errorf("status %d, want 413", res.StatusCode)
+			}
+			if st := status(t, res); st.Reason != metav1.StatusReasonRequestEntityTooLarge {
+				t.Errorf("status = %+v", st)
+			}
+			if decided, _, _, _ := d.snapshot(); len(decided) != 0 {
+				t.Errorf("decider was asked about an oversized body: %v", decided)
+			}
+			if called {
+				t.Error("an oversized body reached the upstream")
+			}
+		})
+	}
+}
+
+// Exactly 3 MiB is the API server's own limit and must still pass.
+func TestBodyAtTheLimitIsForwarded(t *testing.T) {
+	d := allowAll()
+	var n int
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		n = len(b)
+	})
+	req, _ := http.NewRequest("POST", px.URL+"/api/v1/namespaces/demo/configmaps", bytes.NewReader(make([]byte, 3<<20)))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 200 || n != 3<<20 {
+		t.Errorf("status %d, upstream read %d bytes; want 200 and %d", res.StatusCode, n, 3<<20)
+	}
+}
+
+func TestCompleteIsCalledOnceForAForwardedRequest(t *testing.T) {
+	d := allowAll()
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	req, _ := http.NewRequest("POST", px.URL+"/api/v1/namespaces/demo/configmaps", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	c, o := d.waitCompleted(t, 1)
+	if len(c) != 1 || c[0] != http.StatusCreated || o[0] != "" {
+		t.Errorf("completed = %v %q, want [201] with no outcome", c, o)
+	}
+	if decided, _, _, _ := d.snapshot(); len(decided) != 1 || decided[0] != "POST /api/v1/namespaces/demo/configmaps" {
+		t.Errorf("decided = %v", decided)
+	}
+}
+
+// The panic ReverseProxy raises for a stream the client left must not skip
+// the result row, as it once skipped the log line.
+func TestCompleteIsCalledForAnAbortedStream(t *testing.T) {
+	d := allowAll()
+	release := make(chan struct{})
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"type":"ADDED"}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	conn, err := net.Dial("tcp", strings.TrimPrefix(px.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(conn, "GET /api/v1/pods?watch=true HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer bg_good\r\n\r\n")
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, err := bufio.NewReader(res.Body).ReadString('\n'); err != nil || !strings.Contains(l, "ADDED") {
+		t.Fatalf("first event = %q, %v", l, err)
+	}
+	conn.Close()
+	c, o := d.waitCompleted(t, 1)
+	if len(c) != 1 || o[0] != "aborted" {
+		t.Errorf("completed = %v %q, want one aborted", c, o)
+	}
+}
+
+func TestCompleteIsCalledForACancelledRequest(t *testing.T) {
+	d := allowAll()
+	arrived, release := make(chan struct{}), make(chan struct{})
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(w http.ResponseWriter, r *http.Request) {
+		close(arrived)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", px.URL+"/api/v1/namespaces/demo/pods", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer bg_good")
+	go func() {
+		<-arrived
+		cancel()
+	}()
+	if res, err := http.DefaultClient.Do(req); err == nil {
+		res.Body.Close()
+		t.Fatal("the request completed; the cancel did not happen")
+	}
+	c, o := d.waitCompleted(t, 1)
+	if len(c) != 1 || c[0] != 0 || o[0] != "client cancelled; outcome unknown" {
+		t.Errorf("completed = %v %q, want [0] with outcome unknown", c, o)
+	}
+}
+
+// Trailers arrive after the body, and Go keeps undeclared ones. Now the
+// body is read before forwarding, ReverseProxy would copy such a trailer
+// into the outgoing request, so the check has to run again after reading.
+func TestRejectsUndeclaredImpersonationTrailer(t *testing.T) {
+	d := allowAll()
+	called := false
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(http.ResponseWriter, *http.Request) { called = true })
+	conn, err := net.Dial("tcp", strings.TrimPrefix(px.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprint(conn, "POST /api/v1/namespaces/demo/configmaps HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer bg_good\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nImpersonate-User: system:admin\r\n\r\n")
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 403 {
+		t.Errorf("status %d, want 403", res.StatusCode)
+	}
+	if called {
+		t.Error("an undeclared impersonation trailer reached the upstream")
+	}
+	if decided, _, _, _ := d.snapshot(); len(decided) != 0 {
+		t.Errorf("decider was asked about a request carrying impersonation: %v", decided)
+	}
+}
+
+func TestNewPanicsWithoutADecider(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New accepted a nil Decider")
+		}
+	}()
+	New(fakeAuth{}, nil, &upstream.Upstream{}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+}
+
+// A gate bug that refuses without a code must still refuse: WriteHeader
+// panics on 0, and a 2xx would tell kubectl the write succeeded.
+func TestRefusalWithoutACodeIsAnError(t *testing.T) {
+	d := &recordingDecider{verdict: gate.Verdict{Forward: false}}
+	called := false
+	px, _ := harnessDecider(t, fakeAuth{}, d, "", func(http.ResponseWriter, *http.Request) { called = true })
+	req, _ := http.NewRequest("DELETE", px.URL+"/api/v1/namespaces/demo/pods/web", nil)
+	req.Header.Set("Authorization", "Bearer bg_good")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 503 || called {
+		t.Errorf("status %d, upstream called %v; want 503 and not forwarded", res.StatusCode, called)
+	}
+	if c, _ := d.waitCompleted(t, 1); len(c) != 1 || c[0] != 503 {
+		t.Errorf("completed = %v, want [503]", c)
 	}
 }
