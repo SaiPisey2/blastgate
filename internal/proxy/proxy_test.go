@@ -38,17 +38,19 @@ func (fakeAuth) Authenticate(r *http.Request) (store.Session, error) {
 // harness returns a proxy server in front of an h2-capable TLS upstream
 // running h, plus the log the proxy writes.
 func harness(t *testing.T, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
-	return harnessWith(t, fakeAuth{}, h)
+	return harnessWith(t, fakeAuth{}, "", h)
 }
 
-func harnessWith(t *testing.T, auth Authenticator, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
+// harnessWith takes the authenticator and an upstream path prefix, the
+// shape of an API server reached through a gateway such as Rancher's.
+func harnessWith(t *testing.T, auth Authenticator, prefix string, h http.HandlerFunc) (*httptest.Server, *syncBuffer) {
 	t.Helper()
 	up := httptest.NewUnstartedServer(h)
 	up.EnableHTTP2 = true
 	up.StartTLS()
 	t.Cleanup(up.Close)
 	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: up.Certificate().Raw})
-	u, err := upstream.FromConfig(&rest.Config{Host: up.URL, BearerToken: "sa-token", TLSClientConfig: rest.TLSClientConfig{CAData: ca}})
+	u, err := upstream.FromConfig(&rest.Config{Host: up.URL + prefix, BearerToken: "sa-token", TLSClientConfig: rest.TLSClientConfig{CAData: ca}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +283,9 @@ func TestUpgradeIsPassedThrough(t *testing.T) {
 func TestUpstreamFailureIsAStatus(t *testing.T) {
 	// ErrAbortHandler resets the stream under both HTTP/1.1 and HTTP/2;
 	// hijacking would not work here, since the normal transport speaks h2.
-	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {
+	// The prefix makes the forwarded path differ from the client's; both
+	// log lines must name the path the client asked for.
+	px, logs := harnessWith(t, fakeAuth{}, "/k8s/clusters/c-1", func(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	})
 	res := get(t, px.URL+"/api/v1/namespaces/demo/pods/web/exec?command=SECRET", "bg_good", nil)
@@ -298,6 +302,9 @@ func TestUpstreamFailureIsAStatus(t *testing.T) {
 		if !strings.Contains(errLine, want) {
 			t.Errorf("upstream error line lacks %s:\n%s", want, all)
 		}
+	}
+	if !strings.Contains(line(all, `"msg":"request"`), `"path":"/api/v1/namespaces/demo/pods/web/exec"`) {
+		t.Errorf("request line path is not the client's:\n%s", all)
 	}
 }
 
@@ -404,7 +411,7 @@ func (brokenAuth) Authenticate(*http.Request) (store.Session, error) {
 // re-authenticate with a token that is in fact valid.
 func TestSessionLookupFailureIsUnavailable(t *testing.T) {
 	called := false
-	px, _ := harnessWith(t, brokenAuth{}, func(http.ResponseWriter, *http.Request) { called = true })
+	px, _ := harnessWith(t, brokenAuth{}, "", func(http.ResponseWriter, *http.Request) { called = true })
 	res := get(t, px.URL+"/api", "bg_good", nil)
 	if res.StatusCode != 503 {
 		t.Errorf("status %d, want 503", res.StatusCode)
@@ -463,5 +470,24 @@ func TestRejectsImpersonationDeclaredAsATrailer(t *testing.T) {
 	}
 	if called {
 		t.Error("a request declaring an impersonation trailer reached the upstream")
+	}
+}
+
+// When the upstream breaks mid-stream, ReverseProxy panics with
+// ErrAbortHandler and the logging defer must hand that panic back to
+// http.Server. Swallowing it would end the chunked body cleanly, and a
+// truncated watch or log would look complete to kubectl.
+func TestUpstreamAbortMidStreamReachesTheClient(t *testing.T) {
+	px, _ := harness(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"type":"ADDED"}`)
+		w.(http.Flusher).Flush()
+		time.Sleep(50 * time.Millisecond)
+		panic(http.ErrAbortHandler)
+	})
+	res := get(t, px.URL+"/api/v1/pods?watch=true", "bg_good", nil)
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err == nil {
+		t.Errorf("a stream the upstream broke read as complete: %q", body)
 	}
 }

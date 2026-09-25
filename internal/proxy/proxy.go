@@ -48,7 +48,10 @@ type requestKey struct{}
 // request travels in the context so the ErrorHandler can name who acted
 // and tell ServeHTTP's log line what happened.
 type request struct {
-	s         store.Session
+	s store.Session
+	// path is the client's, kept because the ErrorHandler sees the
+	// rewritten request, whose path gains any upstream prefix.
+	path      string
 	cancelled bool
 }
 
@@ -75,7 +78,7 @@ func New(auth Authenticator, up *upstream.Upstream, log *slog.Logger) *Proxy {
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rq := r.Context().Value(requestKey{}).(*request)
-			who := []any{"session", rq.s.ID, "human", rq.s.Human, "agent", rq.s.Agent, "method", r.Method, "path", r.URL.Path}
+			who := []any{"session", rq.s.ID, "human", rq.s.Human, "agent", rq.s.Agent, "method", r.Method, "path", rq.path}
 			if errors.Is(err, context.Canceled) {
 				// Nobody is listening for a Status, and a 502 in the log
 				// would claim a failure the API server may not have had.
@@ -110,7 +113,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := &recorder{ResponseWriter: w, status: http.StatusOK}
-	rq := &request{s: s}
+	rq := &request{s: s, path: r.URL.Path}
 	// Deferred because ReverseProxy panics with ErrAbortHandler when the
 	// client leaves mid-stream; a log call after it would be skipped for
 	// every watch or logs -f the client stops.
