@@ -123,6 +123,35 @@ func TestReadsAreNotScored(t *testing.T) {
 	}
 }
 
+// `kubectl auth whoami` and `kubectl auth can-i` create a self-review:
+// the API server answers a question about the caller and stores nothing.
+// kubectl sends them as protobuf, which no dry-run can replay faithfully,
+// so without this every whoami was held as unmeasured. Found live.
+func TestSelfReviewsAreMeasuredReads(t *testing.T) {
+	e := &Engine{budget: time.Second}
+	for _, r := range []struct{ group, resource string }{
+		{"authentication.k8s.io", "selfsubjectreviews"},
+		{"authorization.k8s.io", "selfsubjectaccessreviews"},
+		{"authorization.k8s.io", "selfsubjectrulesreviews"},
+	} {
+		a := normalize.Action{Verb: "create", Group: r.group, Version: "v1", Resource: r.resource, Principal: normalize.Principal{Human: "alice"}}
+		if i := e.Assess(context.Background(), a, []byte{0x6b, 0x38, 0x73, 0x00}).Impact; i.Class != ClassRead || !i.Measured {
+			t.Errorf("%s: impact = %+v", r.resource, i)
+		}
+	}
+	// Anything else in those groups is still measured the ordinary way:
+	// a review about someone else, or a verb other than create.
+	for _, a := range []normalize.Action{
+		{Verb: "create", Group: "authorization.k8s.io", Version: "v1", Resource: "subjectaccessreviews"},
+		{Verb: "create", Group: "authorization.k8s.io", Version: "v1", Resource: "selfsubjectaccessreviews", Subresource: "status", Name: "x"},
+		{Verb: "update", Group: "authentication.k8s.io", Version: "v1", Resource: "selfsubjectreviews", Name: "x"},
+	} {
+		if i := e.Assess(context.Background(), a, nil).Impact; i.Class == ClassRead {
+			t.Errorf("%+v scored as a read", a)
+		}
+	}
+}
+
 func TestDeleteCollectionIsUnmeasured(t *testing.T) {
 	e := &Engine{budget: time.Second}
 	a := actDelete("pods", "demo", "")

@@ -79,7 +79,7 @@ func (e *Engine) Assess(parent context.Context, a normalize.Action, body []byte)
 		i = Unmeasured("a proxied request cannot be measured")
 	case a.Resource == "pods" && (a.Subresource == "exec" || a.Subresource == "attach" || a.Subresource == "portforward"):
 		i = assessExec(a)
-	case a.IsRead():
+	case a.IsRead(), isSelfReview(a):
 		i = Impact{Class: ClassRead, Measured: true, Undo: "none"}
 	case a.Verb == "delete" && a.Subresource == "":
 		i = e.assessDelete(ctx, a)
@@ -108,6 +108,25 @@ func (e *Engine) Assess(parent context.Context, a normalize.Action, body []byte)
 		return Assessment{Impact: i}
 	}
 	return Assessment{Impact: i, NamespaceLabels: e.namespaceLabels(parent, a)}
+}
+
+// isSelfReview reports the creates that only ask the API server about the
+// caller -- `kubectl auth whoami` and `kubectl auth can-i` -- and store
+// nothing. kubectl sends them as protobuf, which the dry-run cannot replay
+// faithfully, so measuring them as mutations held every whoami. A review
+// about someone else (subjectaccessreviews, tokenreviews) is not one: it
+// needs its own grant and discloses another's rights, so it stays a write.
+func isSelfReview(a normalize.Action) bool {
+	if a.Verb != "create" || a.Subresource != "" || a.Name != "" {
+		return false
+	}
+	switch a.Group {
+	case "authentication.k8s.io":
+		return a.Resource == "selfsubjectreviews"
+	case "authorization.k8s.io":
+		return a.Resource == "selfsubjectaccessreviews" || a.Resource == "selfsubjectrulesreviews"
+	}
+	return false
 }
 
 // clients builds sounding's read-only clients from the service account's
