@@ -1,0 +1,6 @@
+# One control-plane node: the fixture needs a real API server and a pod to
+# exec into, not capacity. The cluster name comes from the Makefile.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane

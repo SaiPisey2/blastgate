@@ -55,3 +55,34 @@ jobs:
         with:
           go-version: '1.27'
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27'
+      # Installed as a plain binary, pinned to the version this fixture was
+      # verified against, rather than through `go install` -- a Go-tooling
+      # install of a package outside this module can still touch this
+      # module's go.mod/go.sum, and neither may change here.
+      - name: Install kind v0.33.0
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      # A local kind cluster, so a failure here is a real failure: the real
+      # kubectl could not do something through blastgate.
+      - run: make fixture-up
+      - run: make fixture-test
+      - name: Dump fixture diagnostics
+        if: failure()
+        run: |
+          if [ -f fixture/admin.kubeconfig ]; then
+            kubectl --kubeconfig fixture/admin.kubeconfig get all -A || true
+            kubectl --kubeconfig fixture/admin.kubeconfig get events -A --sort-by=.lastTimestamp || true
+          else
+            echo "no fixture/admin.kubeconfig -- cluster never came up"
+          fi

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: blastgate, namespace: blastgate-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: blastgate-impersonate}
+rules:
+- apiGroups: [""]
+  resources: [users]
+  verbs: [impersonate]
+- apiGroups: [authentication.k8s.io]
+  resources: [userextras/blastgate-agent, userextras/blastgate-session]
+  verbs: [impersonate]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: blastgate-impersonate}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: blastgate-impersonate}
+subjects:
+- {kind: ServiceAccount, name: blastgate, namespace: blastgate-system}
