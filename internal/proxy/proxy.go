@@ -175,11 +175,14 @@ func impersonation(r *http.Request) (string, bool) {
 }
 
 // WriteStatus writes a Kubernetes Status, the only error body kubectl
-// knows how to print, and repeats the message as a Warning. kubectl's
-// first requests are discovery, which reads a failed response with Raw()
-// and never decodes the body: without the Warning, a refusal there prints
-// as "Error from server (Forbidden): unknown", exactly as the API server's
-// own do. client-go prints every Warning it receives.
+// knows how to print, and also copies msg into a Warning header, which
+// client-go prints. kubectl's first requests are discovery, which reads a
+// failed response with Raw() and never decodes the body: without the
+// Warning, a refusal there prints as "Error from server (Forbidden):
+// unknown" -- the same thing kubectl prints for the API server's own
+// refusals on discovery. Because msg is echoed into a header as well as
+// the body, callers must pass only constant blastgate text, never
+// anything derived from the request or the session.
 func WriteStatus(w http.ResponseWriter, code int, reason metav1.StatusReason, msg string) {
 	// A message a Warning cannot carry (control characters, invalid UTF-8)
 	// still goes in the body; it only loses the header.
