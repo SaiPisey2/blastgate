@@ -19,6 +19,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/rest"
 
 	"github.com/SaiPisey2/blastgate/internal/session"
@@ -489,5 +490,23 @@ func TestUpstreamAbortMidStreamReachesTheClient(t *testing.T) {
 	body, err := io.ReadAll(res.Body)
 	if err == nil {
 		t.Errorf("a stream the upstream broke read as complete: %q", body)
+	}
+}
+
+// kubectl reads a failed discovery response with Raw(), which never decodes
+// the Status body, so a refusal's message reaches the user only through a
+// Warning header. Discovery is the first request kubectl makes, and --as
+// puts impersonation headers on it too.
+func TestRefusalsCarryTheirMessageAsAWarning(t *testing.T) {
+	px, _ := harness(t, func(http.ResponseWriter, *http.Request) {})
+	for name, res := range map[string]*http.Response{
+		"unauthenticated": get(t, px.URL+"/api", "bg_bad", nil),
+		"impersonation":   get(t, px.URL+"/api", "bg_good", map[string]string{"Impersonate-User": "system:admin"}),
+	} {
+		st := status(t, res)
+		ws, errs := utilnet.ParseWarningHeaders(res.Header.Values("Warning"))
+		if len(errs) > 0 || len(ws) != 1 || ws[0].Code != 299 || ws[0].Text != st.Message {
+			t.Errorf("%s: warnings %+v (errors %v), want one 299 carrying %q", name, ws, errs, st.Message)
+		}
 	}
 }

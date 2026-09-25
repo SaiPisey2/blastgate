@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/net/http/httpguts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 
 	"github.com/SaiPisey2/blastgate/internal/session"
 	"github.com/SaiPisey2/blastgate/internal/store"
@@ -174,8 +175,17 @@ func impersonation(r *http.Request) (string, bool) {
 }
 
 // WriteStatus writes a Kubernetes Status, the only error body kubectl
-// knows how to print.
+// knows how to print, and repeats the message as a Warning. kubectl's
+// first requests are discovery, which reads a failed response with Raw()
+// and never decodes the body: without the Warning, a refusal there prints
+// as "Error from server (Forbidden): unknown", exactly as the API server's
+// own do. client-go prints every Warning it receives.
 func WriteStatus(w http.ResponseWriter, code int, reason metav1.StatusReason, msg string) {
+	// A message a Warning cannot carry (control characters, invalid UTF-8)
+	// still goes in the body; it only loses the header.
+	if wh, err := utilnet.NewWarningHeader(299, "-", msg); err == nil {
+		w.Header().Add("Warning", wh)
+	}
 	st := metav1.Status{
 		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
 		Status:   metav1.StatusFailure,
