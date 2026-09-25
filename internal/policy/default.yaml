@@ -2,6 +2,13 @@
 # is true decides. If none matches, `unmeasured` decides for an impact that
 # could not be measured and `default` for one that could. Any rule that
 # fails to evaluate holds the request.
+#
+# ns.labels is missing entirely (not just empty) when the namespace label
+# lookup failed, so leaves-a-service-empty-in-prod below only reads it
+# behind the endpoints-emptied check: && short-circuits, so an ordinary
+# write with nothing emptied never touches ns.labels and never holds for
+# an unrelated reason, while a write that does empty a service, against an
+# unknown namespace, fails closed rather than guessing it isn't prod.
 rules:
   - name: data-destruction
     when: impact.dataDestroyed > 0

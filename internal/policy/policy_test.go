@@ -64,6 +64,21 @@ func TestExecWithSQLIsNamed(t *testing.T) {
 	}
 }
 
+func TestUnknownLabelsHoldLabelRules(t *testing.T) {
+	i := engine.Impact{Class: engine.ClassReversible, Measured: true, EndpointsLeft: map[string]int{"web": 0}}
+	v := eval(t, Default(), del, i, nil)
+	if v.Decision != Hold || v.Rule != "error:leaves-a-service-empty-in-prod" {
+		t.Errorf("verdict = %+v", v)
+	}
+}
+
+func TestUnknownLabelsDoNotAffectOtherRules(t *testing.T) {
+	v := eval(t, Default(), del, engine.Impact{Class: engine.ClassReversible, Measured: true}, nil)
+	if v.Decision != Allow || v.Rule != "safe" {
+		t.Errorf("verdict = %+v", v)
+	}
+}
+
 func TestMissingKeyIsAnErrorHold(t *testing.T) {
 	p, err := Load([]byte(`
 rules:

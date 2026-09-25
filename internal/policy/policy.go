@@ -16,6 +16,14 @@
 //	           "namespace" as an identifier (it is valid as a proto field
 //	           name but not as a variable), and refuses to compile any
 //	           rule that declares or references it directly.
+//	           ns.labels is present only when the namespace lookup
+//	           succeeded (engine.Assessment.NamespaceLabels != nil); an
+//	           empty-but-known namespace still has ns.labels (as {}). When
+//	           the lookup failed, ns has no "labels" key at all, so any
+//	           rule that reads ns.labels fails to evaluate and holds --
+//	           fail closed on what could not be looked up, not just on
+//	           what was measured. A rule that never reads ns.labels is
+//	           unaffected.
 package policy
 
 import (
@@ -193,9 +201,19 @@ func impactVars(i engine.Impact) map[string]any {
 }
 
 func namespaceVars(ns string, labels map[string]string) map[string]any {
-	l := map[string]any{}
-	for k, v := range labels {
-		l[k] = v
+	v := map[string]any{"name": ns}
+	// labels == nil means the lookup failed and the namespace's labels are
+	// unknown, not that it has none (that is labels == map[string]string{}).
+	// Omitting the "labels" key entirely -- rather than substituting an
+	// empty map -- makes ns.labels a missing-key evaluation error, which
+	// Evaluate turns into a hold; a rule that never reads ns.labels is
+	// untouched.
+	if labels != nil {
+		l := map[string]any{}
+		for k, val := range labels {
+			l[k] = val
+		}
+		v["labels"] = l
 	}
-	return map[string]any{"name": ns, "labels": l}
+	return v
 }
