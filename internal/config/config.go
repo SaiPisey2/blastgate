@@ -41,9 +41,10 @@ const (
 	// ticket -- the approval ID the agent needs to ask for a decision --
 	// is never seen.
 	maxHold = 50 * time.Second
-	// Scoring runs before the hold and again before an inline release, so
-	// the two together must still end inside the client's 60s with a
-	// margin for forwarding (ruling P1-R16).
+	// The worst case after the hold window is a re-score plus a snapshot,
+	// each itself bounded by ScoreBudget, before the ticket is answered --
+	// so the hold and *two* score budgets together must still end inside
+	// the client's 60s with a margin for forwarding (ruling P1-R16).
 	maxHoldPlusBudget = 55 * time.Second
 	maxBudget         = 30 * time.Second
 	maxApprovalTTL    = 24 * time.Hour
@@ -62,8 +63,8 @@ func Load(getenv func(string) string) (Config, error) {
 	if c.ScoreBudget, err = duration(getenv, "BLASTGATE_SCORE_BUDGET", 5*time.Second, maxBudget); err != nil {
 		return Config{}, err
 	}
-	if c.Hold+c.ScoreBudget > maxHoldPlusBudget {
-		return Config{}, fmt.Errorf("BLASTGATE_HOLD (%s) plus BLASTGATE_SCORE_BUDGET (%s) must be at most %s: clients give up after 60s, and a held request's ticket must reach them first", c.Hold, c.ScoreBudget, maxHoldPlusBudget)
+	if c.Hold+2*c.ScoreBudget > maxHoldPlusBudget {
+		return Config{}, fmt.Errorf("BLASTGATE_HOLD (%s) plus twice BLASTGATE_SCORE_BUDGET (%s) must be at most %s: clients give up after 60s, and a held request's re-score and snapshot must both fit before its ticket reaches them", c.Hold, c.ScoreBudget, maxHoldPlusBudget)
 	}
 	c.PolicyPath = getenv("BLASTGATE_POLICY")
 

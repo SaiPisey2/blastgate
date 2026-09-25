@@ -154,19 +154,24 @@ func TestDurations(t *testing.T) {
 		set  map[string]string
 		ok   bool
 	}{
-		{"hold at the limit", map[string]string{"BLASTGATE_HOLD": "50s"}, true},
+		// A small score budget leaves room for BLASTGATE_HOLD to reach its
+		// own 50s cap without also tripping the combined bound below.
+		{"hold at the limit", map[string]string{"BLASTGATE_HOLD": "50s", "BLASTGATE_SCORE_BUDGET": "2s"}, true},
 		{"hold over the limit", map[string]string{"BLASTGATE_HOLD": "51s"}, false},
 		{"hold zero", map[string]string{"BLASTGATE_HOLD": "0s"}, false},
 		{"hold negative", map[string]string{"BLASTGATE_HOLD": "-5s"}, false},
 		{"hold not a duration", map[string]string{"BLASTGATE_HOLD": "45"}, false},
-		{"budget at the limit", map[string]string{"BLASTGATE_SCORE_BUDGET": "30s", "BLASTGATE_HOLD": "25s"}, true},
 		{"budget over the limit", map[string]string{"BLASTGATE_SCORE_BUDGET": "31s", "BLASTGATE_HOLD": "10s"}, false},
 		{"budget zero", map[string]string{"BLASTGATE_SCORE_BUDGET": "0"}, false},
 		{"budget garbage", map[string]string{"BLASTGATE_SCORE_BUDGET": "soon"}, false},
-		// Both fit their own bounds, but together they run past what a
-		// 60s client timeout leaves room for (ruling P1-R16).
-		{"hold plus budget at 55s", map[string]string{"BLASTGATE_HOLD": "50s", "BLASTGATE_SCORE_BUDGET": "5s"}, true},
-		{"hold plus budget over 55s", map[string]string{"BLASTGATE_HOLD": "50s", "BLASTGATE_SCORE_BUDGET": "6s"}, false},
+		// A score budget at its own 30s cap now always breaches the combined
+		// bound alone (2*30s = 60s), whatever BLASTGATE_HOLD is.
+		{"budget at its own limit always breaches the combined bound", map[string]string{"BLASTGATE_SCORE_BUDGET": "30s", "BLASTGATE_HOLD": "1s"}, false},
+		// The worst case after a hold is a re-score plus a snapshot, each
+		// bounded by the score budget, so the combined bound counts it
+		// twice; the shipped defaults sit exactly on it (ruling P1-R16).
+		{"hold plus twice budget at 55s", map[string]string{"BLASTGATE_HOLD": "45s", "BLASTGATE_SCORE_BUDGET": "5s"}, true},
+		{"hold plus twice budget over 55s", map[string]string{"BLASTGATE_HOLD": "45s", "BLASTGATE_SCORE_BUDGET": "6s"}, false},
 		{"ttl at the limit", map[string]string{"BLASTGATE_APPROVAL_TTL": "24h"}, true},
 		{"ttl over the limit", map[string]string{"BLASTGATE_APPROVAL_TTL": "25h"}, false},
 		{"ttl zero", map[string]string{"BLASTGATE_APPROVAL_TTL": "0s"}, false},

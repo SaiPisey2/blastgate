@@ -67,7 +67,7 @@ own writes.
 | Variable | Default | |
 |---|---|---|
 | `BLASTGATE_HOLD` | `45s` | how long a held request waits for a decision before its ticket is returned; at most `50s`, because kubectl gives up after 60s |
-| `BLASTGATE_SCORE_BUDGET` | `5s` | how long measuring one write may take; hold plus budget at most `55s` |
+| `BLASTGATE_SCORE_BUDGET` | `5s` | how long measuring one write may take; hold plus **twice** the budget at most `55s` (a held request's retry is re-scored, and its snapshot is bounded by the same budget) |
 | `BLASTGATE_APPROVAL_TTL` | `15m` | how long an approval stays spendable |
 | `BLASTGATE_POLICY` | built in | a policy file (see [Policy](#policy)) |
 
@@ -305,7 +305,11 @@ A session for anyone else is then refused by the API server itself.
 - See exec stdin: SQL piped into `kubectl exec -i … psql` is invisible to the SQL
   check, which reads the command line only.
 - Measure `deletecollection`, or cluster-scoped deletes other than namespaces: they are
-  unmeasured, and so held (and snapshotted, once approved).
+  unmeasured, and so held (and snapshotted, once approved). A `deletecollection` whose
+  list exceeds 3 MiB cannot be snapshotted, and so is never released -- it fails closed.
+- Measure any request that upgrades its connection (`Connection: Upgrade`) outside exec,
+  attach, port-forward and proxy -- a WebSocket `watch` opened by a client other than
+  kubectl, say. It is held unmeasured, like any other verb this build does not measure.
 - Measure a create or update sent as protobuf. kubectl's own generators
   (`kubectl create configmap`, `kubectl create deployment`) send protobuf, which a dry-run
   cannot replay faithfully, so they are held; `kubectl apply -f` sends JSON and is measured.
