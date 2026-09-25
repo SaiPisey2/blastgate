@@ -4,9 +4,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 // version is overwritten at release time with -ldflags "-X main.version=…".
@@ -29,6 +32,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 2
 	}
 	switch args[0] {
+	case "serve":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return serveCmd(ctx, getenv, stderr)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return 0
