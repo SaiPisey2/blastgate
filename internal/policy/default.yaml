@@ -1,0 +1,25 @@
+# The default policy. Rules are evaluated in order; the first whose `when`
+# is true decides. If none matches, `unmeasured` decides for an impact that
+# could not be measured and `default` for one that could. Any rule that
+# fails to evaluate holds the request.
+rules:
+  - name: data-destruction
+    when: impact.dataDestroyed > 0
+    then: hold
+  - name: leaves-a-service-empty-in-prod
+    when: 'impact.endpointsLeft.exists(s, impact.endpointsLeft[s] == 0) && "env" in ns.labels && ns.labels.env == "prod"'
+    then: hold
+  - name: breaks-a-disruption-budget
+    when: size(impact.pdbViolations) > 0
+    then: hold
+  - name: exec-with-sql
+    when: action.subresource == "exec" && impact.sqlDetected
+    then: hold
+  - name: grants-authority
+    when: impact.class == "AUTHORITY"
+    then: hold
+  - name: safe
+    when: impact.measured && impact.class in ["READ", "REVERSIBLE"]
+    then: allow
+default: hold
+unmeasured: hold
