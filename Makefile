@@ -1,10 +1,18 @@
-.PHONY: build test
+.PHONY: build test ui ui-test
 
 build:
 	CGO_ENABLED=0 go build -o blastgate ./cmd/blastgate
 
 test:
 	go test -race -count=1 ./...
+
+# The UI is built into ui/dist, which is committed and embedded, so `build`
+# needs no Node. Run `make ui` after changing ui/src and commit ui/dist.
+ui:
+	cd ui && npm ci && npm run build
+
+ui-test:
+	cd ui && npm ci && npm test -- --run
 
 # The fixture is its own kind cluster with its own kubeconfig files under
 # fixture/. Every command names those files explicitly; nothing here falls
