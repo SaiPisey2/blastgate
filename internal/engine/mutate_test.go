@@ -98,9 +98,18 @@ func TestScaleSubresourceUsesStatusSelector(t *testing.T) {
 	look := &fakeLook{}
 	e.look = look
 	a := normalize.Action{Verb: "patch", Group: "apps", Version: "v1", Resource: "deployments", Subresource: "scale", Namespace: "demo", Name: "web", PatchType: "application/merge-patch+json", Principal: alice}
-	e.assessMutation(context.Background(), a, []byte(`{"spec":{"replicas":1}}`))
-	if look.lastRm.Count != 1 || look.lastRm.Selector.MatchLabels["app"] != "web" {
-		t.Errorf("removal = %+v", look.lastRm)
+	i := e.assessMutation(context.Background(), a, []byte(`{"spec":{"replicas":1}}`))
+	if look.lastRm.Count != 1 || look.lastRm.Selector == nil || look.lastRm.Selector.MatchLabels["app"] != "web" {
+		t.Fatalf("removal = %+v", look.lastRm)
+	}
+	found := false
+	for _, ef := range i.Effects {
+		if ef.Kind == "scales-down" && ef.Explanation == "replicas 2→1" {
+			found = true
+		}
+	}
+	if !i.Measured || i.Class != ClassReversible || !found {
+		t.Errorf("impact = %+v", i)
 	}
 }
 
@@ -341,5 +350,57 @@ func TestAPIPathAgreesWithNormalize(t *testing.T) {
 		if _, err := apiPath(a); err != nil {
 			t.Errorf("%s: %v (action %+v)", p, err, a)
 		}
+	}
+}
+
+// Ruling P1-R13: only a 403 or 404 dry-run is a refusal the real request
+// shares. Every other non-2xx can be the dry-run's alone.
+func TestDryRunStatusClassification(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		rejected bool
+	}{
+		{403, true}, {404, true},
+		{400, false}, {409, false}, {415, false}, {422, false}, {429, false}, {302, false}, {500, false},
+	} {
+		var seen []*http.Request
+		e := apiServer(t, `{"kind":"ConfigMap"}`, `{"kind":"Status"}`, tc.status, &seen)
+		e.look = &fakeLook{}
+		a := normalize.Action{Verb: "update", Version: "v1", Resource: "configmaps", Namespace: "demo", Name: "c", Principal: alice}
+		i := e.assessMutation(context.Background(), a, []byte(`{}`))
+		if tc.rejected && (!i.Measured || !i.DryRunRejected || i.Class != ClassRead) {
+			t.Errorf("%d: impact = %+v, want READ rejected", tc.status, i)
+		}
+		if !tc.rejected && (i.Measured || i.DryRunRejected) {
+			t.Errorf("%d: impact = %+v, want unmeasured", tc.status, i)
+		}
+	}
+}
+
+func TestReplicationControllerRelabelOrphansService(t *testing.T) {
+	var seen []*http.Request
+	rc := func(l string) string {
+		return `{"kind":"ReplicationController","apiVersion":"v1","spec":{"replicas":1,"selector":{"app":"` + l + `"},"template":{"metadata":{"labels":{"app":"` + l + `"}}}}}`
+	}
+	e := apiServer(t, rc("web"), rc("web2"), 200, &seen)
+	e.look = &fakeLook{svcs: []corev1.Service{{ObjectMeta: metav1.ObjectMeta{Name: "web"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "web"}}}}}
+	a := normalize.Action{Verb: "update", Version: "v1", Resource: "replicationcontrollers", Namespace: "demo", Name: "web", Principal: alice}
+	i := e.assessMutation(context.Background(), a, []byte(rc("web2")))
+	if v, ok := i.EndpointsLeft["web"]; !ok || v != 0 {
+		t.Errorf("endpoints = %v, want web:0", i.EndpointsLeft)
+	}
+}
+
+func TestCreateBodyNameWinsOverGenerateName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"kind":"Pod","apiVersion":"v1","metadata":{"generateName":"job-","name":"fixed"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	e := New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, 5*time.Second)
+	a := normalize.Action{Verb: "create", Version: "v1", Resource: "pods", Namespace: "demo", Principal: alice}
+	i := e.assessMutation(context.Background(), a, []byte(`{"metadata":{"name":"fixed","generateName":"job-"}}`))
+	if len(i.Effects) == 0 || i.Effects[0].Object != "Pod/demo/fixed" {
+		t.Errorf("effects = %+v", i.Effects)
 	}
 }

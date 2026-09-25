@@ -46,7 +46,9 @@ func detectSQL(argv []string) bool {
 	for _, arg := range argv {
 		for _, tok := range strings.FieldsFunc(arg, shellSeparators) {
 			// A client called by path (/usr/bin/psql) is still the client.
-			if sqlClients[tok[strings.LastIndex(tok, "/")+1:]] {
+			// Case-insensitive: a wrapper or alias named PSQL or MySQL is
+			// still a database client, and a miss here is a missed hold.
+			if sqlClients[strings.ToLower(tok[strings.LastIndex(tok, "/")+1:])] {
 				return true
 			}
 		}

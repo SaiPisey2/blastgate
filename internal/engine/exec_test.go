@@ -51,6 +51,8 @@ func TestDetectSQLThroughShellPunctuation(t *testing.T) {
 		{"sh", "-c", "echo 'drop table x' | psql"},
 		{"sh", "-c", "out=$(mysql -e 'show tables')"},
 		{"/usr/bin/psql", "-l"},
+		{"PSQL", "-l"},
+		{"sh", "-c", "MySQL -e 'show tables'"},
 	} {
 		if !detectSQL(c) {
 			t.Errorf("missed %q", c)

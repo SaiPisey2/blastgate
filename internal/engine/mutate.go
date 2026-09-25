@@ -91,8 +91,11 @@ func isAuthority(a normalize.Action) bool {
 }
 
 // templated are the workloads whose pod template labels decide which
-// Services route to their pods.
-var templated = map[string]bool{"deployments": true, "statefulsets": true, "daemonsets": true, "replicasets": true}
+// Services route to their pods, by group.
+var templated = map[string]map[string]bool{
+	"apps": {"deployments": true, "statefulsets": true, "daemonsets": true, "replicasets": true},
+	"":     {"replicationcontrollers": true},
+}
 
 // assessMutation measures a create, update or patch by asking the API
 // server what it would store -- a dry-run sent as the session's human, so
@@ -156,14 +159,19 @@ func (e *Engine) assessMutation(ctx context.Context, a normalize.Action, body []
 	switch {
 	case err != nil:
 		return Unmeasured("dry-run failed: " + err.Error())
-	case status/100 == 4 && status != http.StatusTooManyRequests:
-		// The server refused the request as this human: the real request
-		// would be refused the same way, so it changes nothing. Recorded so
-		// the audit shows the attempt.
+	case status == http.StatusForbidden || status == http.StatusNotFound:
+		// The human may not do this, or the object is not there: both are
+		// decided before any dry-run-specific path, so the real request is
+		// refused the same way and changes nothing. Recorded so the audit
+		// shows the attempt. (Ruling P1-R13.)
 		return Impact{Class: ClassRead, Measured: true, DryRunRejected: true, Undo: "none"}
 	case status/100 != 2:
-		// A 5xx or a throttle says the server could not answer, not that it
-		// refused; the real request may well succeed.
+		// Every other refusal can be the dry-run's alone: a 400 from an
+		// admission webhook that does not support dry-run, a 409 or 422
+		// that a later state or the real body avoids, a 415 for a type the
+		// real request sends differently, a throttle, a redirect, a 5xx.
+		// The real request may succeed, so none of them is "changes
+		// nothing".
 		return Unmeasured(fmt.Sprintf("dry-run returned %d", status))
 	}
 
@@ -172,7 +180,7 @@ func (e *Engine) assessMutation(ctx context.Context, a normalize.Action, body []
 	if a.Verb == "create" {
 		kind = "creates"
 	}
-	i.Effects = append(i.Effects, Effect{Kind: kind, Object: objectRefOf(a, after)})
+	i.Effects = append(i.Effects, Effect{Kind: kind, Object: createdRef(a, after, body)})
 	if before == nil {
 		return i
 	}
@@ -180,7 +188,7 @@ func (e *Engine) assessMutation(ctx context.Context, a normalize.Action, body []
 	if fail := e.scaleDown(ctx, a, before, after, &i); fail != "" {
 		return Unmeasured(fail)
 	}
-	if a.Group == "apps" && templated[a.Resource] && a.Subresource == "" {
+	if templated[a.Group][a.Resource] && a.Subresource == "" {
 		bl := nestedStringMap(before, "spec", "template", "metadata", "labels")
 		al := nestedStringMap(after, "spec", "template", "metadata", "labels")
 		if !maps.Equal(bl, al) {
@@ -497,7 +505,8 @@ func workloadSelector(obj map[string]any, isScale bool) (*metav1.LabelSelector, 
 // objectRefOf names the object obj is, in the group/Kind/namespace/name
 // form fromFinding uses. A subresource names the object the server
 // returned (a Scale is autoscaling/Scale). The name is a's when it has
-// one; for a create it is generateName when set, since the dry-run invents
+// one (createdRef supplies a create body's own name); otherwise it is
+// generateName when set, since the dry-run invents
 // a fresh random name each time and the digest of an identical retry would
 // otherwise never match its approval.
 func objectRefOf(a normalize.Action, obj map[string]any) string {
@@ -525,6 +534,24 @@ func objectRefOf(a normalize.Action, obj map[string]any) string {
 		ref = group + "/" + ref
 	}
 	return ref
+}
+
+// createdRef is objectRefOf for the request's own object. A create that
+// names its object in the body is named by it even when generateName is
+// also set -- the server ignores generateName then, and so must the ref;
+// only a create with no name falls back to generateName.
+func createdRef(a normalize.Action, after map[string]any, body []byte) string {
+	if a.Verb == "create" && a.Name == "" {
+		var req struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if json.Unmarshal(body, &req) == nil && req.Metadata.Name != "" {
+			a.Name = req.Metadata.Name
+		}
+	}
+	return objectRefOf(a, after)
 }
 
 // resourceRef names an object that was never read (an authority write is
