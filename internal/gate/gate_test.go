@@ -38,19 +38,34 @@ func (f *fakeEngine) Assess(context.Context, normalize.Action, []byte) engine.As
 }
 
 type fakeSnap struct {
-	err   error
-	taken int
+	err       error
+	taken     int
+	discarded []string
+	take      func(ctx context.Context) (string, error) // when set, replaces the fixed answer
+	order     *[]string
 }
 
-func (f *fakeSnap) Take(context.Context, string, normalize.Action, engine.Impact) (string, error) {
+func (f *fakeSnap) Take(ctx context.Context, _ string, _ normalize.Action, _ engine.Impact) (string, error) {
 	f.taken++
-	return "/snap", f.err
+	if f.order != nil {
+		*f.order = append(*f.order, "snapshot")
+	}
+	if f.take != nil {
+		return f.take(ctx)
+	}
+	if f.err != nil {
+		return "", f.err
+	}
+	return "/snap", nil
 }
+
+func (f *fakeSnap) Discard(path string) { f.discarded = append(f.discarded, path) }
 
 type fakeAudit struct {
-	mu   sync.Mutex
-	rows []store.AuditRow
-	err  error
+	mu    sync.Mutex
+	rows  []store.AuditRow
+	err   error
+	order *[]string
 }
 
 // AppendAudit fails on a cancelled ctx, as database/sql does: the gate
@@ -64,21 +79,41 @@ func (f *fakeAudit) AppendAudit(ctx context.Context, r store.AuditRow) error {
 	if f.err != nil {
 		return f.err
 	}
+	if f.order != nil {
+		*f.order = append(*f.order, "audit")
+	}
 	f.rows = append(f.rows, r)
 	return nil
 }
 
 type fakeApprovals struct {
 	mu       sync.Mutex
-	outcomes []approval.Outcome // returned by successive Check calls; last repeats
+	outcomes []approval.Outcome // returned by successive Verify calls; last repeats
 	created  []store.Approval
 	status   map[string]string
-	checks   [][]string // session, human, agent, requestDigest, impactDigest per Check
+	checks   [][]string // session, human, agent, requestDigest, impactDigest per Verify
 	checkErr error
 	makeErr  error
+
+	consumed   int
+	consumeErr error
+	order      *[]string
 }
 
-func (f *fakeApprovals) Check(_ context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error) {
+func (f *fakeApprovals) Consume(context.Context, store.Approval) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.order != nil {
+		*f.order = append(*f.order, "consume")
+	}
+	if f.consumeErr != nil {
+		return f.consumeErr
+	}
+	f.consumed++
+	return nil
+}
+
+func (f *fakeApprovals) Verify(_ context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checks = append(f.checks, []string{session, human, agent, requestDigest, impactDigest})
@@ -164,7 +199,7 @@ func TestHeldRequestTimesOutWithATicket(t *testing.T) {
 }
 
 func TestApprovalInsideTheWindowReleasesInline(t *testing.T) {
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Verified}}
 	g, fe, fs, _ := newGate(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1}, ap)
 	g.Hold = 2 * time.Second
 	go func() {
@@ -186,7 +221,7 @@ func TestApprovalInsideTheWindowReleasesInline(t *testing.T) {
 }
 
 func TestReleasedRetryForwards(t *testing.T) {
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Release}}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}}
 	g, fe, _, fa := newGate(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1}, ap)
 	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
 	if !v.Forward || fe.calls != 1 || fa.rows[0].ApprovalID == "" {
@@ -298,7 +333,7 @@ func approveWhenCreated(ap *fakeApprovals, status string) {
 }
 
 func TestCheckIsAskedWithTheAuthenticatedSession(t *testing.T) {
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Release}}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}}
 	g, _, _, _ := newGate(terminal, ap)
 	r := req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data")
 	r.Header.Set("Impersonate-User", "mallory")
@@ -421,7 +456,7 @@ func TestInlineReleaseHonoursAPolicyDenyOnTheFreshMeasurement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Verified}}
 	g, fe, fs, fa := newGate(terminal, ap)
 	g.Policy = p
 	worse := terminal
@@ -452,7 +487,7 @@ func TestInlineReleaseOfAGoneApprovalTicketsANewOne(t *testing.T) {
 }
 
 func TestClientLeavingDuringTheRescoreSpendsNothing(t *testing.T) {
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Release}}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.None, approval.Verified}}
 	g, fe, fs, _ := newGate(terminal, ap)
 	g.Hold = 2 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
@@ -470,7 +505,7 @@ func TestClientLeavingDuringTheRescoreSpendsNothing(t *testing.T) {
 }
 
 func TestApprovalCheckFailureRefuses(t *testing.T) {
-	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Release}, checkErr: errors.New("db locked")}
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}, checkErr: errors.New("db locked")}
 	g, _, fs, _ := newGate(terminal, ap)
 	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
 	if v.Forward || v.Code != 503 || fs.taken != 0 || strings.Contains(v.Message, "locked") {
@@ -488,5 +523,115 @@ func TestCreatePendingFailureRefuses(t *testing.T) {
 	}
 	if time.Since(start) > 150*time.Millisecond {
 		t.Error("waited on an approval that was never created")
+	}
+}
+
+// Final review I2(a): the approval is spent after the snapshot and the
+// decision row, never before -- a failure in either leaves it for the
+// agent's next retry.
+func TestApprovalIsSpentOnlyAfterSnapshotAndAudit(t *testing.T) {
+	var order []string
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}, order: &order}
+	g, _, fs, fa := newGate(terminal, ap)
+	fs.order, fa.order = &order, &order
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if !v.Forward || strings.Join(order, ",") != "snapshot,audit,consume" {
+		t.Errorf("verdict %+v, order %v", v, order)
+	}
+}
+
+func TestFailedSnapshotLeavesTheApprovalUnspent(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}}
+	g, _, fs, _ := newGate(terminal, ap)
+	fs.err = errors.New("sounding refused")
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 503 || ap.consumed != 0 {
+		t.Fatalf("verdict %+v, consumed %d", v, ap.consumed)
+	}
+	fs.err = nil
+	v = g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if !v.Forward || ap.consumed != 1 {
+		t.Errorf("retry after the snapshot recovered: verdict %+v, consumed %d", v, ap.consumed)
+	}
+}
+
+func TestFailedDecisionAuditLeavesTheApprovalUnspent(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}}
+	g, _, fs, fa := newGate(terminal, ap)
+	fa.err = errors.New("locked")
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || ap.consumed != 0 || len(fs.discarded) != 1 {
+		t.Errorf("verdict %+v, consumed %d, discarded %v", v, ap.consumed, fs.discarded)
+	}
+}
+
+// A retry that verified but lost the consume to a concurrent one is not
+// forwarded, and its snapshot is not left to look like a write's undo.
+func TestLostConsumeRefusesAndDiscardsTheSnapshot(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}, consumeErr: store.ErrConflict}
+	g, _, fs, fa := newGate(terminal, ap)
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != http.StatusConflict || len(fs.discarded) != 1 || fs.discarded[0] != "/snap" {
+		t.Errorf("verdict %+v, discarded %v", v, fs.discarded)
+	}
+	if len(fa.rows) != 1 {
+		t.Errorf("want exactly one decision row, got %+v", fa.rows)
+	}
+	ap.consumeErr = errors.New("disk I/O error")
+	v = g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 503 || strings.Contains(v.Message, "disk") {
+		t.Errorf("verdict %+v", v)
+	}
+}
+
+// Final review I2(d): a snapshot that hangs is cut off at its budget and
+// the write refused; one that returns late is discarded, not trusted.
+func TestSnapshotIsBoundedByItsBudget(t *testing.T) {
+	ap := &fakeApprovals{outcomes: []approval.Outcome{approval.Verified}}
+	g, _, fs, _ := newGate(terminal, ap)
+	g.SnapshotBudget = 50 * time.Millisecond
+	fs.take = func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	start := time.Now()
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || v.Code != 503 || ap.consumed != 0 || time.Since(start) > time.Second {
+		t.Errorf("verdict %+v, consumed %d, after %v", v, ap.consumed, time.Since(start))
+	}
+	fs.take = func(ctx context.Context) (string, error) {
+		time.Sleep(100 * time.Millisecond) // ignores ctx, then claims success
+		return "/late", nil
+	}
+	v = g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	if v.Forward || ap.consumed != 0 || len(fs.discarded) != 1 || fs.discarded[0] != "/late" {
+		t.Errorf("verdict %+v, consumed %d, discarded %v", v, ap.consumed, fs.discarded)
+	}
+}
+
+// Final review I4: the ticket speaks to a person, not to the agent that
+// reads it.
+func TestTicketAsksForAPerson(t *testing.T) {
+	g, _, _, _ := newGate(terminal, nil)
+	g.Hold = 0
+	v := g.Decide(context.Background(), alice, req("DELETE", "/api/v1/namespaces/demo/persistentvolumeclaims/data"), nil)
+	want := "blastgate: held for approval " + v.Ticket + " (rule data-destruction: " + terminal.Summary() +
+		"). Ask a person to approve it with `blastgate approve " + v.Ticket + " --by <name>`, then retry."
+	if v.Message != want {
+		t.Errorf("message\n%q\nwant\n%q", v.Message, want)
+	}
+}
+
+// Final review I5: a GET that upgrades the connection is scored and put
+// to policy, never passed through as a read.
+func TestUpgradeGETIsScoredNotPassed(t *testing.T) {
+	g, fe, _, _ := newGate(engine.Unmeasured("a stream"), nil)
+	g.Hold = 0
+	r := req("GET", "/apis/subresources.kubevirt.io/v1/namespaces/demo/virtualmachineinstances/vm/vnc")
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	v := g.Decide(context.Background(), alice, r, nil)
+	if v.Forward || fe.calls != 1 || v.Ticket == "" {
+		t.Errorf("verdict %+v, engine calls %d", v, fe.calls)
 	}
 }

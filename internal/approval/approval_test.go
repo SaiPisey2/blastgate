@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -324,5 +325,98 @@ func TestConcurrentChecksReleaseOnce(t *testing.T) {
 	}
 	if counts[Release] != 1 || counts[None] != 9 {
 		t.Errorf("outcomes = %v, want exactly one release and nine none", counts)
+	}
+}
+
+// Final review I2(a): the gate verifies an approval, snapshots, and only
+// then spends it. Verify must leave the approval spendable -- a snapshot
+// that fails in between must not burn the human's "yes".
+func TestVerifyDoesNotSpend(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	s, st, _ := svc(t, &now)
+	a := pending(t, st, now)
+	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+		if err != nil || o != Verified || got.ID != a.ID {
+			t.Fatalf("verify %d = %v, %v", i, o, err)
+		}
+	}
+	if row, _ := st.ApprovalByID(context.Background(), a.ID); row.Status != "approved" {
+		t.Errorf("status after verify = %s, want approved", row.Status)
+	}
+	o, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+	if o != Verified {
+		t.Fatal(o)
+	}
+	if err := s.Consume(context.Background(), got); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := s.Consume(context.Background(), got); !errors.Is(err, store.ErrConflict) {
+		t.Errorf("second consume = %v, want ErrConflict", err)
+	}
+	if o, _, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
+		t.Errorf("verify after consume = %v, want None", o)
+	}
+}
+
+// Verify and Consume split across a snapshot: two retries that both
+// verified must still release at most once.
+func TestConcurrentVerifyThenConsumeReleasesOnce(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	s, st, _ := svc(t, &now)
+	a := pending(t, st, now)
+	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	var verified []store.Approval
+	for i := 0; i < 10; i++ {
+		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+		if err != nil || o != Verified {
+			t.Fatalf("verify = %v, %v", o, err)
+		}
+		verified = append(verified, got)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	won, lost := 0, 0
+	for _, got := range verified {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := s.Consume(context.Background(), got)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, store.ErrConflict):
+				lost++
+			default:
+				t.Errorf("consume: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if won != 1 || lost != 9 {
+		t.Errorf("won %d lost %d, want 1 and 9", won, lost)
+	}
+}
+
+// A token that lapses between Verify and Consume (a slow snapshot) is not
+// spent: it is past the lifetime the approver gave it.
+func TestConsumeRefusesALapsedToken(t *testing.T) {
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	s, st, _ := svc(t, &now)
+	a := pending(t, st, now)
+	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	_, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+	now = now.Add(16 * time.Minute)
+	if err := s.Consume(context.Background(), got); !errors.Is(err, store.ErrConflict) {
+		t.Errorf("consume of a lapsed token = %v, want ErrConflict", err)
 	}
 }

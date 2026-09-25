@@ -82,9 +82,11 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 			Engine:        eng,
 			SoundingScore: soundingSnapshot(up.Config),
 		},
-		Hold: cfg.Hold,
-		Poll: 500 * time.Millisecond,
-		Log:  log,
+		// The snapshot re-reads what scoring read; the same budget bounds it.
+		SnapshotBudget: cfg.ScoreBudget,
+		Hold:           cfg.Hold,
+		Poll:           500 * time.Millisecond,
+		Log:            log,
 	}
 	srv := &http.Server{
 		Handler:           proxy.New(auth, g, up, log),
@@ -128,15 +130,19 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 }
 
 // approvalsAdapter is gate.Approvals over the approval service and the
-// store. Check passes the authenticated session, human and agent straight
-// through (ruling P1-R9).
+// store. Verify passes the authenticated session, human and agent
+// straight through (ruling P1-R9).
 type approvalsAdapter struct {
 	svc *approval.Service
 	st  *store.Store
 }
 
-func (a approvalsAdapter) Check(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error) {
-	return a.svc.Check(ctx, session, human, agent, requestDigest, impactDigest)
+func (a approvalsAdapter) Verify(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error) {
+	return a.svc.Verify(ctx, session, human, agent, requestDigest, impactDigest)
+}
+
+func (a approvalsAdapter) Consume(ctx context.Context, ap store.Approval) error {
+	return a.svc.Consume(ctx, ap)
 }
 
 // CreatePending stamps the pending lifetime (ruling P1-R16). The gate

@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,18 +32,30 @@ type Assessor interface {
 
 type Snapshotter interface {
 	Take(ctx context.Context, requestID string, a normalize.Action, i engine.Impact) (string, error)
+	// Discard removes a snapshot taken for a request that will not be
+	// forwarded after all, so it is not later mistaken for the undo
+	// bundle of a write that happened.
+	Discard(path string)
 }
 
 type Audit interface {
 	AppendAudit(ctx context.Context, r store.AuditRow) error
 }
 
-// Approvals is the approval lifecycle as the gate sees it. Check's session,
-// human and agent are always the authenticated session's (ruling P1-R9):
-// the token is bound to them, and taking them from the request would let
-// a caller present someone else's approval as its own.
+// Approvals is the approval lifecycle as the gate sees it. Verify's
+// session, human and agent are always the authenticated session's (ruling
+// P1-R9): the token is bound to them, and taking them from the request
+// would let a caller present someone else's approval as its own.
+//
+// Verify never spends an approval; Consume does, and the gate calls it
+// only once the snapshot is on disk (final review I2). Spending first
+// meant a snapshot that then failed burned the human's approval for a
+// request that was never forwarded and could never be released again.
 type Approvals interface {
-	Check(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error)
+	Verify(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (approval.Outcome, store.Approval, error)
+	// Consume returns store.ErrConflict when the approval can no longer
+	// be spent -- a concurrent retry spent it, or it lapsed.
+	Consume(ctx context.Context, a store.Approval) error
 	CreatePending(ctx context.Context, a store.Approval) error
 	Status(ctx context.Context, id string) (string, error)
 }
@@ -53,10 +66,14 @@ type Gate struct {
 	Approvals Approvals
 	Audit     Audit
 	Snapshots Snapshotter
-	Hold      time.Duration
-	Poll      time.Duration
-	Now       func() time.Time
-	Log       *slog.Logger
+	// SnapshotBudget bounds the snapshot taken before a write is
+	// forwarded; past it, the write is refused. Zero means
+	// defaultSnapshotBudget.
+	SnapshotBudget time.Duration
+	Hold           time.Duration
+	Poll           time.Duration
+	Now            func() time.Time
+	Log            *slog.Logger
 }
 
 // Verdict is what the proxy does with one request. Message is the only
@@ -86,9 +103,14 @@ const (
 	msgSnapshot    = "blastgate: could not snapshot before forwarding, so the request was not forwarded"
 	msgAudit       = "blastgate: could not record the decision, so the request was not forwarded"
 	msgApprovals   = "blastgate: could not check approvals, so the request was not forwarded"
+	msgSpent       = "blastgate: this approval was already used by another request, so this one was not forwarded"
 	msgChanged     = " The measured impact changed since the last approval."
 	defaultPoll    = 500 * time.Millisecond
-	auditTimeout   = 5 * time.Second
+	// defaultSnapshotBudget matches the default score budget: a snapshot
+	// reads what scoring already read, and a wedged read must not hold a
+	// request past its client's own timeout.
+	defaultSnapshotBudget = 5 * time.Second
+	auditTimeout          = 5 * time.Second
 )
 
 // Decide runs the whole decision for one request. It never returns
@@ -119,7 +141,7 @@ func (g *Gate) Decide(ctx context.Context, s store.Session, r *http.Request, bod
 	v.rule, v.decision = pv.Rule, string(pv.Decision)
 	switch pv.Decision {
 	case policy.Allow:
-		return g.forward(ctx, v)
+		return g.forward(ctx, v, nil)
 	case policy.Hold:
 		return g.hold(ctx, v, body, start)
 	default:
@@ -131,7 +153,7 @@ func (g *Gate) Decide(ctx context.Context, s store.Session, r *http.Request, bod
 
 func (g *Gate) hold(ctx context.Context, v Verdict, body []byte, start time.Time) Verdict {
 	s := v.sess
-	out, ap, err := g.Approvals.Check(ctx, s.ID, s.Human, s.Agent, v.digest, v.imp.Digest())
+	out, ap, err := g.Approvals.Verify(ctx, s.ID, s.Human, s.Agent, v.digest, v.imp.Digest())
 	if err != nil {
 		g.log().Error("approval check failed", "request", v.requestID, "err", err)
 		return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
@@ -139,9 +161,9 @@ func (g *Gate) hold(ctx context.Context, v Verdict, body []byte, start time.Time
 	changed := false
 	var id string
 	switch out {
-	case approval.Release:
+	case approval.Verified:
 		v.approvalID = ap.ID
-		return g.forward(ctx, v)
+		return g.forward(ctx, v, &ap)
 	case approval.Denied:
 		v.approvalID = ap.ID
 		return g.denied(ctx, v)
@@ -199,22 +221,22 @@ func (g *Gate) recheck(ctx context.Context, v Verdict, body []byte, changed bool
 		return g.refuse(ctx, v, http.StatusForbidden, metav1.StatusReasonForbidden, "blastgate: refused by policy rule "+pv.Rule)
 	}
 	s := v.sess
-	out, ap, err := g.Approvals.Check(ctx, s.ID, s.Human, s.Agent, v.digest, asm.Impact.Digest())
+	out, ap, err := g.Approvals.Verify(ctx, s.ID, s.Human, s.Agent, v.digest, asm.Impact.Digest())
 	if err != nil {
 		g.log().Error("approval check failed", "request", v.requestID, "err", err)
 		return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
 	}
 	switch out {
-	case approval.Release:
+	case approval.Verified:
 		v.approvalID = ap.ID
-		return g.forward(ctx, v)
+		return g.forward(ctx, v, &ap)
 	case approval.Denied:
 		v.approvalID = ap.ID
 		return g.denied(ctx, v)
 	case approval.Pending:
 		return g.ticket(ctx, v, v.approvalID, changed)
 	default:
-		// Void (superseded by this Check), None (spent by a concurrent
+		// Void (superseded by this Verify), None (spent by a concurrent
 		// identical request, expired, or otherwise gone) or unknown: the
 		// old approval can never be approved again, so a ticket naming it
 		// would send the human to approve something impossible.
@@ -287,12 +309,16 @@ func (g *Gate) wait(ctx context.Context, id string, window time.Duration) string
 	}
 }
 
-// forward snapshots, then records the decision, and only then says
-// forward. Either step failing refuses: a write without a snapshot cannot
-// be undone, and a write without a decision row is one the audit trail
-// would never show.
-func (g *Gate) forward(ctx context.Context, v Verdict) Verdict {
-	path, err := g.Snapshots.Take(ctx, v.requestID, v.act, v.imp)
+// forward snapshots, records the decision, spends the approval (when one
+// released this request) and only then says forward. Any step failing
+// refuses: a write without a snapshot cannot be undone, a write without a
+// decision row is one the audit trail would never show, and an approval
+// must be spent by exactly the request that runs. The approval is spent
+// last so that none of the steps before it can burn it for a request that
+// is then not forwarded -- a failed snapshot or audit leaves it for the
+// agent's next retry.
+func (g *Gate) forward(ctx context.Context, v Verdict, ap *store.Approval) Verdict {
+	path, err := g.snapshot(ctx, v)
 	if err != nil {
 		g.log().Error("snapshot failed", "request", v.requestID, "err", err)
 		return g.refuse(ctx, v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgSnapshot)
@@ -300,12 +326,59 @@ func (g *Gate) forward(ctx context.Context, v Verdict) Verdict {
 	v.snapshot = path
 	if err := g.appendAudit(ctx, g.row(v, "decision")); err != nil {
 		g.log().Error("decision audit failed", "request", v.requestID, "err", err)
+		g.Snapshots.Discard(path)
 		// No second attempt at the decision row: the write just failed, and
 		// the result row from Complete still records the refusal.
 		return g.status(v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgAudit)
 	}
+	if ap != nil {
+		if ctx.Err() != nil {
+			// The client has gone: nothing forwarded could reach it, so the
+			// approval stays unspent for its retry.
+			g.Snapshots.Discard(path)
+			return g.status(v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
+		}
+		// Detached from the client: a consume that commits just as the
+		// request ctx is cancelled would otherwise report a failure for
+		// an approval it did spend.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+		err := g.Approvals.Consume(cctx, *ap)
+		cancel()
+		if err != nil {
+			g.Snapshots.Discard(path)
+			// The decision row is already written; the result row records
+			// the refusal, so neither path writes a second decision row.
+			if errors.Is(err, store.ErrConflict) {
+				return g.status(v, http.StatusConflict, metav1.StatusReasonConflict, msgSpent)
+			}
+			g.log().Error("approval consume failed", "request", v.requestID, "err", err)
+			return g.status(v, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, msgApprovals)
+		}
+	}
 	v.Forward = true
 	return v
+}
+
+// snapshot takes the undo snapshot within SnapshotBudget. A snapshot that
+// finishes past the limit is discarded and refused like a failed one:
+// parts of it may have been cut short, and a read that hangs must not
+// hold the request open past the client's own timeout.
+func (g *Gate) snapshot(ctx context.Context, v Verdict) (string, error) {
+	budget := g.SnapshotBudget
+	if budget <= 0 {
+		budget = defaultSnapshotBudget
+	}
+	sctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	path, err := g.Snapshots.Take(sctx, v.requestID, v.act, v.imp)
+	if err != nil {
+		return "", err
+	}
+	if err := sctx.Err(); err != nil {
+		g.Snapshots.Discard(path)
+		return "", fmt.Errorf("snapshot did not finish in time: %w", err)
+	}
+	return path, nil
 }
 
 func (g *Gate) denied(ctx context.Context, v Verdict) Verdict {
@@ -315,7 +388,12 @@ func (g *Gate) denied(ctx context.Context, v Verdict) Verdict {
 
 func (g *Gate) ticket(ctx context.Context, v Verdict, id string, changed bool) Verdict {
 	v.Ticket = id
-	msg := fmt.Sprintf("blastgate: held for approval %s (rule %s: %s). Approve with `blastgate approve %s`, then retry.", id, v.rule, v.imp.Summary(), id)
+	// Addressed to a person, not to the agent reading it: an agent told
+	// "approve with ..." may try to run the command itself. It cannot
+	// succeed without the signing key and data directory, which the
+	// README says to keep out of its environment, but it must not be
+	// invited to try.
+	msg := fmt.Sprintf("blastgate: held for approval %s (rule %s: %s). Ask a person to approve it with `blastgate approve %s --by <name>`, then retry.", id, v.rule, v.imp.Summary(), id)
 	if changed {
 		msg += msgChanged
 	}

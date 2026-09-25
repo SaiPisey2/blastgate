@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,5 +234,121 @@ func TestRequestIDCannotEscapeTheDir(t *testing.T) {
 	a := normalize.Action{Verb: "delete", Version: "v1", Resource: "pods", Namespace: "demo", Name: "web"}
 	if _, err := tk.Take(context.Background(), "../x", a, engine.Impact{Class: engine.ClassTerminal, Measured: true}); err == nil {
 		t.Error("Take with a path-traversal request id succeeded")
+	}
+}
+
+// Final review I2(b): sounding refuses a cluster-scoped delete other than
+// a namespace, which is why it was unmeasured in the first place; asking
+// sounding again for the snapshot failed every time, so an approved
+// delete of that kind could never be forwarded. The object itself is read
+// instead.
+func TestUnmeasuredDeleteSnapshotsTheObject(t *testing.T) {
+	pv := `{"kind":"PersistentVolume","apiVersion":"v1","metadata":{"name":"pv-1"}}`
+	e, lastRequest := apiServer(t, pv)
+	tk := &Taker{Dir: t.TempDir(), Engine: e, SoundingScore: func(context.Context, model.Action, string) error {
+		t.Error("sounding asked to snapshot a delete it could not measure")
+		return os.ErrInvalid
+	}}
+	a := normalize.Action{Verb: "delete", Version: "v1", Resource: "persistentvolumes", Name: "pv-1",
+		Principal: normalize.Principal{Human: "alice"}}
+	out, err := tk.Take(context.Background(), "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4", a, engine.Unmeasured("cluster-scoped"))
+	if err != nil || out == "" {
+		t.Fatalf("take = %q, %v", out, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(out, "before.json")); string(got) != pv {
+		t.Errorf("before.json = %s", got)
+	}
+	note, _ := os.ReadFile(filepath.Join(out, "RESTORE.txt"))
+	if !strings.Contains(string(note), "kubectl create") {
+		t.Errorf("RESTORE.txt does not say how to recreate a deleted object:\n%s", note)
+	}
+	if r := lastRequest(); r.Method != http.MethodGet || r.URL.Path != "/api/v1/persistentvolumes/pv-1" || r.Header.Get("Impersonate-User") != "alice" {
+		t.Errorf("read %s %s as %q", r.Method, r.URL.Path, r.Header.Get("Impersonate-User"))
+	}
+}
+
+// Final review I2(c): a deletecollection was forwarded with no snapshot at
+// all. It is snapshotted as the LIST the API server would delete: same
+// path, same selectors, as the human.
+func TestDeleteCollectionSnapshotsTheList(t *testing.T) {
+	list := `{"kind":"ConfigMapList","apiVersion":"v1","items":[{"metadata":{"name":"a"}}]}`
+	e, lastRequest := apiServer(t, list)
+	tk := &Taker{Dir: t.TempDir(), Engine: e}
+	a := normalize.Action{Verb: "deletecollection", Version: "v1", Resource: "configmaps", Namespace: "demo",
+		Path:      "/api/v1/namespaces/demo/configmaps",
+		Query:     map[string][]string{"labelSelector": {"app=web"}, "fieldSelector": {"metadata.name=a"}, "propagationPolicy": {"Foreground"}},
+		Principal: normalize.Principal{Human: "alice"}}
+	out, err := tk.Take(context.Background(), "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5", a, engine.Unmeasured("verb deletecollection"))
+	if err != nil || out == "" {
+		t.Fatalf("take = %q, %v", out, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(out, "list.json")); string(got) != list {
+		t.Errorf("list.json = %s", got)
+	}
+	note, _ := os.ReadFile(filepath.Join(out, "RESTORE.txt"))
+	if !strings.Contains(string(note), "objects, not data") {
+		t.Errorf("RESTORE.txt does not say it restores objects, not data:\n%s", note)
+	}
+	r := lastRequest()
+	q := r.URL.Query()
+	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/namespaces/demo/configmaps" || r.Header.Get("Impersonate-User") != "alice" ||
+		q.Get("labelSelector") != "app=web" || q.Get("fieldSelector") != "metadata.name=a" || q.Has("propagationPolicy") || q.Has("dryRun") {
+		t.Errorf("listed %s %s?%s as %q", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Impersonate-User"))
+	}
+}
+
+// A collection that cannot be listed is not an empty one.
+func TestDeleteCollectionListFailureIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	e := engine.New(&upstream.Upstream{URL: u, Normal: http.DefaultTransport}, time.Second)
+	dir := t.TempDir()
+	tk := &Taker{Dir: dir, Engine: e}
+	a := normalize.Action{Verb: "deletecollection", Version: "v1", Resource: "configmaps", Namespace: "demo",
+		Principal: normalize.Principal{Human: "alice"}}
+	if out, err := tk.Take(context.Background(), "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6", a, engine.Unmeasured("x")); err == nil {
+		t.Errorf("a failed list was reported as a snapshot %q", out)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("a failed snapshot left %d entries behind", len(ents))
+	}
+}
+
+// An eviction sounding could not measure is snapshotted by reading the pod
+// it evicts: the path Before checks must be the pod's, not the eviction's.
+func TestUnmeasuredEvictionSnapshotsThePod(t *testing.T) {
+	pod := `{"kind":"Pod","apiVersion":"v1","metadata":{"name":"web-1","namespace":"demo"}}`
+	e, lastRequest := apiServer(t, pod)
+	tk := &Taker{Dir: t.TempDir(), Engine: e}
+	a := normalize.Action{Verb: "create", Version: "v1", Resource: "pods", Subresource: "eviction", Namespace: "demo", Name: "web-1",
+		Path: "/api/v1/namespaces/demo/pods/web-1/eviction", Principal: normalize.Principal{Human: "alice"}}
+	out, err := tk.Take(context.Background(), "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7", a, engine.Unmeasured("budget"))
+	if err != nil || out == "" {
+		t.Fatalf("take = %q, %v", out, err)
+	}
+	if r := lastRequest(); r.URL.Path != "/api/v1/namespaces/demo/pods/web-1" {
+		t.Errorf("read %s", r.URL.Path)
+	}
+}
+
+// Discard removes only a directory Take made.
+func TestDiscardRemovesOnlyItsOwnSnapshot(t *testing.T) {
+	root := t.TempDir()
+	tk := &Taker{Dir: filepath.Join(root, "snapshots")}
+	own, err := tk.write("b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8", "before.json", []byte("{}"), restoreNote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(root, "keep")
+	os.MkdirAll(other, 0o700)
+	tk.Discard(other)
+	tk.Discard(filepath.Join(tk.Dir, ".."))
+	tk.Discard(own)
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Errorf("own snapshot not removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("a directory Take did not make was removed: %v", err)
 	}
 }

@@ -47,6 +47,10 @@ const (
 	Denied                 // refuse: a human said no and the denial still stands
 	Void                   // the approval no longer matches; it is superseded
 	None                   // nothing usable: the caller creates a new pending approval
+	// Verified is Verify's answer for a valid approval it has NOT spent:
+	// the caller snapshots, then calls Consume, and forwards only if that
+	// succeeds. Last, so the values above keep their numbers.
+	Verified
 )
 
 func (o Outcome) String() string {
@@ -61,6 +65,8 @@ func (o Outcome) String() string {
 		return "void"
 	case None:
 		return "none"
+	case Verified:
+		return "verified"
 	}
 	return "outcome(" + strconv.Itoa(int(o)) + ")"
 }
@@ -152,11 +158,47 @@ func (s *Service) decidable(ctx context.Context, id string) (store.Approval, err
 	return a, nil
 }
 
-// Check is the retry path. session, human and agent come from the
+// Check is Verify and Consume in one step: Release when this call spent
+// the approval, None when a concurrent retry spent it first.
+func (s *Service) Check(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (Outcome, store.Approval, error) {
+	o, a, err := s.Verify(ctx, session, human, agent, requestDigest, impactDigest)
+	if err != nil || o != Verified {
+		return o, a, err
+	}
+	if err := s.Consume(ctx, a); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return None, a, nil
+		}
+		return None, a, err
+	}
+	a.Status = "consumed"
+	return Release, a, nil
+}
+
+// Consume spends an approval Verify returned as Verified. The store's
+// consume is the single-use gate: status and nonce move in one
+// transaction, so of two retries that both verified, exactly one gets
+// nil and the other ErrConflict. A token that lapsed since Verify -- a
+// slow snapshot in between -- is ErrConflict too, never spent late.
+func (s *Service) Consume(ctx context.Context, a store.Approval) error {
+	now := s.Now()
+	if now.After(a.Expires) {
+		if _, _, err := s.expire(ctx, a, "approved"); err != nil {
+			return err
+		}
+		return store.ErrConflict
+	}
+	return s.Store.ConsumeApproval(ctx, a.ID, a.Nonce, now)
+}
+
+// Verify is the retry path. session, human and agent come from the
 // retrying request's authenticated session, never from the approval row;
 // requestDigest and impactDigest are freshly computed for this retry. Any
-// error means the caller must hold, never forward.
-func (s *Service) Check(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (Outcome, store.Approval, error) {
+// error means the caller must hold, never forward. It never spends an
+// approval: Verified means "valid now", and the caller must Consume it
+// before forwarding -- after the snapshot, so a failed snapshot leaves
+// the human's approval for the next retry instead of burning it.
+func (s *Service) Verify(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (Outcome, store.Approval, error) {
 	if len(s.Key) == 0 {
 		return None, store.Approval{}, errNoKey
 	}
@@ -207,16 +249,7 @@ func (s *Service) Check(ctx context.Context, session, human, agent, requestDiges
 			a.Status = "superseded"
 			return Void, a, nil
 		}
-		// The consume is the single-use gate: status and nonce move in one
-		// transaction, so of two concurrent retries exactly one gets nil.
-		if err := s.Store.ConsumeApproval(ctx, a.ID, a.Nonce, now); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				return None, a, nil
-			}
-			return None, a, err
-		}
-		a.Status = "consumed"
-		return Release, a, nil
+		return Verified, a, nil
 	default: // consumed, superseded, expired: terminal, never reusable
 		return None, a, nil
 	}

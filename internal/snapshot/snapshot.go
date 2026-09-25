@@ -1,10 +1,10 @@
 // Package snapshot captures what a risky write would change before
 // blastgate forwards it, so a person who later wants it back has something
 // to restore from -- design's undo story for the writes sounding cannot
-// simply reverse. A delete delegates to sounding's own snapshot (it knows
-// the cascade a delete takes with it); an update or patch, which changes an
-// object rather than removing it, gets its own "before" read written
-// straight to disk.
+// simply reverse. A measured delete delegates to sounding's own snapshot
+// (it knows the cascade a delete takes with it); an update or patch, and a
+// delete sounding could not measure, gets its own "before" read written
+// straight to disk; a deletecollection gets the LIST it would empty.
 package snapshot
 
 import (
@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/SaiPisey2/sounding/pkg/model"
 
@@ -40,6 +41,35 @@ restores its metadata and spec to that state. It does not restore data a
 controller or another process wrote into the object afterward, and it does
 not restore anything the resourceVersion in before.json no longer matches
 in the live cluster.
+`
+
+// deletedNote is restoreNote for an object deleted outright, snapshotted
+// by reading it because sounding could not score the delete (a
+// cluster-scoped object other than a namespace, or any delete it refused).
+// replace needs a live object; a deleted one is created again, and create
+// refuses a resourceVersion or uid.
+const deletedNote = `This directory holds the object as it was immediately before blastgate
+forwarded a delete of it. blastgate could not measure that delete, so this
+is the object alone: not anything the delete took with it.
+
+Remove metadata.resourceVersion, metadata.uid and metadata.creationTimestamp
+from before.json, then
+
+    kubectl create -f before.json
+
+recreates the object. This restores objects, not data: whatever a deleted
+volume held, or a controller kept elsewhere, is not in this file.
+`
+
+// listNote explains list.json, the collection a deletecollection emptied.
+const listNote = `This directory holds the collection a deletecollection removed, as the
+API server listed it (same path, same labelSelector and fieldSelector)
+immediately before blastgate forwarded the delete.
+
+Take each object in list.json's "items", remove metadata.resourceVersion,
+metadata.uid and metadata.creationTimestamp, and create it again with
+kubectl create -f. This restores objects, not data: whatever a deleted
+volume held is gone.
 `
 
 // Taker takes an undo snapshot before a risky write is forwarded.
@@ -76,6 +106,9 @@ func (t *Taker) Take(ctx context.Context, requestID string, a normalize.Action, 
 		// approved COMPENSABLE/TERMINAL eviction would fall through this
 		// switch below with no undo bundle at all.
 		a.Verb, a.Subresource = "delete", ""
+		// The path too: Before cross-checks it against the parsed parts,
+		// and an unmeasured eviction is snapshotted by reading the pod.
+		a.Path = strings.TrimSuffix(strings.TrimRight(a.Path, "/"), "/eviction")
 	}
 
 	switch {
@@ -86,9 +119,18 @@ func (t *Taker) Take(ctx context.Context, requestID string, a normalize.Action, 
 			// already provides.
 			return "", nil
 		}
+		if !i.Measured {
+			// sounding already refused or failed to score this delete --
+			// a cluster-scoped object other than a namespace, for one.
+			// Asking it again for the snapshot fails the same way, and an
+			// approved delete would then never be forwardable.
+			return t.takeBefore(ctx, requestID, a, deletedNote)
+		}
 		return t.takeDelete(ctx, requestID, a)
+	case a.Verb == "deletecollection":
+		return t.takeList(ctx, requestID, a)
 	case a.Verb == "update" || a.Verb == "patch":
-		return t.takeBefore(ctx, requestID, a)
+		return t.takeBefore(ctx, requestID, a, restoreNote)
 	default:
 		return "", nil
 	}
@@ -117,7 +159,7 @@ func (t *Taker) takeDelete(ctx context.Context, requestID string, a normalize.Ac
 	return dir, nil
 }
 
-func (t *Taker) takeBefore(ctx context.Context, requestID string, a normalize.Action) (string, error) {
+func (t *Taker) takeBefore(ctx context.Context, requestID string, a normalize.Action, note string) (string, error) {
 	if t.Engine == nil {
 		return "", errors.New("snapshot: no engine to read the live object with")
 	}
@@ -127,24 +169,54 @@ func (t *Taker) takeBefore(ctx context.Context, requestID string, a normalize.Ac
 	}
 	if before == nil {
 		// Nothing lives at this name yet: an update or patch that
-		// upserts has no "before" to restore.
+		// upserts has no "before" to restore, and a delete of it will be
+		// refused as not found.
 		return "", nil
 	}
+	return t.write(requestID, "before.json", before, note)
+}
+
+func (t *Taker) takeList(ctx context.Context, requestID string, a normalize.Action) (string, error) {
+	if t.Engine == nil {
+		return "", errors.New("snapshot: no engine to list the collection with")
+	}
+	list, err := t.Engine.List(ctx, a)
+	if err != nil {
+		return "", fmt.Errorf("snapshot: listing the collection: %w", err)
+	}
+	return t.write(requestID, "list.json", list, listNote)
+}
+
+// write makes the request's directory and writes data and its RESTORE.txt
+// into it, removing the directory again if either write fails.
+func (t *Taker) write(requestID, name string, data []byte, note string) (string, error) {
 	dir, err := t.mkdir(requestID)
 	if err != nil {
 		return "", err
 	}
 	// 0600: the live object's full spec (Secrets included) must not be
 	// world- or group-readable on disk.
-	if err := os.WriteFile(filepath.Join(dir, "before.json"), before, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 		cleanup(dir)
-		return "", fmt.Errorf("snapshot: writing before.json: %w", err)
+		return "", fmt.Errorf("snapshot: writing %s: %w", name, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "RESTORE.txt"), []byte(restoreNote), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "RESTORE.txt"), []byte(note), 0o600); err != nil {
 		cleanup(dir)
 		return "", fmt.Errorf("snapshot: writing RESTORE.txt: %w", err)
 	}
 	return dir, nil
+}
+
+// Discard removes a snapshot the gate took but will not forward on -- the
+// approval it was taken for was spent by a concurrent retry, or the
+// snapshot finished past its time limit. Left behind, it would look like
+// the undo bundle of a write that never happened.
+func (t *Taker) Discard(path string) {
+	if path == "" || filepath.Dir(path) != filepath.Clean(t.Dir) || !requestIDPattern.MatchString(filepath.Base(path)) {
+		// Only a directory Take itself made: never a path from elsewhere.
+		return
+	}
+	cleanup(path)
 }
 
 // cleanup removes an already-made snapshot directory, best effort, after a
