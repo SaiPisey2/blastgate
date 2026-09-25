@@ -79,13 +79,22 @@ func NewID() string {
 }
 
 // Token is the HMAC-SHA256, hex, over
-// approval_id|agent|request_digest|impact_digest|nonce|expiry_ms. Every
-// field is bound so the token cannot be carried to another approval,
-// another agent, another request, a different measured impact, or past
-// its expiry. None of the fields can contain '|' in practice (hex IDs and
-// digests, a validated agent name), so the join is unambiguous.
+// approval_id|session|human|agent|request_digest|impact_digest|nonce|expiry_ms.
+// Every field is bound so the token cannot be carried to another
+// approval, session, human, agent, request, a different measured impact,
+// or past its expiry. The join stays unambiguous because at most one
+// field can contain '|': the human (any printable ASCII). The ID and
+// session are hex, read from the left; agent (a DNS label), digests,
+// nonce and expiry contain no '|' either, read from the right; whatever
+// is left is the human. A second free-text field would break that.
+//
+// With no key it returns "": an HMAC under an empty key is computable by
+// anyone who can read the row, and "" never equals a minted token.
 func (s *Service) Token(a store.Approval, nonce string, expires time.Time) string {
-	msg := strings.Join([]string{a.ID, a.Agent, a.RequestDigest, a.ImpactDigest, nonce, strconv.FormatInt(expires.UnixMilli(), 10)}, "|")
+	if len(s.Key) == 0 {
+		return ""
+	}
+	msg := strings.Join([]string{a.ID, a.Session, a.Human, a.Agent, a.RequestDigest, a.ImpactDigest, nonce, strconv.FormatInt(expires.UnixMilli(), 10)}, "|")
 	m := hmac.New(sha256.New, s.Key)
 	m.Write([]byte(msg))
 	return hex.EncodeToString(m.Sum(nil))
@@ -143,10 +152,11 @@ func (s *Service) decidable(ctx context.Context, id string) (store.Approval, err
 	return a, nil
 }
 
-// Check is the retry path. requestDigest and impactDigest are freshly
-// computed for this retry; agent is the session's agent. Any error means
-// the caller must hold, never forward.
-func (s *Service) Check(ctx context.Context, session, agent, requestDigest, impactDigest string) (Outcome, store.Approval, error) {
+// Check is the retry path. session, human and agent come from the
+// retrying request's authenticated session, never from the approval row;
+// requestDigest and impactDigest are freshly computed for this retry. Any
+// error means the caller must hold, never forward.
+func (s *Service) Check(ctx context.Context, session, human, agent, requestDigest, impactDigest string) (Outcome, store.Approval, error) {
 	if len(s.Key) == 0 {
 		return None, store.Approval{}, errNoKey
 	}
@@ -173,13 +183,16 @@ func (s *Service) Check(ctx context.Context, session, agent, requestDigest, impa
 		if now.After(a.Expires) {
 			return s.expire(ctx, a, "approved")
 		}
-		// Recompute over what this retry actually is — this agent, this
-		// request, this fresh impact — not over the row's own fields. A
-		// changed impact, a different agent, or a row edited to match a
-		// new measurement all fail here, because the stored token was
+		// Recompute over what this retry actually is — this session,
+		// human and agent, this request, this fresh impact — not over the
+		// row's own fields. A changed impact, a different caller, or a row
+		// edited to match (moved to another session, expiry extended,
+		// nonce swapped) all fail here, because the stored token was
 		// computed over the approved values under a key the database
 		// does not hold.
 		fresh := a
+		fresh.Session = session
+		fresh.Human = human
 		fresh.Agent = agent
 		fresh.RequestDigest = requestDigest
 		fresh.ImpactDigest = impactDigest
