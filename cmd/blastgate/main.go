@@ -26,6 +26,7 @@ commands:
   deny        deny a held request: deny <id> --by <name>
   replay      re-evaluate past decisions under a policy: replay --policy <file> [--since 168h]
   audit       export [--since 24h]: the audit trail as JSON lines
+  webhook-config  print the observe-only ValidatingWebhookConfiguration: webhook-config --url https://<host>:<port>/validate
   version     print the version`
 
 func main() {
@@ -58,6 +59,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return replayCmd(args[1:], getenv, stdout, stderr)
 	case "audit":
 		return auditCmd(args[1:], getenv, stdout, stderr)
+	case "webhook-config":
+		return webhookConfigCmd(args[1:], getenv, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n%s\n", args[0], usage)
 		return 2
