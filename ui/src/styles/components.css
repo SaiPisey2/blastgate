@@ -1204,11 +1204,13 @@
   min-width: 0;
   padding: var(--s-3) var(--s-5);
   cursor: pointer;
-  transition: background-color 120ms ease-out;
 }
 
-.waiting-row:hover {
+/* Colour on hover only. The transition lives on the hover rule, and a
+   selected row never matches it, so choosing a row by key is instant. */
+.waiting-row:hover:not(.is-selected) {
   background: var(--surface);
+  transition: background-color 120ms ease-out;
 }
 
 .waiting-row.is-selected {
@@ -1333,6 +1335,15 @@
 .big-number.tone-danger .big-number-value,
 .big-number.tone-danger .big-number-glyph {
   color: var(--danger-fg);
+}
+
+.big-number.tone-caution .big-number-value,
+.big-number.tone-caution .big-number-glyph {
+  color: var(--caution-fg);
+}
+
+.details-command {
+  margin: 0 0 var(--s-6);
 }
 
 .details-tech {
@@ -1484,6 +1495,11 @@
   transform: translateY(-4px) rotate(45deg);
 }
 
+/* Toggled by a key: the chevron turns at once, like the branch opens. */
+.itree.is-keyboard .itree-caret {
+  transition: none;
+}
+
 .itree-caret.is-leaf {
   border-color: transparent;
 }
@@ -1544,7 +1560,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .waiting-row,
+  .waiting-row:hover:not(.is-selected),
   .itree-caret {
     transition: none;
   }

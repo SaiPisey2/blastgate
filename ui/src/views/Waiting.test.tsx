@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import Waiting from './Waiting';
+import Waiting, { resetLastDecision } from './Waiting';
 import { emit, setCSRF, type ApprovalSummary } from '../api';
 import { announce } from '../components/Shell';
 import { mockFetch, type Call } from '../test/fetch';
@@ -22,6 +22,7 @@ afterEach(() => {
   cleanup();
   setCSRF('');
   vi.mocked(announce).mockClear();
+  resetLastDecision();
 });
 
 const WIDE = '(min-width: 900px)';
@@ -69,6 +70,55 @@ function server(initial: ApprovalSummary[]) {
     set(list: ApprovalSummary[]) {
       state.list = list;
       for (const s of list) if (!state.all.some((x) => x.id === s.id)) state.all.push(s);
+    },
+  };
+}
+
+// gated is a server whose list, details and POSTs can each be held back
+// by the test, to land a reload in the middle of a decision.
+function gated(initial: ApprovalSummary[]) {
+  const state = { list: initial, all: [...initial] };
+  let postGate: Promise<void> | null = null;
+  let listGate: Promise<void> | null = null;
+  const hold = () => {
+    let release!: () => void;
+    const p = new Promise<void>((r) => (release = r));
+    return { p, release };
+  };
+  const calls = mockFetch({
+    'GET /api/approvals?status=pending': async () => {
+      // The list as it was when asked, even if it is answered later.
+      const snapshot = state.list;
+      if (listGate) await listGate;
+      return { body: snapshot };
+    },
+    'GET /api/approvals/': (c) => {
+      const s = state.all.find((x) => c.url.endsWith(`/${x.id}`))!;
+      return { body: detail(s, s.id === ID2 ? plainImpact : impact()) };
+    },
+    'POST /api/approvals/': async () => {
+      if (postGate) await postGate;
+      return { body: {} };
+    },
+  });
+  return {
+    calls,
+    set(list: ApprovalSummary[]) {
+      state.list = list;
+      for (const s of list) if (!state.all.some((x) => x.id === s.id)) state.all.push(s);
+    },
+    holdPosts() {
+      const h = hold();
+      postGate = h.p;
+      return h.release;
+    },
+    holdLists() {
+      const h = hold();
+      listGate = h.p;
+      return () => {
+        listGate = null;
+        h.release();
+      };
     },
   };
 }
@@ -256,11 +306,108 @@ describe('Waiting', () => {
     expect(announce).toHaveBeenCalledWith('New request waiting: Change the deployment web');
   });
 
+  const newer = summary({ id: ID3, name: 'newer', created: at(5) });
+
+  for (const width of ['wide', 'narrow'] as const) {
+    it(`a request that arrives while a decision is in flight is kept (${width})`, async () => {
+      setMedia(WIDE, width === 'wide');
+      const srv = gated([severe]);
+      renderWithMotion(<Waiting me="bob" />);
+      await screen.findByRole('article');
+      await within(panel()).findByText('None');
+      const release = srv.holdPosts();
+      await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+      // While the deny is in flight, a new request comes in.
+      srv.set([severe, newer]);
+      await stream([ID1, ID3]);
+      if (width === 'wide') await waitFor(() => expect(options()).toHaveLength(2));
+      else expect(await screen.findByText('1 of 2 waiting for you')).toBeTruthy();
+      srv.set([newer]);
+      await act(async () => release());
+      await waitFor(() => expect(heading().textContent).toContain('demo/newer'));
+      expect(screen.queryByText('Nothing is waiting for you.')).toBeNull();
+      if (width === 'wide') expect(options()).toHaveLength(1);
+      else expect(screen.getByText('1 of 1 waiting for you')).toBeTruthy();
+      expect(posts(srv.calls)).toEqual([`/api/approvals/${ID1}/deny`]);
+    });
+  }
+
+  it('a list fetched before a decision landed does not bring the request back', async () => {
+    setMedia(WIDE, true);
+    const srv = gated([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    await within(panel()).findByText('None');
+    const releasePost = srv.holdPosts();
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    // A reload is asked for before the deny resolves; it still lists A.
+    const releaseList = srv.holdLists();
+    await stream([ID1, ID2]);
+    await act(async () => releasePost());
+    await waitFor(() => expect(options()).toHaveLength(1));
+    await act(async () => releaseList());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(options()).toHaveLength(1);
+    expect(heading().textContent).toContain('demo/web');
+  });
+
+  it('several requests arriving together are announced as a count', async () => {
+    setMedia(WIDE, true);
+    const srv = server([severe]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(1));
+    srv.set([severe, plain, newer]);
+    await stream([ID1, ID2, ID3]);
+    await waitFor(() => expect(options()).toHaveLength(3));
+    expect(announce).toHaveBeenCalledTimes(1);
+    expect(announce).toHaveBeenCalledWith('2 new requests waiting');
+  });
+
+  it('a narrow screen keeps the request it shows when an older one arrives', async () => {
+    setMedia(WIDE, false);
+    const srv = server([plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    expect(await screen.findByText('1 of 1 waiting for you')).toBeTruthy();
+    expect(heading().textContent).toContain('demo/web');
+    srv.set([severe, plain]);
+    await stream([ID1, ID2]);
+    expect(await screen.findByText('2 of 2 waiting for you')).toBeTruthy();
+    expect(heading().textContent).toContain('demo/web');
+  });
+
+  it('a detail for a different request is an error with a retry', async () => {
+    setMedia(WIDE, true);
+    let wrong = true;
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [severe] },
+      [`GET /api/approvals/${ID1}`]: () => ({ body: wrong ? detail(plain, plainImpact) : detail(severe, impact()) }),
+    });
+    renderWithMotion(<Waiting me="bob" />);
+    expect(await within(await screen.findByRole('article')).findByText(/different request/)).toBeTruthy();
+    wrong = false;
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Retry' }));
+    await within(panel()).findByText('None');
+    expect(within(panel()).queryByText(/different request/)).toBeNull();
+  });
+
+  it('the empty state says when the last decision was made', async () => {
+    setMedia(WIDE, true);
+    server([severe]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(1));
+    await within(panel()).findByText('None');
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    expect(await screen.findByText('Nothing is waiting for you.')).toBeTruthy();
+    expect(screen.getByText(/^Last decision at \d\d:\d\d\./)).toBeTruthy();
+  });
+
   it('nothing waiting shows the empty state', async () => {
     server([]);
     renderWithMotion(<Waiting me="bob" />);
     expect(await screen.findByText('Nothing is waiting for you.')).toBeTruthy();
     expect(screen.queryByRole('article')).toBeNull();
+    // No decision yet this session: no time to report.
+    expect(screen.queryByText(/last decision/i)).toBeNull();
   });
 
   // B asks for the very same object as A, so its typed target is the same

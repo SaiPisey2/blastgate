@@ -8,7 +8,7 @@ import { GLYPH } from '../components/Tag';
 import { actionText } from '../lib/format';
 import { APPROVAL_ID } from '../router';
 
-type Big = { label: string; value: string; danger?: boolean };
+type Big = { label: string; value: string; tone?: 'danger' | 'caution' };
 
 // bigNumbers is what approving would do, counted. An unmeasured impact's
 // zeros mean "not looked at", not "nothing", so its counts read Unknown.
@@ -18,12 +18,18 @@ function bigNumbers(i: Impact): Big[] {
     label: measured && n === 1 ? one : many,
     value: measured ? String(n) : 'Unknown',
   });
-  const destroyed = typeof i.dataDestroyed === 'number' && Number.isFinite(i.dataDestroyed) ? i.dataDestroyed : 0;
-  const emptied = Object.values(i.endpointsLeft ?? {}).filter((v) => v === 0).length;
+  // A count that is not one (NaN, Infinity, negative, not a number) is
+  // unknown, as frictionOf reads it: never a calm zero.
+  const destroyedOK = typeof i.dataDestroyed === 'number' && Number.isFinite(i.dataDestroyed) && i.dataDestroyed >= 0;
+  const destroyed = destroyedOK ? i.dataDestroyed : 0;
+  const left = i.endpointsLeft && typeof i.endpointsLeft === 'object' ? i.endpointsLeft : {};
+  const emptied = Object.values(left).filter((v) => v === 0).length;
   const pdbs = Array.isArray(i.pdbViolations) ? i.pdbViolations.length : 0;
   const effects = Array.isArray(i.effects) ? i.effects.length : 0;
   return [
-    { ...count(destroyed, 'volume destroyed', 'volumes destroyed'), danger: measured && destroyed > 0 },
+    !destroyedOK
+      ? { label: 'volumes destroyed', value: 'Unknown', tone: 'caution' }
+      : { ...count(destroyed, 'volume destroyed', 'volumes destroyed'), tone: measured && destroyed > 0 ? 'danger' : undefined },
     count(effects, 'object affected', 'objects affected'),
     count(emptied, 'service left with no backends', 'services left with no backends'),
     count(pdbs, 'disruption budget broken', 'disruption budgets broken'),
@@ -112,11 +118,11 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
             {d.impact ? (
               <ul className="big-numbers" aria-label="In numbers">
                 {bigNumbers(d.impact).map((b) => (
-                  <li key={b.label} className={b.danger ? 'big-number tone-danger' : 'big-number'}>
-                    {/* Colour, glyph and word: danger never rides on colour alone. */}
-                    {b.danger && (
+                  <li key={b.label} className={b.tone ? `big-number tone-${b.tone}` : 'big-number'}>
+                    {/* Colour, glyph and word: a tone never rides on colour alone. */}
+                    {b.tone && (
                       <span className="big-number-glyph" aria-hidden="true">
-                        {GLYPH.danger}
+                        {GLYPH[b.tone]}
                       </span>
                     )}
                     <span className="big-number-value">{b.value}</span>
@@ -125,6 +131,13 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
                 ))}
               </ul>
             ) : null}
+
+            {/* The command itself, in view (spec 4.2): what the agent
+                will run is the one thing an approver should never have to
+                open something to read. */}
+            <pre className="details-action details-command mono" aria-label="Command">
+              {actionText(d.action) || '(no action recorded)'}
+            </pre>
 
             <details className="details-tech">
               <summary id={techId}>Technical details</summary>

@@ -35,6 +35,18 @@ export function oldestFirst(a: ApprovalSummary, b: ApprovalSummary): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+// When this tab last saw its approver decide something, for the empty
+// state. Module state, not storage: it lasts as long as the page, and a
+// reload or another tab starts without it.
+let lastDecision: Date | null = null;
+
+// resetLastDecision forgets it; tests call it so one cannot leak into the next.
+export function resetLastDecision() {
+  lastDecision = null;
+}
+
+const hhmm = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+
 function sentenceOf(s: ApprovalSummary): string {
   return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name }).sentence;
 }
@@ -54,9 +66,10 @@ export default function Waiting({ me = '' }: { me?: string }) {
   const [error, setError] = useState('');
   const [details, setDetails] = useState<Record<string, ApprovalDetail>>({});
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
-  // selected: the request the wide layout shows. Set on the first list
-  // and changed only by the approver or by their own decision, never by
-  // the list changing under them.
+  // selected: the request on screen. Set on the first list and changed
+  // only by the approver or by their own decision, never by the list
+  // changing under them. On a narrow screen it also moves on when the
+  // request leaves the list; on a wide one it stays, marked gone.
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState('');
 
@@ -74,6 +87,19 @@ export default function Waiting({ me = '' }: { me?: string }) {
   const focusNext = useRef(false);
   const panelRef = useRef<HTMLElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
+  // live: the list as last committed. onDecided reads this, never the
+  // rows its own render captured: a reload can land while the decision
+  // is in flight, and rebuilding from the older rows would hide what it
+  // brought (already heard, so never announced) or bring back what it
+  // dropped.
+  const live = useRef<ApprovalSummary[]>([]);
+  const wideRef = useRef(wide);
+  wideRef.current = wide;
+
+  const commit = useCallback((rows: ApprovalSummary[]) => {
+    live.current = rows;
+    setItems(rows);
+  }, []);
 
   const load = useCallback(async () => {
     // Only the newest load may land: a slow answer to an earlier one is
@@ -85,21 +111,31 @@ export default function Waiting({ me = '' }: { me?: string }) {
       if (mine !== seq.current) return;
       // The server lists pending only; anything else is not ours to show.
       const rows = (Array.isArray(list) ? list : []).filter((r) => r && r.status === 'pending' && !decided.current.has(r.id)).sort(oldestFirst);
+      const fresh: ApprovalSummary[] = [];
       for (const r of rows) {
         known.current.set(r.id, r);
         if (heard.current.has(r.id)) continue;
         heard.current.add(r.id);
-        if (!firstLoad.current) announce(`New request waiting: ${sentenceOf(r)}`);
+        fresh.push(r);
       }
+      // One announcement per reload: each announce() replaces the one
+      // before it, so a second call would silence the first.
+      if (!firstLoad.current && fresh.length === 1) announce(`New request waiting: ${sentenceOf(fresh[0])}`);
+      if (!firstLoad.current && fresh.length > 1) announce(`${fresh.length} new requests waiting`);
       firstLoad.current = false;
-      setItems(rows);
+      commit(rows);
       setError('');
-      setSelected((prev) => prev ?? rows[0]?.id ?? null);
+      setSelected((prev) => {
+        if (prev && rows.some((r) => r.id === prev)) return prev;
+        // Wide keeps a vanished choice on screen, marked gone.
+        if (prev && wideRef.current) return prev;
+        return rows[0]?.id ?? null;
+      });
     } catch (e) {
       if (mine !== seq.current) return;
       setError(e instanceof Error ? e.message : 'Could not load what is waiting.');
     }
-  }, []);
+  }, [commit]);
 
   useEffect(() => {
     // Subscribed before the first fetch: an event that lands while it is
@@ -118,6 +154,13 @@ export default function Waiting({ me = '' }: { me?: string }) {
     get<ApprovalDetail>(`/api/approvals/${encodeURIComponent(id)}`).then(
       (d) => {
         fetching.current.delete(id);
+        // An answer about some other request is no answer: the panel
+        // would ignore it and leave Approve disabled with nothing to
+        // press. As an error it gets a Retry.
+        if (!d || d.id !== id) {
+          setDetailErrors((prev) => ({ ...prev, [id]: 'the server answered for a different request' }));
+          return;
+        }
         setDetails((prev) => ({ ...prev, [id]: d }));
       },
       // The panel shows this with a retry; Approve stays disabled
@@ -130,7 +173,8 @@ export default function Waiting({ me = '' }: { me?: string }) {
   }, []);
 
   const rows = items ?? [];
-  const current = wide ? rows.find((r) => r.id === selected) : rows[0];
+  // Narrow falls back to the oldest only until the next list pins it.
+  const current = wide ? rows.find((r) => r.id === selected) : (rows.find((r) => r.id === selected) ?? rows[0]);
   // Wide only: the chosen request left the list (decided elsewhere, or
   // expired) while it was open. It stays on screen, marked gone, until
   // the approver picks another. Swapping the next one in under them could
@@ -160,10 +204,12 @@ export default function Waiting({ me = '' }: { me?: string }) {
 
   function onDecided(id: string, outcome: Outcome) {
     decided.current.add(id);
-    const i = rows.findIndex((r) => r.id === id);
-    const rest = rows.filter((r) => r.id !== id);
-    const next = rest[i] ?? rest[i - 1] ?? rest[0];
-    setItems(rest);
+    const list = live.current;
+    const i = list.findIndex((r) => r.id === id);
+    const rest = list.filter((r) => r.id !== id);
+    const next = i < 0 ? rest[0] : (rest[i] ?? rest[i - 1]);
+    commit(rest);
+    if (outcome !== 'gone') lastDecision = new Date();
     setSelected(next ? next.id : null);
     setNote(NOTES[outcome]);
     focusNext.current = true;
@@ -196,7 +242,7 @@ export default function Waiting({ me = '' }: { me?: string }) {
       me={me}
       onRetry={() => fetchDetail(current.id)}
       onDecided={onDecided}
-      position={wide ? undefined : { index: 1, total: rows.length }}
+      position={wide ? undefined : { index: rows.indexOf(current) + 1, total: rows.length }}
     />
   ) : vanished ? (
     <Gone summary={vanished} />
@@ -229,7 +275,14 @@ export default function Waiting({ me = '' }: { me?: string }) {
       )}
 
       {items !== null && rows.length === 0 && (
-        <EmptyState title="Nothing is waiting for you." sub="Held requests appear here the moment an agent makes one." />
+        <EmptyState
+          title="Nothing is waiting for you."
+          sub={
+            lastDecision
+              ? `Last decision at ${hhmm.format(lastDecision)}. Held requests appear here the moment an agent makes one.`
+              : 'Held requests appear here the moment an agent makes one.'
+          }
+        />
       )}
 
       {rows.length > 0 &&

@@ -1,3 +1,5 @@
+// @ts-expect-error -- this package has no @types/node; Vitest runs on Node.
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -8,6 +10,8 @@ import { deploymentImpact, impact } from '../test/fixtures';
 import type { Effect } from '../api';
 
 afterEach(cleanup);
+
+const componentsCSS = readFileSync('src/styles/components.css', 'utf8');
 
 const EVIL = '<img src=x onerror=alert(1)>';
 
@@ -240,6 +244,13 @@ describe('ImpactTree (new)', () => {
     expect(shown).toHaveLength(47);
     expect(shown[0].getAttribute('aria-level')).toBe('4');
 
+    // Six is the first count that folds.
+    cleanup();
+    const six = renderWithMotion(<ImpactTree impact={impact({ effects: [d('apps/ReplicaSet/team-a/web-7d9f8c'), ...pods.slice(0, 6)], dataDestroyed: 0 })} />);
+    await userEvent.click(row(six.container.querySelector<HTMLElement>('[data-namespace="team-a"]')!));
+    await userEvent.click(row(node(six.container, 'apps/ReplicaSet/team-a/web-7d9f8c')));
+    expect(within(six.container).getByText('Pod × 6')).toBeTruthy();
+
     // Five of a kind stay as they are.
     cleanup();
     const five = pods.slice(0, 5);
@@ -349,5 +360,98 @@ describe('ImpactTree (new)', () => {
         expect(Number(c.getAttribute('aria-level'))).toBe(Number(parent.getAttribute('aria-level')) + 1);
       }
     }
+  });
+});
+
+describe('ImpactTree (new), fix round 1', () => {
+  const d = (object: string, kind = 'destroys') => ({ kind, object });
+
+  it('kinds read as plain nouns, with the raw kind as fallback', async () => {
+    const effects = [
+      d('PersistentVolumeClaim/team-a/data'),
+      d('PersistentVolume//pv-1'),
+      d('apps/Deployment/team-a/web'),
+      d('apps/ReplicaSet/team-a/rs'),
+      d('apps/StatefulSet/team-a/db'),
+      d('apps/DaemonSet/team-a/agent'),
+      d('Pod/team-a/p'),
+      d('Service/team-a/svc'),
+      d('batch/Job/team-a/j'),
+      d('batch/CronJob/team-a/cj'),
+      d('ConfigMap/team-a/cm'),
+      d('Secret/team-a/s'),
+      d('policy/PodDisruptionBudget/team-a/pdb'),
+      d('example.com/Widget/team-a/w'),
+      d('example.com/Deployment/team-a/other'),
+    ];
+    const { container } = renderWithMotion(<ImpactTree impact={impact({ effects, dataDestroyed: 0 })} />);
+    await expandAll(container);
+    const kind = (object: string) => row(node(container, object)).querySelector('.itree-kind')!.textContent;
+    expect(kind('PersistentVolumeClaim/team-a/data')).toBe('Volume claim');
+    expect(kind('PersistentVolume//pv-1')).toBe('Volume');
+    expect(kind('apps/Deployment/team-a/web')).toBe('Deployment');
+    expect(kind('apps/ReplicaSet/team-a/rs')).toBe('Replica set');
+    expect(kind('apps/StatefulSet/team-a/db')).toBe('Stateful set');
+    expect(kind('apps/DaemonSet/team-a/agent')).toBe('Daemon set');
+    expect(kind('Pod/team-a/p')).toBe('Pod');
+    expect(kind('Service/team-a/svc')).toBe('Service');
+    expect(kind('batch/Job/team-a/j')).toBe('Job');
+    expect(kind('batch/CronJob/team-a/cj')).toBe('Cron job');
+    expect(kind('ConfigMap/team-a/cm')).toBe('Config map');
+    expect(kind('Secret/team-a/s')).toBe('Secret');
+    expect(kind('policy/PodDisruptionBudget/team-a/pdb')).toBe('Disruption budget');
+    expect(kind('example.com/Widget/team-a/w')).toBe('Widget');
+    // Same Kind name, another group: its own raw kind, not the noun.
+    expect(kind('example.com/Deployment/team-a/other')).toBe('Deployment');
+  });
+
+  it('effects, budgets or services that are not lists do not crash the tree', () => {
+    const odd = impact({
+      effects: 'nope' as unknown as Effect[],
+      pdbViolations: { a: 1 } as unknown as string[],
+      endpointsLeft: 'x' as unknown as Record<string, number>,
+      dataDestroyed: 0,
+    });
+    const { container } = renderWithMotion(<ImpactTree impact={odd} />);
+    expect(within(container).getByText(/no objects are affected/i)).toBeTruthy();
+  });
+
+  it('closing a branch by click while something inside it has focus moves focus to the branch', async () => {
+    const effects = [d('apps/Deployment/team-a/web'), d('apps/ReplicaSet/team-a/web-7d9f8c')];
+    const { container } = renderWithMotion(<ImpactTree impact={impact({ effects, dataDestroyed: 0 })} />);
+    await expandAll(container);
+    const dep = node(container, 'apps/Deployment/team-a/web');
+    const rs = node(container, 'apps/ReplicaSet/team-a/web-7d9f8c');
+    rs.focus();
+    expect(document.activeElement).toBe(rs);
+    // Dispatched straight at the row: no mousedown moves focus first.
+    row(dep).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(dep.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(dep);
+  });
+
+  it('explanations are tied to their item', () => {
+    const { container } = renderWithMotion(<ImpactTree impact={deploymentImpact()} />);
+    const pv = node(container, 'PersistentVolume//pv-1');
+    const ids = pv.getAttribute('aria-describedby')!;
+    expect(ids).toBeTruthy();
+    expect(document.getElementById(ids)!.textContent).toContain('reclaimPolicy=Delete');
+    // Ids never carry object names: a space would split the reference.
+    for (const el of Array.from(container.querySelectorAll('[role="treeitem"]'))) {
+      expect(el.getAttribute('aria-labelledby')).not.toMatch(/\s/);
+    }
+  });
+
+  it('a key toggle marks the tree so the chevron does not animate', async () => {
+    renderWithMotion(<ImpactTree impact={impact({ effects: [d('apps/Deployment/team-a/web'), d('apps/ReplicaSet/team-a/web-7d9f8c')], dataDestroyed: 0 })} />);
+    const tree = screen.getByRole('tree');
+    await userEvent.tab();
+    await userEvent.keyboard('{ArrowRight}');
+    expect(tree.classList.contains('is-keyboard')).toBe(true);
+    expect(componentsCSS).toMatch(/\.itree\.is-keyboard \.itree-caret\s*\{[^}]*transition:\s*none/);
+    // The row background animates on hover only, never on selection.
+    expect(componentsCSS).not.toMatch(/\.waiting-row\s*\{[^}]*transition/);
+    expect(componentsCSS).not.toMatch(/\.waiting-row\.is-selected\s*\{[^}]*transition/);
   });
 });

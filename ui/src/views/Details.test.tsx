@@ -84,6 +84,29 @@ describe('Details', () => {
     expect(value(big(/^objects? affected$/))).toBe('Unknown');
   });
 
+  it('a destroyed count that is not a count reads unknown, in caution', async () => {
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(del, impact({ dataDestroyed: bad })) } });
+      renderWithMotion(<Details id={ID1} me="bob" />);
+      await screen.findByRole('article');
+      const el = big(/^volumes? destroyed$/);
+      expect(value(el)).toBe('Unknown');
+      expect(el.classList.contains('tone-caution')).toBe(true);
+      cleanup();
+    }
+  });
+
+  it('the command is shown in view, not only behind a disclosure', async () => {
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: execDetail() } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    await screen.findByRole('article');
+    const cmd = screen.getByLabelText('Command');
+    expect(cmd.tagName).toBe('PRE');
+    expect(cmd.classList.contains('mono')).toBe(true);
+    expect(cmd.closest('details')).toBeNull();
+    expect(cmd.textContent).toContain(`$ psql -c 'drop table users; -- it'\\''s gone'`);
+  });
+
   it('technical details show the action text', async () => {
     mockFetch({ [`GET /api/approvals/${ID1}`]: { body: execDetail() } });
     renderWithMotion(<Details id={ID1} me="bob" />);

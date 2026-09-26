@@ -42,6 +42,29 @@ function alarming(e: Effect): boolean {
   return k === 'destroys-data' || k === 'unknown-data-fate' || !KINDS.has(k);
 }
 
+// Plain nouns for the kinds an approver meets most, keyed by group/Kind
+// so a custom resource that happens to share a Kind name keeps its own.
+// Anything else shows its raw Kind.
+const NOUNS = new Map<string, string>([
+  ['PersistentVolumeClaim', 'Volume claim'],
+  ['PersistentVolume', 'Volume'],
+  ['apps/Deployment', 'Deployment'],
+  ['apps/ReplicaSet', 'Replica set'],
+  ['apps/StatefulSet', 'Stateful set'],
+  ['apps/DaemonSet', 'Daemon set'],
+  ['Pod', 'Pod'],
+  ['Service', 'Service'],
+  ['batch/Job', 'Job'],
+  ['batch/CronJob', 'Cron job'],
+  ['ConfigMap', 'Config map'],
+  ['Secret', 'Secret'],
+  ['policy/PodDisruptionBudget', 'Disruption budget'],
+]);
+
+export function kindNoun(group: string, kind: string): string {
+  return NOUNS.get(group ? `${group}/${kind}` : kind) ?? kind;
+}
+
 // More than this many same-kind siblings fold into one "Pod × 47" line,
 // so a Deployment with a big ReplicaSet does not bury everything below it.
 const BUNDLE_OVER = 5;
@@ -86,7 +109,7 @@ function siblings(nodes: TreeNode[], level: number, parent: string): Item[] {
     bundled.add(k);
     const members = nodes.filter((x) => x.ref.parsed && gk(x) === k).map((x) => nodeItem(x, level + 1));
     const alarm = members.some((x) => x.alarm);
-    out.push({ id: `b:${parent}:${k}`, level, children: members, startOpen: alarm, alarm, type: 'bundle', kind: n.ref.kind, count: members.length });
+    out.push({ id: `b:${parent}:${k}`, level, children: members, startOpen: alarm, alarm, type: 'bundle', kind: kindNoun(n.ref.group, n.ref.kind), count: members.length });
   }
   return out;
 }
@@ -108,7 +131,8 @@ type Visible = { item: Item; parent?: Item };
 export default function ImpactTree({ impact }: { impact: Impact }) {
   const base = useId();
   const reduce = useReducedMotion();
-  const effects = impact.effects ?? [];
+  // Stored JSON: anything but an array reads as no effects, not a crash.
+  const effects = Array.isArray(impact.effects) ? impact.effects : [];
   const items = buildTree(effects).map(groupItem);
 
   // Only what someone changed is stored; everything else is its
@@ -120,6 +144,14 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
   // happens at once; motion is for a pointer, never under the keys.
   const [keyboard, setKeyboard] = useState(false);
   const els = useRef(new Map<string, HTMLLIElement>());
+  // DOM ids by number, never built from the item id: that holds object
+  // names, and a space in one would split an aria-labelledby reference.
+  const serials = useRef(new Map<string, number>());
+  const domId = (id: string) => {
+    let n = serials.current.get(id);
+    if (n === undefined) serials.current.set(id, (n = serials.current.size));
+    return `${base}-${n}`;
+  };
 
   const isOpen = (it: Item) => it.children.length > 0 && (toggled.get(it.id) ?? it.startOpen);
 
@@ -137,6 +169,17 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
 
   function set(changes: [string, boolean][], byKey: boolean) {
     setKeyboard(byKey);
+    // Closing a branch that holds focus would leave it on an element
+    // about to be removed (and inert on its way out), which drops focus
+    // to <body>. The branch itself takes it instead.
+    const active = document.activeElement;
+    for (const [id, open] of changes) {
+      const el = els.current.get(id);
+      if (!open && el && active instanceof HTMLElement && active !== el && el.contains(active)) {
+        setFocusId(id);
+        el.focus();
+      }
+    }
     setToggled((prev) => {
       const next = new Map(prev);
       for (const [id, open] of changes) next.set(id, open);
@@ -201,7 +244,8 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
   function render(item: Item): ReactNode {
     const branch = item.children.length > 0;
     const open = isOpen(item);
-    const labelId = `${base}-${item.id}`;
+    const labelId = `${domId(item.id)}-label`;
+    const whyId = `${domId(item.id)}-why`;
     let body: ReactNode;
     let own: Effect[] = [];
     const cls = ['itree-item'];
@@ -232,7 +276,7 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
       const count = below(n);
       body = (
         <>
-          {n.ref.parsed && <span className="itree-kind">{n.ref.kind}</span>}
+          {n.ref.parsed && <span className="itree-kind">{kindNoun(n.ref.group, n.ref.kind)}</span>}
           <span className="itree-name mono">{n.ref.name || '(no name)'}</span>
           {own.map((e, i) => {
             const mk = marker(e);
@@ -258,6 +302,7 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
         aria-level={item.level}
         aria-expanded={branch ? open : undefined}
         aria-labelledby={labelId}
+        aria-describedby={why.length > 0 ? whyId : undefined}
         tabIndex={current?.item.id === item.id ? 0 : -1}
         className={cls.join(' ')}
         data-id={item.id}
@@ -282,7 +327,7 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
           </span>
         </div>
         {why.length > 0 && (
-          <ul className="itree-why">
+          <ul id={whyId} className="itree-why">
             {why.map((e, i) => (
               <li key={i}>{e.explanation}</li>
             ))}
@@ -301,11 +346,12 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
     );
   }
 
-  const emptied = Object.entries(impact.endpointsLeft ?? {})
+  const left = impact.endpointsLeft && typeof impact.endpointsLeft === 'object' ? impact.endpointsLeft : {};
+  const emptied = Object.entries(left)
     .filter(([, n]) => n === 0)
     .map(([svc]) => svc)
     .sort();
-  const pdbs = impact.pdbViolations ?? [];
+  const pdbs = Array.isArray(impact.pdbViolations) ? impact.pdbViolations.map(String) : [];
 
   return (
     <div className="itree-wrap">
@@ -336,7 +382,7 @@ export default function ImpactTree({ impact }: { impact: Impact }) {
       {effects.length === 0 ? (
         <p className="itree-none">No objects are affected beyond the request itself.</p>
       ) : (
-        <ul className="itree" role="tree" aria-label="What would be affected" onKeyDown={onKeyDown}>
+        <ul className={keyboard ? 'itree is-keyboard' : 'itree'} role="tree" aria-label="What would be affected" onKeyDown={onKeyDown}>
           {items.map(render)}
         </ul>
       )}
