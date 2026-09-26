@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -32,14 +34,15 @@ import (
 	"github.com/SaiPisey2/blastgate/internal/store"
 	"github.com/SaiPisey2/blastgate/internal/tlsutil"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
+	"github.com/SaiPisey2/blastgate/internal/webhook"
 	"github.com/SaiPisey2/blastgate/ui"
 )
 
 // serveCmd wires config, store, TLS, upstream and proxy into a running
-// HTTPS server, beside the admin listener (the approver UI), and shuts
-// them all down cleanly when ctx is cancelled. Logging is
-// JSON: the proxy logs attacker-chosen header names, and JSON escaping
-// keeps those safe in the log stream.
+// HTTPS server, beside the admin listener (the approver UI) and, when
+// configured, the observe webhook, and shuts them all down cleanly when
+// ctx is cancelled. Logging is JSON: the proxy logs attacker-chosen
+// header names, and JSON escaping keeps those safe in the log stream.
 func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer) int {
 	log := slog.New(slog.NewJSONHandler(stderr, nil))
 	cfg, err := config.Load(getenv)
@@ -58,6 +61,17 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 			return 2
 		}
 		policyName, policySource = cfg.PolicyPath, cfg.PolicyPath
+	}
+	// Read before anything listens, for the same reason as the policy: a
+	// CA file that is missing or holds no certificate must stop the start,
+	// not leave a webhook that refuses every API server call and, under
+	// failurePolicy Ignore, silently records nothing.
+	var webhookCAs *x509.CertPool
+	if cfg.WebhookClientCA != "" {
+		if webhookCAs, err = loadClientCAs(cfg.WebhookClientCA); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
 	}
 	st, err := openStore(cfg.DataDir)
 	if err != nil {
@@ -129,12 +143,30 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		{setting: "BLASTGATE_LISTEN", addr: cfg.Listen, srv: proxySrv},
 		{setting: "BLASTGATE_ADMIN_LISTEN", addr: cfg.AdminListen, srv: adminSrv},
 	}
+	if cfg.WebhookListen != "" {
+		wtls := tlsConfig()
+		if webhookCAs != nil {
+			wtls.ClientAuth, wtls.ClientCAs = tls.RequireAndVerifyClientCert, webhookCAs
+		}
+		servers = append(servers, &listener{setting: "BLASTGATE_WEBHOOK_LISTEN", addr: cfg.WebhookListen, srv: &http.Server{
+			// A pointer: the handler holds the in-flight semaphore, and a
+			// copy per request would bound nothing.
+			Handler:           &webhook.Handler{Rec: bypassRecorder(st), Ignore: cfg.BypassIgnore, Log: log},
+			ReadHeaderTimeout: webhookReadHeaderTimeout,
+			ReadTimeout:       webhookReadTimeout,
+			WriteTimeout:      webhookWriteTimeout,
+			IdleTimeout:       webhookIdleTimeout,
+			TLSConfig:         wtls,
+			ErrorLog:          errorLog,
+		}})
+	}
 	for _, l := range servers[1:] {
 		warnUncovered(log, l.setting, l.addr, cfg.TLSHosts)
 	}
 	// Every address is bound before any is served: one that cannot bind
 	// stops the start with the others closed, rather than leaving a proxy
-	// running whose approvers have no UI.
+	// running whose approvers have no UI, or a webhook nobody notices is
+	// missing.
 	for i, l := range servers {
 		ln, err := net.Listen("tcp", l.addr)
 		if err != nil {
@@ -148,6 +180,9 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 	}
 	log.Info("listening", "addr", servers[0].ln.Addr().String(), "upstream", up.URL.Host, "policy", policyName, "hold", cfg.Hold.String())
 	log.Info("admin listening", "addr", servers[1].ln.Addr().String())
+	if len(servers) > 2 {
+		log.Info("webhook listening", "addr", servers[2].ln.Addr().String(), "client_cert", webhookCAs != nil)
+	}
 	errc := make(chan error, len(servers))
 	for _, l := range servers {
 		go func() {
@@ -187,14 +222,20 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 	}
 }
 
-// Timeouts for the admin listener. The admin API answers small JSON
-// bodies (a replayed policy is at most 64 KiB), and a replay is the
-// slowest handler.
+// Timeouts for the admin and webhook listeners. The admin API answers
+// small JSON bodies (a replayed policy is at most 64 KiB), and a replay
+// is the slowest handler; the webhook's longest honest read is one 8 MiB
+// AdmissionReview, and the API server gives the whole call 5s.
 const (
 	adminReadHeaderTimeout = 10 * time.Second
 	adminReadTimeout       = 30 * time.Second
 	adminWriteTimeout      = 60 * time.Second
 	adminIdleTimeout       = 120 * time.Second
+
+	webhookReadHeaderTimeout = 5 * time.Second
+	webhookReadTimeout       = 10 * time.Second
+	webhookWriteTimeout      = 10 * time.Second
+	webhookIdleTimeout       = 90 * time.Second
 )
 
 // listener is one of serve's servers and the address it is bound to.
@@ -202,6 +243,31 @@ type listener struct {
 	setting, addr string
 	srv           *http.Server
 	ln            net.Listener
+}
+
+// bypassRecorder hands the webhook its store without the typed-nil trap:
+// a nil *store.Store boxed into the Recorder interface is not == nil, so
+// the handler's nil check would pass it and AppendBypass would panic on
+// every bypass instead of logging that nothing records them.
+func bypassRecorder(st *store.Store) webhook.Recorder {
+	if st == nil {
+		return nil
+	}
+	return st
+}
+
+// loadClientCAs reads the PEM CAs whose client certificates the webhook
+// will require.
+func loadClientCAs(path string) (*x509.CertPool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("BLASTGATE_WEBHOOK_CLIENT_CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(b) {
+		return nil, fmt.Errorf("BLASTGATE_WEBHOOK_CLIENT_CA %s holds no PEM certificate", path)
+	}
+	return pool, nil
 }
 
 // warnUncovered logs a listen address the serving certificate does not
