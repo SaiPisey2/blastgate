@@ -517,7 +517,8 @@ input::placeholder {
   color: var(--calm-fg);
 }
 .live-connecting,
-.live-reconnecting {
+.live-reconnecting,
+.live-limited {
   color: var(--warn-fg);
 }
 .live-offline {

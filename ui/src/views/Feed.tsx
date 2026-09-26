@@ -24,11 +24,18 @@ function query(f: Filters, before?: number): string {
   return `/api/feed?${p.toString()}`;
 }
 
-const LIVE_LABELS: Record<StreamStatus, string> = { connecting: 'Connecting', live: 'Live', reconnecting: 'Reconnecting', offline: 'Offline' };
+const LIVE_LABELS: Record<StreamStatus, string> = {
+  connecting: 'Connecting',
+  live: 'Live',
+  reconnecting: 'Reconnecting',
+  limited: 'Too many open tabs',
+  offline: 'Offline',
+};
 const LIVE_TITLES: Record<StreamStatus, string> = {
   connecting: 'Connecting to the live stream',
   live: 'New requests appear as they happen',
   reconnecting: 'The live stream dropped; retrying',
+  limited: 'The server refused the live stream, usually because four tabs of this sign-in already have it open. Close one; this tab keeps retrying.',
   offline: 'Not receiving live updates; reload to see new requests',
 };
 

@@ -195,6 +195,8 @@ describe('Feed', () => {
     expect(screen.getByRole('status').textContent).toBe('Live');
     act(() => setStreamStatus('reconnecting'));
     expect(screen.getByRole('status').textContent).toBe('Reconnecting');
+    act(() => setStreamStatus('limited'));
+    expect(screen.getByRole('status').textContent).toBe('Too many open tabs');
     act(() => setStreamStatus('offline'));
     expect(screen.getByRole('status').textContent).toBe('Offline');
   });

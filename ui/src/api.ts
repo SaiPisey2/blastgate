@@ -237,8 +237,10 @@ export function emit<K extends keyof StreamEvents>(event: K, data: StreamEvents[
 }
 
 // Connection state of the stream, for the feed's Live indicator: a feed
-// that says "Live" while disconnected is worse than no indicator.
-export type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
+// that says "Live" while disconnected is worse than no indicator. limited
+// is a stream the server refused while the session is still good: almost
+// always the per-sign-in cap on live tabs.
+export type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'limited' | 'offline';
 let status: StreamStatus = 'offline';
 const statusListeners = new Set<(s: StreamStatus) => void>();
 
@@ -264,14 +266,62 @@ function parse(ev: MessageEvent): unknown {
   }
 }
 
+// How long a refused stream waits before trying again: doubling from the
+// first to the last, so a tab over the cap notices a closed tab soon but
+// does not knock every few seconds all day.
+const RETRY_FIRST_MS = 5_000;
+const RETRY_MAX_MS = 60_000;
+
 // openStream connects to /api/stream and feeds the hub. It returns a close
 // function. Without EventSource (tests, very old browsers) it does nothing
 // and the views still work from their initial fetches.
 export function openStream(): () => void {
   if (typeof EventSource === 'undefined') return () => {};
+  let es: EventSource;
+  let closed = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let delay = RETRY_FIRST_MS;
+  const connect = () => {
+    es = listen(
+      () => {
+        delay = RETRY_FIRST_MS;
+      },
+      () => {
+        // The browser gave up (a non-2xx answer). If the session is gone,
+        // whoami's 401 signs out. If it is fine, the refusal was the
+        // stream's own, most often a 429 for one tab too many, which
+        // nothing else would ever retry: try again later, backing off.
+        whoami().then(
+          () => {
+            if (closed) return;
+            setStreamStatus('limited');
+            retry = setTimeout(connect, delay);
+            delay = Math.min(delay * 2, RETRY_MAX_MS);
+          },
+          () => {},
+        );
+      },
+    );
+  };
+  connect();
+  return () => {
+    closed = true;
+    clearTimeout(retry);
+    es.close();
+    setStreamStatus('offline');
+  };
+}
+
+// listen opens one EventSource and wires its events to the hub. An
+// expired session closes it here, which fires no error, so it is never
+// retried.
+function listen(onOpen: () => void, onRefused: () => void): EventSource {
   const es = new EventSource('/api/stream');
   setStreamStatus('connecting');
-  es.onopen = () => setStreamStatus('live');
+  es.onopen = () => {
+    onOpen();
+    setStreamStatus('live');
+  };
   es.addEventListener('audit', (ev) => {
     const row = parse(ev as MessageEvent);
     if (row && typeof row === 'object') emit('audit', row as FeedRow);
@@ -290,12 +340,8 @@ export function openStream(): () => void {
   es.onerror = () => {
     setStreamStatus(es.readyState === EventSource.CLOSED ? 'offline' : 'reconnecting');
     // EventSource retries by itself, except after a non-2xx answer such as
-    // 401, when it gives up (CLOSED). Ask /api/me so a dead session lands
-    // on the login screen instead of a silently frozen feed.
-    if (es.readyState === EventSource.CLOSED) whoami().catch(() => {});
+    // 401 or 429, when it gives up (CLOSED).
+    if (es.readyState === EventSource.CLOSED) onRefused();
   };
-  return () => {
-    es.close();
-    setStreamStatus('offline');
-  };
+  return es;
 }
