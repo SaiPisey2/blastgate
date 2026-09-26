@@ -49,6 +49,7 @@ export function summary(over: Partial<ApprovalSummary> = {}): ApprovalSummary {
     summary: 'TERMINAL, 2 objects, 1 volume with data destroyed',
     class: 'TERMINAL',
     data_destroyed: 1,
+    measured: true,
     age_seconds: 90,
     created: new Date(Date.now() - 90_000).toISOString(),
     expires: new Date(Date.now() + 600_000).toISOString(),

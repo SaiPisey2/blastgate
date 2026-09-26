@@ -39,7 +39,7 @@ export function isKnownClass(cls: string): boolean {
 }
 
 function severityOf(s: ApprovalSummary): Severity {
-  if (s.data_destroyed > 0) return 'severe';
+  if (s.data_destroyed > 0 || s.measured !== true) return 'severe';
   if (s.class === 'READ' || s.class === 'REVERSIBLE') return 'calm';
   if (s.class === 'COMPENSABLE') return 'warn';
   return 'severe';
@@ -104,8 +104,12 @@ export default function ApprovalCard({ summary: s, detail, detailError, onRetry,
   // Either source saying data is destroyed is enough to demand typing.
   const destroys = s.data_destroyed > 0 || (impact?.dataDestroyed ?? 0) > 0;
   // An unmeasured or unknown class reports data_destroyed 0 because nothing
-  // was measured, not because nothing is destroyed: it is typed too.
-  const unknown = !isKnownClass(s.class);
+  // was measured, not because nothing is destroyed: it is typed too. An
+  // exec is TERMINAL but unmeasured, so the class alone is not enough; the
+  // summary or the detail saying unmeasured is. A summary without the
+  // field (an older server) counts as unmeasured.
+  const measured = s.measured === true && impact?.measured !== false;
+  const unknown = !isKnownClass(s.class) || !measured;
   const phrase = confirmPhrase(s);
   const needsTyping = confirming === 'approve' && (destroys || unknown);
 
@@ -148,7 +152,7 @@ export default function ApprovalCard({ summary: s, detail, detailError, onRetry,
     <article className={`card approval sev-${severity}`} data-severity={severity} aria-label={`${s.verb} ${s.resource} ${phrase}`}>
       <div className="card-head">
         <div className="card-tags">
-          <ClassBadge cls={s.class} />
+          <ClassBadge cls={s.class} measured={measured} />
           <span className="held-by">
             held by <code className="rule">{s.rule}</code>
           </span>

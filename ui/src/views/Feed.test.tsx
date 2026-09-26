@@ -105,6 +105,14 @@ describe('Feed', () => {
     }
   });
 
+  it('an unmeasured row says so next to its class', async () => {
+    const exec = feedRow({ id: 40, request_id: 'q40', kind: 'decision', verb: 'create', resource: 'pods', subresource: 'exec', class: 'TERMINAL', measured: false, decision: 'hold', name: 'db-0' });
+    mockFetch({ 'GET /api/feed': { body: [exec] } });
+    render(<Feed />);
+    const row = (await screen.findByText('db-0')).closest('tr')!;
+    expect(within(row).getByText('TERMINAL · UNMEASURED').className).toContain('badge-danger');
+  });
+
   it('the live indicator follows the stream', async () => {
     mockFetch({ 'GET /api/feed': { body: [] } });
     render(<Feed />);

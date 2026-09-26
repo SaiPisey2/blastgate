@@ -307,9 +307,14 @@ type ApprovalSummary struct {
 	Summary       string `json:"summary"`
 	Class         string `json:"class"`
 	DataDestroyed int    `json:"data_destroyed"`
-	AgeSeconds    int64  `json:"age_seconds"`
-	Created       string `json:"created"`
-	Expires       string `json:"expires"`
+	// Measured is false for an unmeasured hold (an exec, a proxied
+	// request, a scoring timeout), whose data_destroyed is 0 because
+	// nothing was measured, and for an impact that does not parse. The
+	// queue demands the typed confirmation for it (P2-R29).
+	Measured   bool   `json:"measured"`
+	AgeSeconds int64  `json:"age_seconds"`
+	Created    string `json:"created"`
+	Expires    string `json:"expires"`
 }
 
 // ApprovalDetail is everything the human is deciding on. It is built
@@ -340,7 +345,7 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 	}
 	var imp engine.Impact
 	if json.Unmarshal(a.ImpactJSON, &imp) == nil {
-		s.Summary, s.Class, s.DataDestroyed = imp.Summary(), imp.Class, imp.DataDestroyed
+		s.Summary, s.Class, s.DataDestroyed, s.Measured = imp.Summary(), imp.Class, imp.DataDestroyed, imp.Measured
 	}
 	// Nothing moves a lapsed pending approval to expired until the agent
 	// retries, and it usually never does. Shown as pending, it would offer

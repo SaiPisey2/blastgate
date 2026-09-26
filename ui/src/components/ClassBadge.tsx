@@ -19,8 +19,13 @@ export function classTone(cls: string): string {
   return Object.hasOwn(TONES, cls) ? TONES[cls] : 'danger';
 }
 
-export default function ClassBadge({ cls }: { cls: string }) {
-  return <span className={`badge badge-${classTone(cls)}`}>{cls || 'UNMEASURED'}</span>;
+// measured={false} marks a class the engine could not measure (an exec,
+// a proxied request, a scoring timeout): it reads "TERMINAL · UNMEASURED"
+// in the danger tone, whatever the class. Left out, the class alone.
+export default function ClassBadge({ cls, measured }: { cls: string; measured?: boolean }) {
+  const unmeasured = measured === false;
+  const label = !cls ? 'UNMEASURED' : unmeasured ? `${cls} · UNMEASURED` : cls;
+  return <span className={`badge badge-${unmeasured ? 'danger' : classTone(cls)}`}>{label}</span>;
 }
 
 // Allow is the common case and stays grey, so held and denied requests

@@ -64,6 +64,9 @@ export type ApprovalSummary = {
   // its typed confirmation never wait on (or depend on) a second request.
   class: string;
   data_destroyed: number;
+  // measured is false for an unmeasured hold (exec, proxy, a scoring
+  // timeout): its data_destroyed is 0 because nothing was measured.
+  measured: boolean;
   age_seconds: number;
   created: string;
   expires: string;

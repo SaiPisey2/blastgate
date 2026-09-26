@@ -407,7 +407,7 @@ func TestApprovalDetailHasImpactButNoSecrets(t *testing.T) {
 	}
 	d := decode[map[string]any](t, body)
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
-		"class", "data_destroyed", "age_seconds", "created", "expires", "action", "impact", "decided_by", "decided")
+		"class", "data_destroyed", "measured", "age_seconds", "created", "expires", "action", "impact", "decided_by", "decided")
 	if got := keysOf(d); !slices.Equal(got, wantKeys) {
 		t.Errorf("detail keys %v\nwant %v", got, wantKeys)
 	}
@@ -446,11 +446,11 @@ func TestApprovalListShapeAndStatusFilter(t *testing.T) {
 		t.Fatalf("pending list: %s", body)
 	}
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
-		"class", "data_destroyed", "age_seconds", "created", "expires")
+		"class", "data_destroyed", "measured", "age_seconds", "created", "expires")
 	if got := keysOf(l[0]); !slices.Equal(got, wantKeys) {
 		t.Errorf("summary keys %v\nwant %v", got, wantKeys)
 	}
-	if l[0]["summary"] == "" || l[0]["summary"] == "unknown impact" || l[0]["data_destroyed"] != 1.0 || l[0]["class"] != "TERMINAL" {
+	if l[0]["summary"] == "" || l[0]["summary"] == "unknown impact" || l[0]["data_destroyed"] != 1.0 || l[0]["class"] != "TERMINAL" || l[0]["measured"] != true {
 		t.Errorf("summary: %v", l[0])
 	}
 	if _, body := c.get(t, "/api/approvals"); len(decode[[]map[string]any](t, body)) != 2 {
@@ -1093,5 +1093,45 @@ func TestPendingQueueIsLiveAndOldestFirst(t *testing.T) {
 	}
 	if code, _ := c.post(t, "/api/approvals/"+lapsed+"/approve", ""); code != 409 {
 		t.Errorf("approving a lapsed approval: %d, want 409", code)
+	}
+}
+
+// TestSummaryCarriesMeasured: an unmeasured hold (an exec, a proxied
+// request, a scoring timeout) is TERMINAL with nothing destroyed, because
+// nothing was measured. The summary says so, so the queue can demand the
+// typed confirmation without waiting on the detail (P2-R29, I5). A stored
+// impact that does not parse is unmeasured too.
+func TestSummaryCarriesMeasured(t *testing.T) {
+	f := newAPIFixture(t)
+	now := f.clock.Now()
+	const exec, garbled, measured = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ffffffffffffffffffffffffffffffff", "cccccccccccccccccccccccccccccccc"
+	f.pending(t, measured)
+	a := pendingApproval(exec, now)
+	a.ImpactJSON, _ = json.Marshal(engine.Unmeasured("an exec runs an arbitrary command"))
+	b := pendingApproval(garbled, now)
+	b.ImpactJSON = []byte("not json")
+	for _, x := range []store.Approval{a, b} {
+		if err := f.st.CreateApproval(context.Background(), x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := f.signIn(t, "carol")
+	_, body := c.get(t, "/api/approvals?status=pending")
+	got := map[string]map[string]any{}
+	for _, s := range decode[[]map[string]any](t, body) {
+		got[s["id"].(string)] = s
+	}
+	if s := got[exec]; s["measured"] != false || s["class"] != "TERMINAL" || s["data_destroyed"] != 0.0 {
+		t.Errorf("unmeasured exec summary: %v", s)
+	}
+	if s := got[measured]; s["measured"] != true {
+		t.Errorf("measured summary: %v", s)
+	}
+	if s := got[garbled]; s["measured"] != false || s["class"] != "" {
+		t.Errorf("unparseable impact summary: %v", s)
+	}
+	_, body = c.get(t, "/api/approvals/"+exec)
+	if d := decode[map[string]any](t, body); d["measured"] != false {
+		t.Errorf("detail of an unmeasured hold: %s", body)
 	}
 }

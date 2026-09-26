@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Queue from './Queue';
-import { setCSRF } from '../api';
+import { setCSRF, type ApprovalSummary } from '../api';
 import { mockFetch } from '../test/fetch';
 import { detail, ID1, ID2, impact, summary } from '../test/fixtures';
 
@@ -194,6 +194,76 @@ describe('Queue', () => {
       expect(confirm.disabled).toBe(false);
     });
   }
+
+  it('an unmeasured hold says so and needs the phrase typed, though nothing is counted as destroyed', async () => {
+    // What an exec (even one running `drop table`), a proxied request or a
+    // scoring timeout looks like: TERMINAL, measured false, 0 destroyed.
+    const s = summary({ class: 'TERMINAL', measured: false, data_destroyed: 0, verb: 'create', resource: 'pods/exec', name: 'db-0', summary: 'TERMINAL, 0 objects, not measured' });
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [s] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ measured: false, dataDestroyed: 0, effects: [] })) },
+    });
+    render(<Queue />);
+    const card = (await screen.findByText('db-0')).closest('article')!;
+    expect(card.dataset.severity).toBe('severe');
+    expect(within(card).getByText('TERMINAL · UNMEASURED')).toBeTruthy();
+    await impactLoaded(card);
+    await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+    expect(within(card).getByText(/the impact of this was not measured/i)).toBeTruthy();
+    const confirm = within(card).getByRole('button', { name: /confirm approve/i }) as HTMLButtonElement;
+    await new Promise((r) => setTimeout(r, 350));
+    expect(confirm.disabled).toBe(true);
+    await userEvent.type(within(card).getByLabelText(/type demo to approve/i), 'demo');
+    expect(confirm.disabled).toBe(false);
+  });
+
+  it('an unmeasured summary is severe whatever its class', async () => {
+    const s = summary({ class: 'REVERSIBLE', measured: false, data_destroyed: 0 });
+    mockFetch({ 'GET /api/approvals?status=pending': { body: [s] }, [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'REVERSIBLE', measured: false })) } });
+    render(<Queue />);
+    const card = (await screen.findByText('data')).closest('article')!;
+    expect(card.dataset.severity).toBe('severe');
+  });
+
+  it('a summary that says unmeasured is enough to demand typing, whatever the detail says', async () => {
+    const s = summary({ class: 'COMPENSABLE', measured: false, data_destroyed: 0, summary: 'COMPENSABLE, 1 object' });
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [s] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'COMPENSABLE', measured: true, dataDestroyed: 0 })) },
+    });
+    render(<Queue />);
+    const card = (await screen.findByText('data')).closest('article')!;
+    await impactLoaded(card);
+    await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+    expect(within(card).getByLabelText(/type demo to approve/i)).toBeTruthy();
+  });
+
+  it('a summary without measured at all counts as unmeasured', async () => {
+    const { measured: _drop, ...rest } = summary({ class: 'COMPENSABLE', data_destroyed: 0 });
+    const s = rest as ApprovalSummary;
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [s] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'COMPENSABLE', measured: true, dataDestroyed: 0 })) },
+    });
+    render(<Queue />);
+    const card = (await screen.findByText('data')).closest('article')!;
+    await impactLoaded(card);
+    await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+    expect(within(card).getByLabelText(/type demo to approve/i)).toBeTruthy();
+  });
+
+  it('a detail that says unmeasured is enough to demand typing', async () => {
+    const s = summary({ class: 'COMPENSABLE', measured: true, data_destroyed: 0, summary: 'COMPENSABLE, 1 object' });
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [s] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'COMPENSABLE', measured: false, dataDestroyed: 0 })) },
+    });
+    render(<Queue />);
+    const card = (await screen.findByText('data')).closest('article')!;
+    await impactLoaded(card);
+    await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+    expect(within(card).getByLabelText(/type demo to approve/i)).toBeTruthy();
+  });
 
   it('a READ card stays calm with a plain, focused confirm', async () => {
     const s = summary({ class: 'READ', data_destroyed: 0, verb: 'get', resource: 'secrets', summary: 'READ, 0 objects' });
