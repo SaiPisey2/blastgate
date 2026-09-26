@@ -13,6 +13,230 @@
 
 /* === Shell: top bar, navigation, theme toggle === */
 
+/* Hidden from the eye, kept for the ear: the announcer, and the words
+   behind a count badge. clip-path, not display:none, which would hide it
+   from screen readers too. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 56px, one hairline under it, no shadow and no blur: the header is
+   furniture, and the page below it is the work. */
+.shell-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.shell-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--s-7);
+  min-height: 56px;
+  padding: 0 var(--s-7);
+}
+
+.shell-brand {
+  color: var(--text);
+  font-weight: 600;
+  font-size: var(--fs-15);
+  text-decoration: none;
+}
+
+.shell-brand:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* Tabs are plain links. They stretch to the full bar height so the
+   current tab's underline sits on the header's own hairline. */
+.shell-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-self: stretch;
+  column-gap: var(--s-5);
+  min-width: 0;
+}
+
+.shell-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 56px;
+  color: var(--text-muted);
+  font-size: var(--fs-15);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 120ms;
+}
+
+.shell-tab:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+/* Current is told twice, by colour and by a 2px underline, so it does not
+   rest on the muted/text contrast alone. */
+.shell-tab[aria-current="page"] {
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--text);
+}
+
+.shell-badge {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--s-2);
+  border: 1px solid var(--danger-line);
+  border-radius: 10px;
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.shell-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-2) var(--s-4);
+  margin-left: auto;
+  padding: var(--s-2) 0;
+}
+
+.shell-who {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+/* Sign out wears the theme toggle's quiet outline: header controls are
+   secondary to the page, and one look for both keeps them a pair. */
+.button.shell-signout {
+  padding: 0 var(--s-3);
+  border-color: var(--line);
+  background: transparent;
+  color: var(--text-muted);
+  font: 500 var(--fs-13) / 1 var(--font-sans);
+}
+
+.button.shell-signout:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* Below the width where brand, tabs and controls fit on one row, the
+   tabs take a row of their own and wrap inside it; nothing scrolls
+   sideways at 360px. */
+@media (max-width: 880px) {
+  .shell-bar {
+    padding: 0 var(--s-4);
+    column-gap: var(--s-4);
+  }
+
+  .shell-tabs {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .shell-tab {
+    min-height: var(--s-11);
+  }
+}
+
+/* The shortcut list: a centred panel over a dimmed page. It opens and
+   closes without animation; it is summoned by a key, and a key press
+   should get an answer at once. */
+.shortcut-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--s-4);
+  background: color-mix(in oklch, var(--bg) 70%, transparent);
+}
+
+.shortcut-help {
+  width: 100%;
+  max-width: 28rem;
+  padding: var(--s-6);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-panel);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.shortcut-title {
+  margin: 0 0 var(--s-4);
+  font-size: var(--fs-18);
+  font-weight: 600;
+}
+
+.shortcut-list {
+  margin: 0;
+}
+
+.shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-4);
+  padding: var(--s-2) 0;
+  border-top: 1px solid var(--line);
+}
+
+.shortcut-keys {
+  flex: 0 0 9rem;
+  color: var(--text);
+}
+
+.shortcut-join {
+  padding: 0 var(--s-1);
+  color: var(--text-faint);
+}
+
+.shortcut-key {
+  display: inline-block;
+  min-width: 24px;
+  padding: 0 var(--s-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-tag);
+  background: var(--raised);
+  font: 500 var(--fs-13) / 1.6 var(--font-mono);
+  text-align: center;
+}
+
+.shortcut-what {
+  flex: 1 1 12rem;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.shortcut-note {
+  margin: var(--s-4) 0;
+  color: var(--text-faint);
+  font-size: var(--fs-13);
+}
+
 .theme-toggle {
   min-height: var(--s-9);
   padding: 0 var(--s-3);
@@ -451,3 +675,79 @@
 /* === Policy === */
 
 /* === Sign in === */
+
+/* One narrow column on the bare page, no card: a heading, a line of help,
+   the field and the button (the approved sign-in mockup). */
+.sign-in {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--s-6) var(--s-4);
+  background: var(--bg);
+}
+
+.sign-in-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 360px;
+}
+
+.sign-in-title {
+  margin: 0 0 var(--s-2);
+  color: var(--text);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.sign-in-lede {
+  margin: 0 0 var(--s-6);
+  color: var(--text-muted);
+}
+
+.sign-in-label {
+  margin-bottom: var(--s-2);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+/* Two classes deep so the old stylesheet's input[type=password] and
+   input:focus { outline: none } cannot win before it is removed. */
+.sign-in .sign-in-input {
+  height: var(--s-11);
+  margin-bottom: var(--s-3);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--fs-15) / 1 var(--font-mono);
+}
+
+.sign-in .sign-in-input::placeholder {
+  color: var(--text-faint);
+}
+
+.sign-in .sign-in-input:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: none;
+  border-color: var(--line-strong);
+}
+
+.sign-in .sign-in-input[aria-invalid="true"] {
+  border-color: var(--danger-line);
+}
+
+.sign-in-error {
+  margin: 0 0 var(--s-3);
+  color: var(--danger-fg);
+  font-size: var(--fs-13);
+}
+
+.sign-in-submit {
+  width: 100%;
+  min-height: var(--s-11);
+}

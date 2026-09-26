@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { get, logout, onSignedOut, openStream, subscribe, whoami, type ApprovalSummary, type Me } from './api';
 import { navigate, parseHash, useHash, type Route } from './router';
-import Nav from './components/Nav';
-import Login from './views/Login';
+import Shell from './components/Shell';
+import EmptyState from './components/EmptyState';
+import SignIn from './views/SignIn';
 import Feed from './views/Feed';
 import Queue from './views/Queue';
 import Approval from './views/Approval';
@@ -18,7 +19,7 @@ export default function App() {
   const [pending, setPending] = useState<number | null>(null);
   // Where to go back to after signing in, so a 401 mid-task returns the
   // approver to the screen they were on.
-  const returnTo = useRef('#/queue');
+  const returnTo = useRef('#/waiting');
   if (route.name !== 'login' && route.name !== 'notfound' && hash) returnTo.current = hash;
 
   useEffect(() => {
@@ -53,42 +54,39 @@ export default function App() {
   }, [me]);
 
   if (me === undefined) return <div className="boot" aria-busy="true" />;
-  if (me === null) return <Login onSignedIn={setMe} />;
+  if (me === null) return <SignIn onSignedIn={setMe} />;
 
   return (
-    <div className="shell">
-      <Nav route={route} pending={pending} name={me.name} onSignOut={() => void logout().catch(() => {})} />
-      <main className="main">
-        <Screen route={route} />
-      </main>
-    </div>
+    <Shell route={route} pending={pending} me={me} onSignOut={() => void logout().catch(() => {})}>
+      <Screen route={route} />
+    </Shell>
   );
 }
 
+// Screen maps a route to its view. Until the new screens land, each new
+// route mounts the old view that does the same job, so nothing an
+// approver can reach today goes missing in between.
 function Screen({ route }: { route: Route }) {
   switch (route.name) {
-    case 'feed':
+    case 'waiting':
+    // login: signed in but still on #/login for the moment before the
+    // effect above sends the approver back to where they were.
     case 'login':
-      return <Feed />;
-    case 'queue':
       return <Queue />;
-    case 'approval':
-      return <Approval id={route.id} />;
-    case 'sessions':
+    case 'activity':
+      return <Feed />;
+    case 'outside':
+      return <Bypass />;
+    case 'agents':
       return <Sessions />;
     case 'policy':
       return <Policy />;
-    case 'bypass':
-      return <Bypass />;
+    case 'approval':
+      return <Approval id={route.id} />;
     case 'notfound':
       return (
         <div className="page">
-          <div className="empty">
-            <p className="empty-title">There is no such page.</p>
-            <p className="empty-sub">
-              <a href="#/feed">Go to the feed</a>
-            </p>
-          </div>
+          <EmptyState title="There is no such page." sub={<a href="#/waiting">Go to Waiting</a>} />
         </div>
       );
   }

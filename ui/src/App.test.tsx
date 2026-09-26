@@ -43,10 +43,10 @@ describe('App', () => {
     render(<App />);
     await screen.findByText('bob');
     act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
-    expect(screen.getByLabelText('2 pending')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     await act(async () => release());
     await new Promise((r) => setTimeout(r, 20));
-    expect(screen.getByLabelText('2 pending')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
   });
 
   it('each new screen has a route, and held feed rows link to their approval', async () => {
@@ -71,7 +71,7 @@ describe('App', () => {
       window.dispatchEvent(new HashChangeEvent('hashchange'));
     });
     expect(await screen.findByRole('article')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Queue' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: 'Waiting' }).getAttribute('aria-current')).toBe('page');
 
     for (const [hash, heading] of [
       ['#/sessions', 'Agent sessions'],

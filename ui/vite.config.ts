@@ -43,5 +43,7 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     restoreMocks: true,
+    // jsdom has no matchMedia; the stand-in lives in one place.
+    setupFiles: ['src/test/setup.ts'],
   },
 });
