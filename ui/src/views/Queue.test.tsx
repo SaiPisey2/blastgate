@@ -173,6 +173,44 @@ describe('Queue', () => {
     await waitFor(() => expect(document.activeElement).toBe(plainConfirm));
   });
 
+  for (const cls of ['', 'SOMETHING_NEW']) {
+    it(`an unknown class (${JSON.stringify(cls)}) fails closed: severe, no focus, typed confirm`, async () => {
+      const s = summary({ class: cls, data_destroyed: 0, summary: 'not measured' });
+      mockFetch({
+        'GET /api/approvals?status=pending': { body: [s] },
+        [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: cls, measured: false, dataDestroyed: 0 })) },
+      });
+      render(<Queue />);
+      const card = (await screen.findByText('data')).closest('article')!;
+      expect(card.dataset.severity).toBe('severe');
+      await impactLoaded(card);
+      await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+      const confirm = within(card).getByRole('button', { name: /confirm approve/i }) as HTMLButtonElement;
+      const typed = within(card).getByLabelText(/type demo to approve/i);
+      await new Promise((r) => setTimeout(r, 350));
+      expect(confirm.disabled).toBe(true);
+      expect(document.activeElement).not.toBe(confirm);
+      await userEvent.type(typed, 'demo');
+      expect(confirm.disabled).toBe(false);
+    });
+  }
+
+  it('a READ card stays calm with a plain, focused confirm', async () => {
+    const s = summary({ class: 'READ', data_destroyed: 0, verb: 'get', resource: 'secrets', summary: 'READ, 0 objects' });
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: [s] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'READ', dataDestroyed: 0, effects: [] })) },
+    });
+    render(<Queue />);
+    const card = (await screen.findByText('data')).closest('article')!;
+    expect(card.dataset.severity).toBe('calm');
+    await impactLoaded(card);
+    await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+    expect(within(card).queryByRole('textbox')).toBeNull();
+    const confirm = within(card).getByRole('button', { name: /confirm approve/i });
+    await waitFor(() => expect(document.activeElement).toBe(confirm));
+  });
+
   it('cancel backs out of the confirm step without deciding', async () => {
     const calls = routes();
     render(<Queue />);

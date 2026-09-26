@@ -25,10 +25,21 @@ type Severity = 'severe' | 'warn' | 'calm';
 // reversible patch, and destroying data takes a typed confirmation.
 // It is computed from the summary, which the list already carries, so it
 // is right from the first paint and does not depend on a second request.
+//
+// It fails closed: only the classes named here as safe are calm or warn.
+// A missing, empty or unknown class (an unmeasured action, or a class the
+// engine adds later) is severe, never calm by default.
+const KNOWN_CLASSES = new Set(['READ', 'REVERSIBLE', 'COMPENSABLE', 'TERMINAL', 'AUTHORITY']);
+
+export function isKnownClass(cls: string): boolean {
+  return KNOWN_CLASSES.has(cls);
+}
+
 function severityOf(s: ApprovalSummary): Severity {
-  if (s.class === 'TERMINAL' || s.class === 'AUTHORITY' || s.data_destroyed > 0) return 'severe';
+  if (s.data_destroyed > 0) return 'severe';
+  if (s.class === 'READ' || s.class === 'REVERSIBLE') return 'calm';
   if (s.class === 'COMPENSABLE') return 'warn';
-  return 'calm';
+  return 'severe';
 }
 
 // confirmPhrase is what must be typed to approve destroying data. A
@@ -72,8 +83,11 @@ export default function ApprovalCard({ summary: s, detail, detailError, onRetry,
   const impact = detail?.impact;
   // Either source saying data is destroyed is enough to demand typing.
   const destroys = s.data_destroyed > 0 || (impact?.dataDestroyed ?? 0) > 0;
+  // An unmeasured or unknown class reports data_destroyed 0 because nothing
+  // was measured, not because nothing is destroyed: it is typed too.
+  const unknown = !isKnownClass(s.class);
   const phrase = confirmPhrase(s);
-  const needsTyping = confirming === 'approve' && destroys;
+  const needsTyping = confirming === 'approve' && (destroys || unknown);
 
   // Only a calm card moves focus to its confirm button (once it is armed;
   // a disabled button cannot take focus). On a severe or compensable card,
@@ -195,7 +209,7 @@ export default function ApprovalCard({ summary: s, detail, detailError, onRetry,
           {needsTyping ? (
             <label className="typed">
               <span>
-                This destroys data. Type <code>{phrase}</code> to approve
+                {destroys ? 'This destroys data.' : 'The impact of this was not measured.'} Type <code>{phrase}</code> to approve
               </span>
               <input type="text" value={typed} onChange={(e) => setTyped(e.target.value)} autoFocus autoComplete="off" spellCheck={false} />
             </label>

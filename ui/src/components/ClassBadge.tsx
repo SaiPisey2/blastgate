@@ -11,12 +11,16 @@ const TONES: Record<string, string> = {
   AUTHORITY: 'danger',
 };
 
+// Fails closed: a class not in the map (missing, empty, or one the engine
+// adds later) is shown as danger, never as a calm or neutral default.
+// Object.hasOwn, not TONES[cls]: a class named "constructor" must not find
+// Object.prototype's.
 export function classTone(cls: string): string {
-  return TONES[cls] ?? 'neutral';
+  return Object.hasOwn(TONES, cls) ? TONES[cls] : 'danger';
 }
 
 export default function ClassBadge({ cls }: { cls: string }) {
-  return <span className={`badge badge-${classTone(cls)}`}>{cls || 'UNKNOWN'}</span>;
+  return <span className={`badge badge-${classTone(cls)}`}>{cls || 'UNMEASURED'}</span>;
 }
 
 // Allow is the common case and stays grey, so held and denied requests
