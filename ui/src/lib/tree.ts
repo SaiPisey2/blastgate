@@ -1,0 +1,151 @@
+// The impact tree's model: how the engine's effect strings are read and
+// nested. Kept apart from the component so the rules that decide where an
+// object is drawn are tested without rendering anything.
+import type { Effect } from '../api';
+
+// An effect's object is the engine's string: group/Kind/namespace/name,
+// with the group left out for core objects and the namespace empty for
+// cluster-scoped ones. Object names come from the cluster, which agents
+// can write to, so everything here is shown as text and nothing parsed
+// from it is trusted beyond choosing where in the tree to show it.
+export type ObjectRef = { group: string; kind: string; namespace: string; name: string; raw: string; parsed: boolean };
+
+export function parseObject(raw: string): ObjectRef {
+  const p = raw.split('/');
+  let ref: ObjectRef | undefined;
+  if (p.length === 3) ref = { group: '', kind: p[0], namespace: p[1], name: p[2], raw, parsed: true };
+  if (p.length === 4) ref = { group: p[0], kind: p[1], namespace: p[2], name: p[3], raw, parsed: true };
+  if (ref && ref.kind !== '' && ref.name !== '') return ref;
+  return { group: '', kind: '', namespace: '', name: raw, raw, parsed: false };
+}
+
+export type TreeNode = { key: string; ref: ObjectRef; effects: Effect[]; children: TreeNode[] };
+export type TreeGroup = { key: string; label: string; roots: TreeNode[]; objects: number };
+
+// Which kinds own which, by the names Kubernetes' own controllers give
+// what they create: a ReplicaSet is its Deployment's name plus a hash, a
+// Pod is its ReplicaSet's (or DaemonSet's, Job's) name plus five random
+// characters, a StatefulSet's pods add an ordinal, a CronJob's jobs add a
+// schedule timestamp. The part after "<owner>-" must have that shape, not
+// merely exist: otherwise web-api-7d9f8c6b5, whose own Deployment is not
+// in the impact, would be drawn under an unrelated Deployment "web". The
+// engine sends effects without ownerReferences, so this is only a display
+// grouping; an object whose owner cannot be inferred stays at the top of
+// its namespace, never dropped.
+const POD_SUFFIX = /^[a-z0-9]{5}$/;
+const OWNERS: Record<string, { owner: string; rest: RegExp }[]> = {
+  'apps/ReplicaSet': [{ owner: 'apps/Deployment', rest: /^[a-z0-9]{1,10}$/ }],
+  Pod: [
+    { owner: 'apps/ReplicaSet', rest: POD_SUFFIX },
+    { owner: 'apps/DaemonSet', rest: POD_SUFFIX },
+    { owner: 'batch/Job', rest: POD_SUFFIX },
+    { owner: 'apps/StatefulSet', rest: /^\d+$/ },
+  ],
+  'batch/Job': [{ owner: 'batch/CronJob', rest: /^\d+$/ }],
+};
+
+const gk = (r: ObjectRef) => (r.group ? `${r.group}/${r.kind}` : r.kind);
+
+// sounding names the claim and volume in a volume effect's explanation:
+// "pvc/<claim> is bound to pv/<volume> ...". PersistentVolumes are
+// cluster-scoped, so this is the only link back to the claim.
+const BOUND = /^pvc\/(\S+) is bound to pv\/(\S+)/;
+
+export const CLUSTER = '(cluster-scoped)';
+export const UNRECOGNISED = '(unrecognised)';
+
+export function buildTree(effects: Effect[]): TreeGroup[] {
+  const nodes = new Map<string, TreeNode>();
+  const order: TreeNode[] = [];
+  for (const raw of effects) {
+    // The impact is stored JSON: a null entry is skipped (there is nothing
+    // to show), and a non-string object becomes '' so the effect still
+    // lands in the unrecognised group instead of crashing or vanishing.
+    if (!raw || typeof raw !== 'object') continue;
+    const ef: Effect = typeof raw.object === 'string' ? raw : { ...raw, object: '' };
+    const ref = parseObject(ef.object);
+    // Unparsed strings key on the raw text, parsed ones on their parts, so
+    // the two can never merge into one node by accident.
+    const key = ref.parsed ? `${gk(ref)}/${ref.namespace}/${ref.name}` : `\u0000${ef.object}`;
+    let n = nodes.get(key);
+    if (!n) {
+      n = { key, ref, effects: [], children: [] };
+      nodes.set(key, n);
+      order.push(n);
+    }
+    n.effects.push(ef);
+  }
+
+  const claims = order.filter((n) => n.ref.parsed && gk(n.ref) === 'PersistentVolumeClaim' && n.ref.namespace !== '');
+  const uniqueClaim = (name: string) => {
+    const c = claims.filter((n) => n.ref.name === name);
+    return c.length === 1 ? c[0] : undefined;
+  };
+
+  // An unbound claim's effect arrives without its namespace. When exactly
+  // one claim of that name is in the tree, it is the same claim: its
+  // effects join that node rather than floating among cluster objects.
+  const merged = new Set<TreeNode>();
+  for (const n of order) {
+    if (!n.ref.parsed || n.ref.namespace !== '' || gk(n.ref) !== 'PersistentVolumeClaim') continue;
+    const into = uniqueClaim(n.ref.name);
+    if (into) {
+      into.effects.push(...n.effects);
+      merged.add(n);
+    }
+  }
+  const live = order.filter((n) => !merged.has(n));
+
+  const parentOf = (n: TreeNode): TreeNode | undefined => {
+    if (!n.ref.parsed) return undefined;
+    if (gk(n.ref) === 'PersistentVolume') {
+      for (const ef of n.effects) {
+        const m = BOUND.exec(ef.explanation ?? '');
+        if (m && m[2] === n.ref.name) {
+          const c = uniqueClaim(m[1]);
+          if (c) return c;
+        }
+      }
+      return undefined;
+    }
+    const owners = OWNERS[gk(n.ref)];
+    if (!owners || n.ref.namespace === '') return undefined;
+    let best: TreeNode | undefined;
+    for (const p of live) {
+      if (p === n || !p.ref.parsed || p.ref.namespace !== n.ref.namespace) continue;
+      const rule = owners.find((o) => o.owner === gk(p.ref));
+      if (!rule || !n.ref.name.startsWith(p.ref.name + '-')) continue;
+      if (!rule.rest.test(n.ref.name.slice(p.ref.name.length + 1))) continue;
+      // Should two owners both fit, the longest name is the nearer one.
+      if (!best || p.ref.name.length > best.ref.name.length) best = p;
+    }
+    return best;
+  };
+
+  const groups = new Map<string, TreeGroup>();
+  for (const n of live) {
+    const parent = parentOf(n);
+    if (parent) {
+      parent.children.push(n);
+      continue;
+    }
+    const gkey = !n.ref.parsed ? UNRECOGNISED : n.ref.namespace === '' ? CLUSTER : n.ref.namespace;
+    let g = groups.get(gkey);
+    if (!g) {
+      g = { key: gkey, label: gkey, roots: [], objects: 0 };
+      groups.set(gkey, g);
+    }
+    g.roots.push(n);
+  }
+  for (const g of groups.values()) g.objects = g.roots.reduce((s, n) => s + 1 + below(n), 0);
+
+  // Namespaces alphabetically, then cluster-scoped objects, then anything
+  // that could not be read as an object at all.
+  const rank = (k: string) => (k === UNRECOGNISED ? 2 : k === CLUSTER ? 1 : 0);
+  return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+// below counts every node under n, at any depth.
+export function below(n: TreeNode): number {
+  return n.children.reduce((s, c) => s + 1 + below(c), 0);
+}

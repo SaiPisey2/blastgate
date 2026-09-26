@@ -1,5 +1,5 @@
 // Pure formatting helpers, framework-free apart from useNow (already a
-// hook). format.tsx re-exports these until Task 9 folds the views over.
+// hook).
 import { useEffect, useState } from 'react';
 
 // useNow re-renders every `ms` so relative times ("3m ago") stay honest

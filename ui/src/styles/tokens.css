@@ -95,10 +95,8 @@
 /* Dark is the default: when the system says dark, or says nothing.
 
    The manual choices are written as :root[data-theme=...] (0,2,0), not
-   a bare [data-theme=...] (0,1,0): the old styles.css sets the same
-   custom properties on :root and loads later, so at equal specificity it
-   would win and a manual Light on a dark system would paint old dark
-   text on these light surfaces. */
+   a bare [data-theme=...] (0,1,0), so no rule that sets these properties
+   on a plain :root can outrank a choice the approver made by hand. */
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;

@@ -484,4 +484,46 @@ describe('Waiting', () => {
     expect(componentsCSS).toMatch(/\.waiting-wrap\s*\{[^}]*overflow-wrap:\s*anywhere/);
     expect(componentsCSS).toMatch(/\.decision-q\s*\{[^}]*overflow-wrap:\s*anywhere/);
   });
+
+  // Ported from the old Queue: the whole flow on one screen, with the
+  // csrf header on every POST and the empty state at the end.
+  it('a typed approve and a plain deny each post with the csrf header, then the empty state', async () => {
+    setMedia(WIDE, true);
+    const srv = server([severe, plain]);
+    setCSRF('tok');
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    await within(panel()).findByText('None');
+    // Destroying data: Approve waits for the whole target, typed.
+    const field = within(panel()).getByLabelText(/to approve, type/i);
+    const approve = within(panel()).getByRole('button', { name: /^approve$/i }) as HTMLButtonElement;
+    await userEvent.type(field, 'demo/dat');
+    expect(approve.disabled).toBe(true);
+    await userEvent.type(field, 'a');
+    expect(approve.disabled).toBe(false);
+    await userEvent.click(approve);
+    await waitFor(() => expect(heading().textContent).toContain('demo/web'));
+    // A reversible change: no typing, and Deny sends at once.
+    expect(within(panel()).queryByRole('textbox')).toBeNull();
+    await within(panel()).findByText('Snapshot kept');
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    expect(await screen.findByText('Nothing is waiting for you.')).toBeTruthy();
+    expect(posts(srv.calls)).toEqual([`/api/approvals/${ID1}/approve`, `/api/approvals/${ID2}/deny`]);
+    expect(srv.calls.filter((c) => c.method === 'POST').every((c) => c.headers['x-blastgate-csrf'] === 'tok')).toBe(true);
+  });
+
+  it('a decision made elsewhere removes the request with a note', async () => {
+    setMedia(WIDE, true);
+    const calls = mockFetch({
+      'GET /api/approvals?status=pending': { body: [plain] },
+      [`GET /api/approvals/${ID2}`]: { body: detail(plain, plainImpact) },
+      'POST /api/approvals/': { status: 409, body: { error: 'not pending' } },
+    });
+    renderWithMotion(<Waiting me="bob" />);
+    await within(await screen.findByRole('article')).findByText('Snapshot kept');
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    expect(await screen.findByText('That request was already decided or has expired.')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('option')).toBeNull());
+    expect(posts(calls)).toEqual([`/api/approvals/${ID2}/deny`]);
+  });
 });

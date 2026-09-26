@@ -8,7 +8,7 @@ import Activity from './views/Activity';
 import Waiting from './views/Waiting';
 import Details from './views/Details';
 import Agents from './views/Agents';
-import PolicyView from './views/PolicyView';
+import Policy from './views/Policy';
 import Outside from './views/Outside';
 
 export default function App() {
@@ -80,7 +80,7 @@ function Screen({ route, me }: { route: Route; me: string }) {
     case 'agents':
       return <Agents />;
     case 'policy':
-      return <PolicyView />;
+      return <Policy />;
     case 'approval':
       return <Details id={route.id} me={me} />;
     case 'notfound':

@@ -3,7 +3,7 @@ import { ApiError, get, subscribe, type ApprovalDetail, type Impact } from '../a
 import Button from '../components/Button';
 import DecisionPanel, { undoLabel } from '../components/DecisionPanel';
 import EmptyState from '../components/EmptyState';
-import ImpactTree from '../components/ImpactTree.new';
+import ImpactTree from '../components/ImpactTree';
 import { GLYPH } from '../components/Tag';
 import { actionText } from '../lib/format';
 import { APPROVAL_ID } from '../router';

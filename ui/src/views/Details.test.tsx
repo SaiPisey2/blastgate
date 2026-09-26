@@ -195,4 +195,50 @@ describe('Details', () => {
     expect(await screen.findByRole('article')).toBeTruthy();
     expect(screen.queryByText(/store unavailable/)).toBeNull();
   });
+
+  // Ported from the old Approval page: the action as the server stored
+  // it, and the tree beside it, with no link from the page to itself.
+  it('shows the question, the stored action and the impact tree', async () => {
+    const d = { ...detail(del, deploymentImpact()), action: { verb: 'delete', path: '/apis/apps/v1/namespaces/team-a/deployments/web' } };
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: d } });
+    const { container } = renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    expect(within(card).getByText('Cannot be undone')).toBeTruthy();
+    expect(within(card).queryByRole('link', { name: 'Show details' })).toBeNull();
+    const cmd = screen.getByLabelText('Command');
+    expect(cmd.textContent).toContain('verb  delete');
+    expect(cmd.textContent).toContain('path  /apis/apps/v1/namespaces/team-a/deployments/web');
+    await waitFor(() => expect(container.querySelector('[data-object="apps/Deployment/team-a/web"]')).toBeTruthy());
+  });
+
+  // The details page is a second place to approve from, so it must ask
+  // for the same typed target as Waiting does.
+  for (const [label, over] of [
+    ['destroying data', { class: 'TERMINAL', data_destroyed: 1 }],
+    ['an empty class', { class: '', data_destroyed: 0 }],
+    ['an unknown class', { class: 'SOMETHING_NEW', data_destroyed: 0 }],
+  ] as const) {
+    it(`approving ${label} from the details page needs the target typed`, async () => {
+      const s = summary({ ...over, namespace: 'team-a', name: 'web', resource: 'deployments' });
+      const calls = mockFetch({
+        [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: over.class, dataDestroyed: over.data_destroyed })) },
+        [`POST /api/approvals/${ID1}/approve`]: { body: {} },
+      });
+      renderWithMotion(<Details id={ID1} me="carol" />);
+      const card = await screen.findByRole('article');
+      const approve = within(card).getByRole('button', { name: /^approve$/i }) as HTMLButtonElement;
+      // Past the arming delay, and still inert without the target.
+      await new Promise((r) => setTimeout(r, 350));
+      expect(approve.disabled).toBe(true);
+      await userEvent.click(approve);
+      expect(calls.some((c) => c.method === 'POST')).toBe(false);
+      const typed = within(card).getByLabelText(/to approve, type/i);
+      await userEvent.type(typed, 'team-a/we');
+      expect(approve.disabled).toBe(true);
+      await userEvent.type(typed, 'b');
+      expect(approve.disabled).toBe(false);
+      await userEvent.click(approve);
+      await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    });
+  }
 });

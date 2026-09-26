@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, clock, duration, plural } from './format';
+import { ago, clock, duration, plural, shellQuote } from './format';
 
 describe('duration', () => {
   it('rounds seconds under a minute', () => {
@@ -87,5 +87,15 @@ describe('ago', () => {
   it('reads as just now for a non-finite input', () => {
     expect(ago(NaN)).toBe('just now');
     expect(ago(Infinity)).toBe('just now');
+  });
+});
+
+// Ported from the old Approval page, whose command block now uses these.
+describe('shellQuote', () => {
+  it('quotes command arguments only when needed', () => {
+    expect(shellQuote(['ls', '-la', '/var/lib'])).toBe('ls -la /var/lib');
+    expect(shellQuote(['sh', '-c', 'echo hi'])).toBe("sh -c 'echo hi'");
+    expect(shellQuote(['echo', ''])).toBe("echo ''");
+    expect(shellQuote(["it's"])).toBe(`'it'\\''s'`);
   });
 });
