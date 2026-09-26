@@ -48,7 +48,7 @@ fixture-up:
 # make runs each target in its own shell and nothing exported survives.
 fixture-test: build
 	cd e2e && BLASTGATE_E2E_ADMIN=$(ADMIN_KC) BLASTGATE_E2E_UPSTREAM=$(UP_KC) \
-		BLASTGATE_E2E_HOST_IP=$$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}') \
+		BLASTGATE_E2E_HOST_IP=$$($(CURDIR)/scripts/kind-gateway.sh) \
 		go test -tags=e2e -count=1 -v .
 
 fixture-down:
