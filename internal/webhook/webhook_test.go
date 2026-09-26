@@ -360,7 +360,8 @@ func reviewOf(uid, user string, op admissionv1.Operation, group, resource string
 // and write Events all day. Recorded, they are tens of thousands of rows
 // a day in a table that is never pruned, and the bypass page shows
 // nothing else. They are skipped unless IncludeNoise asks for them
-// (P2-R29, I6). The match is exact: another group's "leases" is recorded.
+// (P2-R29, I6). The match is exact: another group's "leases" is recorded,
+// and so is a delete of a Lease or an Event.
 func TestLeaseAndEventNoiseIsSkipped(t *testing.T) {
 	const sa = "system:serviceaccount:cert-manager:cert-manager"
 	noise := [][]byte{
@@ -373,6 +374,8 @@ func TestLeaseAndEventNoiseIsSkipped(t *testing.T) {
 		reviewOf("u-cm", sa, admissionv1.Create, "", "configmaps"),
 		reviewOf("u-other-leases", sa, admissionv1.Update, "example.com", "leases"),
 		reviewOf("u-other-events", sa, admissionv1.Create, "example.com", "events"),
+		reviewOf("u-lease-delete", sa, admissionv1.Delete, "coordination.k8s.io", "leases"),
+		reviewOf("u-event-delete", sa, admissionv1.Delete, "events.k8s.io", "events"),
 	}
 	uids := func(rows []store.BypassRow) string {
 		var s []string
@@ -389,7 +392,7 @@ func TestLeaseAndEventNoiseIsSkipped(t *testing.T) {
 			t.Fatalf("not allowed: %d %s", w.Code, w.Body.String())
 		}
 	}
-	if got := uids(rec.got()); got != "u-cm,u-other-leases,u-other-events" {
+	if got := uids(rec.got()); got != "u-cm,u-other-leases,u-other-events,u-lease-delete,u-event-delete" {
 		t.Errorf("recorded %s, want only the non-noise writes", got)
 	}
 

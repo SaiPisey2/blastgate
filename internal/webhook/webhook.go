@@ -102,7 +102,7 @@ type Recorder interface {
 type Handler struct {
 	Rec    Recorder
 	Ignore []string
-	// IncludeNoise records Lease and Event writes too (see IsNoise).
+	// IncludeNoise records Lease and Event creates and updates too (see IsNoise); deletes are always recorded.
 	IncludeNoise bool
 	Log          *slog.Logger
 	Now          func() time.Time
@@ -207,7 +207,11 @@ func (h *Handler) bypassed(req *admissionv1.AdmissionRequest) bool {
 	default:
 		return false
 	}
-	if !h.IncludeNoise && IsNoise(req.Resource.Group, req.Resource.Resource) {
+	// Only creates and updates are noise: controllers renew Leases and
+	// write Events all day, but rarely delete them. A delete of either is
+	// kept, since removing a controller's Lease or the Events that recorded
+	// an action is what someone working around blastgate would do.
+	if !h.IncludeNoise && req.Operation != admissionv1.Delete && IsNoise(req.Resource.Group, req.Resource.Resource) {
 		return false
 	}
 	return !ViaBlastgate(req.UserInfo.Extra) && !Ignored(req.UserInfo.Username, h.Ignore)

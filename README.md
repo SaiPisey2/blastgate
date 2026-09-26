@@ -114,7 +114,7 @@ own writes.
 | `BLASTGATE_WEBHOOK_LISTEN` | unset: off | the observe webhook (see [Writes that go around blastgate](#writes-that-go-around-blastgate)) |
 | `BLASTGATE_WEBHOOK_CLIENT_CA` | unset | a PEM file of CAs; when set, the webhook requires a client certificate signed by one of them. Refused without `BLASTGATE_WEBHOOK_LISTEN` |
 | `BLASTGATE_BYPASS_IGNORE` | `system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver` | username prefixes the webhook never records; a value replaces the default list, it does not add to it |
-| `BLASTGATE_BYPASS_INCLUDE_NOISE` | unset | `1` makes the webhook record Lease and Event writes too, which it skips by default; anything but `0` or `1` is refused |
+| `BLASTGATE_BYPASS_INCLUDE_NOISE` | unset | `1` makes the webhook record Lease and Event creates and updates too, which it skips by default (deletes are always recorded); anything but `0` or `1` is refused |
 | `BLASTGATE_ALLOW_REMOTE` | unset | `1` lets any of the three listeners bind a non-loopback address; without it `serve` refuses to start |
 | `BLASTGATE_TLS_HOSTS` | `127.0.0.1,localhost` | the names and addresses the serving certificate covers, for all three listeners |
 
@@ -458,10 +458,13 @@ replaces the default, so repeat it:
 export BLASTGATE_BYPASS_IGNORE=system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver,system:serviceaccount:cert-manager:
 ```
 
-**Lease and Event writes are skipped.** Those controllers renew a Lease
+**Lease and Event creates and updates are skipped.** Those controllers renew a Lease
 (`coordination.k8s.io/leases`) every few seconds and write Events (core `events` and
 `events.k8s.io/events`) all day, which would be tens of thousands of rows a day and a
-Bypass page showing nothing else. They are not recorded, whoever makes them. Set
+Bypass page showing nothing else. They are not recorded, whoever makes them. Deletes
+of Leases and Events are still recorded: controllers rarely make them, and removing a
+controller's Lease or the Events that recorded an action is what working around
+blastgate looks like. Set
 `BLASTGATE_BYPASS_INCLUDE_NOISE=1` to record them too. The skip matches those exact
 groups and resources, so a custom resource that happens to be called `leases` is
 recorded.
