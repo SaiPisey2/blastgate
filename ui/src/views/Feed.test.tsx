@@ -5,6 +5,7 @@ import Feed from './Feed';
 import { emit, setStreamStatus } from '../api';
 import { mockFetch, type Call } from '../test/fetch';
 import { feedRow } from '../test/fixtures';
+import type { FeedRow } from '../api';
 
 afterEach(cleanup);
 
@@ -111,6 +112,80 @@ describe('Feed', () => {
     render(<Feed />);
     const row = (await screen.findByText('db-0')).closest('tr')!;
     expect(within(row).getByText('TERMINAL · UNMEASURED').className).toContain('badge-danger');
+  });
+
+  it('shows one row per request: a decision and then its result on the stream', async () => {
+    mockFetch({ 'GET /api/feed': { body: [feedRow({ id: 5, kind: 'result', name: 'before-it' })] } });
+    render(<Feed />);
+    await screen.findByText('before-it');
+    const decision = feedRow({ id: 60, request_id: 'q1', kind: 'decision', verb: 'create', resource: 'pods', subresource: 'exec', name: 'db-0', class: 'TERMINAL', measured: false, decision: 'hold', rule: 'exec-with-sql', status: 0, outcome: '' });
+    act(() => emit('audit', decision));
+    let row = (await screen.findByText('db-0')).closest('tr')!;
+    // Written when the decision is made; the request has not ended yet.
+    expect(within(row).getByText('in flight')).toBeTruthy();
+    // Another request lands while the exec is still open.
+    act(() => emit('audit', feedRow({ id: 61, kind: 'result', name: 'mid' })));
+    act(() => emit('audit', { ...decision, id: 63, kind: 'result', status: 403, outcome: 'held' }));
+    await waitFor(() => expect(screen.queryByText('in flight')).toBeNull());
+    expect(screen.getAllByText('db-0')).toHaveLength(1);
+    row = screen.getByText('db-0').closest('tr')!;
+    expect(within(row).getByText('403')).toBeTruthy();
+    expect(within(row).getByText('hold')).toBeTruthy();
+    // A reconnecting stream can send the decision again: it changes nothing.
+    act(() => emit('audit', decision));
+    expect(screen.getAllByText('db-0')).toHaveLength(1);
+    expect(within(screen.getByText('db-0').closest('tr')!).getByText('403')).toBeTruthy();
+    // A newer request goes above it; the exec keeps its place.
+    // Requests are placed by their first row: the exec was decided (60)
+    // before "mid" (61), though its result (63) came after.
+    act(() => emit('audit', feedRow({ id: 64, kind: 'result', name: 'newer' })));
+    const names = screen.getAllByRole('row').slice(1).map((r) => r.querySelector('.name')!.textContent);
+    expect(names).toEqual(['newer', 'mid', 'db-0', 'before-it']);
+  });
+
+  it('the result wins whichever row arrives first', async () => {
+    mockFetch({ 'GET /api/feed': { body: [] } });
+    render(<Feed />);
+    await screen.findByText(/no requests/i);
+    act(() => emit('audit', feedRow({ id: 71, request_id: 'q2', kind: 'result', status: 201, outcome: 'ok', name: 'cm' })));
+    act(() => emit('audit', feedRow({ id: 70, request_id: 'q2', kind: 'decision', status: 0, outcome: '', name: 'cm' })));
+    expect(await screen.findByText('201')).toBeTruthy();
+    expect(screen.getAllByText('cm')).toHaveLength(1);
+    expect(screen.queryByText('in flight')).toBeNull();
+  });
+
+  it('merges a request whose rows fall on two pages, and pages by raw rows', async () => {
+    // Page 1 is 50 raw rows but only 26 requests: 24 decision/result
+    // pairs, one read, and the result of a request whose decision is on
+    // page 2. "More" follows the raw rows, and the cursor is the lowest
+    // raw id seen (the low pair's decision, 140), not a shown row's id.
+    const page1: FeedRow[] = [];
+    const pair = (dec: number, res: number, name: string) => {
+      const base = feedRow({ id: dec, request_id: `p-${name}`, kind: 'decision', status: 0, name });
+      page1.push({ ...base, id: res, kind: 'result', status: 200 }, base);
+    };
+    for (let i = 0; i < 23; i++) pair(300 + 2 * i, 301 + 2 * i, `pair-${i}`);
+    pair(140, 145, 'pair-low');
+    page1.push(feedRow({ id: 160, kind: 'result', name: 'a-read', class: 'READ' }));
+    page1.push(feedRow({ id: 150, request_id: 'split', kind: 'result', status: 200, outcome: 'ok', name: 'split-req' }));
+    page1.sort((a, b) => b.id - a.id);
+    const page2 = [feedRow({ id: 100, request_id: 'split', kind: 'decision', status: 0, outcome: '', name: 'split-req' }), feedRow({ id: 99, kind: 'result', name: 'oldest' })];
+    const calls = mockFetch({ 'GET /api/feed': (c) => ({ body: params(c).get('before') ? page2 : page1 }) });
+    render(<Feed />);
+    await screen.findByText('split-req');
+    expect(screen.getAllByRole('row').slice(1)).toHaveLength(26);
+    await userEvent.click(screen.getByRole('button', { name: /load older/i }));
+    expect(await screen.findByText('oldest')).toBeTruthy();
+    expect(params(calls[calls.length - 1]).get('before')).toBe('140');
+    expect(screen.getAllByText('split-req')).toHaveLength(1);
+    const split = screen.getByText('split-req').closest('tr')!;
+    expect(within(split).getByText('200')).toBeTruthy();
+    expect(screen.queryByText('in flight')).toBeNull();
+    // Placed by its first row (id 100): below the low pair (140), above 99.
+    const names = screen.getAllByRole('row').slice(1).map((r) => r.querySelector('.name')!.textContent);
+    expect(names.slice(-4)).toEqual(['a-read', 'pair-low', 'split-req', 'oldest']);
+    // Page 2 was short: nothing older to offer.
+    expect(screen.queryByRole('button', { name: /load older/i })).toBeNull();
   });
 
   it('the live indicator follows the stream', async () => {

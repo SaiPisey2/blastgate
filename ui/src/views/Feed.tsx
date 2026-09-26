@@ -32,14 +32,50 @@ const LIVE_TITLES: Record<StreamStatus, string> = {
   offline: 'Not receiving live updates; reload to see new requests',
 };
 
-// mergeNewestFirst joins stream rows with a fetched page, dropping
-// duplicates by audit id and keeping newest (highest id) first.
-function mergeNewestFirst(a: FeedRow[], b: FeedRow[]): FeedRow[] {
-  const seen = new Set<number>();
-  return [...a, ...b]
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .sort((x, y) => y.id - x.id)
-    .slice(0, MAX_ROWS);
+// A write leaves two audit rows: a decision row when the gate decides
+// and a result row when the request ends, carrying the same rule,
+// decision and class plus the status. A read leaves only the result. The
+// feed shows one line per request, so the rows are folded by request_id.
+// Dropping the decision rows instead would hide an exec, attach or
+// port-forward until it closed.
+type Entry = {
+  key: string;
+  // first is the lowest audit id seen for the request: its place in the
+  // feed (the moment it was decided), and what "load older" pages before.
+  first: number;
+  // row is what is shown. The result row's fields win over the decision's
+  // whichever arrives first, so a replayed decision cannot undo a status.
+  row: FeedRow;
+  // done: the result row has been seen. Until then the request is in flight.
+  done: boolean;
+};
+
+// A row without a request id stands alone rather than merging with every
+// other row that lacks one.
+function keyOf(r: FeedRow): string {
+  return r.request_id ? `r:${r.request_id}` : `id:${r.id}`;
+}
+
+function upsert(m: Map<string, Entry>, r: FeedRow) {
+  const key = keyOf(r);
+  const result = r.kind === 'result';
+  const e = m.get(key);
+  if (!e) {
+    m.set(key, { key, first: r.id, row: r, done: result });
+    return;
+  }
+  const row = result || !e.done ? { ...e.row, ...r } : { ...r, ...e.row };
+  m.set(key, { key, first: Math.min(e.first, r.id), row, done: e.done || result });
+}
+
+// fold merges raw audit rows into the entries, newest request first. The
+// same row folded twice changes nothing, so a stream that resumes and
+// repeats rows cannot duplicate a line (P2-R24). cap trims the oldest; a
+// page loaded on request is not trimmed away as soon as it arrives.
+function fold(entries: Entry[], rows: FeedRow[], cap = MAX_ROWS): Entry[] {
+  const m = new Map(entries.map((e) => [e.key, e]));
+  for (const r of rows) upsert(m, r);
+  return [...m.values()].sort((a, b) => b.first - a.first).slice(0, cap);
 }
 
 // displayClass is the class a row is shown with, and whether it was
@@ -67,8 +103,8 @@ export default function Feed() {
   const [filters, setFilters] = useState<Filters>(EMPTY);
   // Text filters apply after a pause in typing, not on every keystroke.
   const [applied, setApplied] = useState<Filters>(EMPTY);
-  const [rows, setRows] = useState<FeedRow[] | null>(null);
-  const [fresh, setFresh] = useState<Set<number>>(new Set());
+  const [rows, setRows] = useState<Entry[] | null>(null);
+  const [fresh, setFresh] = useState<Set<string>>(new Set());
   const [more, setMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState('');
@@ -102,9 +138,11 @@ export default function Feed() {
         const early = buffer.current.filter((r) => matches(r, appliedRef.current));
         loading.current = false;
         buffer.current = [];
-        setRows(mergeNewestFirst(early, got));
+        setRows(fold([], [...got, ...early]));
+        // A full page of raw rows means there may be more, however few
+        // requests they folded into.
         setMore(got.length >= PAGE);
-        setFresh(new Set(early.map((r) => r.id)));
+        setFresh(new Set(early.map(keyOf)));
         setError('');
       },
       (e) => {
@@ -123,27 +161,24 @@ export default function Feed() {
           buffer.current.push(row);
           return;
         }
-        setRows((prev) => {
-          if (prev === null || prev.some((r) => r.id === row.id)) return prev;
-          return [row, ...prev].slice(0, MAX_ROWS);
-        });
-        setFresh((prev) => new Set(prev).add(row.id));
+        setRows((prev) => (prev === null ? prev : fold(prev, [row])));
+        setFresh((prev) => new Set(prev).add(keyOf(row)));
       }),
     [],
   );
 
   async function loadOlder() {
     if (!rows || rows.length === 0) return;
-    const oldest = Math.min(...rows.map((r) => r.id));
+    // The lowest raw id seen: every row of every entry is at or above its
+    // entry's first. A request whose decision is on the next page merges
+    // into the line its result already made.
+    const oldest = Math.min(...rows.map((e) => e.first));
     const mine = seq.current;
     setLoadingOlder(true);
     try {
       const page = (await get<FeedRow[]>(query(applied, oldest))) ?? [];
       if (mine !== seq.current) return;
-      setRows((prev) => {
-        const have = new Set((prev ?? []).map((r) => r.id));
-        return [...(prev ?? []), ...page.filter((r) => !have.has(r.id))];
-      });
+      setRows((prev) => fold(prev ?? [], page, Infinity));
       setMore(page.length >= PAGE);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load older requests.');
@@ -237,10 +272,10 @@ export default function Feed() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {rows.map(({ key, row: r, done }) => (
                 // Reads are the bulk of traffic and never need attention,
                 // so they are muted and the writes stand out.
-                <tr key={r.id} className={[displayClass(r).cls === 'READ' ? 'muted' : '', fresh.has(r.id) ? 'fresh' : ''].join(' ').trim()}>
+                <tr key={key} className={[displayClass(r).cls === 'READ' ? 'muted' : '', fresh.has(key) ? 'fresh' : ''].join(' ').trim()}>
                   <td data-label="Time" className="time" title={r.at}>
                     {clock(r.at)}
                   </td>
@@ -276,7 +311,7 @@ export default function Feed() {
                     <code className="rule">{r.rule}</code>
                   </td>
                   <td data-label="Status" className="status" title={r.outcome}>
-                    {r.status ? r.status : <span className="dim">—</span>}
+                    {!done ? <span className="dim">in flight</span> : r.status ? r.status : <span className="dim">—</span>}
                   </td>
                 </tr>
               ))}

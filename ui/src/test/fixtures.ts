@@ -2,12 +2,15 @@ import type { ApprovalDetail, ApprovalSummary, BypassRow, FeedRow, Impact, Sessi
 
 let nextID = 100;
 
+// feedRow is one audit row. Each is its own request unless the test says
+// otherwise: the feed merges rows that share a request_id.
 export function feedRow(over: Partial<FeedRow> = {}): FeedRow {
+  const id = over.id ?? nextID++;
   return {
-    id: nextID++,
+    id,
     at: '2026-09-26T10:15:00Z',
     kind: 'decision',
-    request_id: 'r1',
+    request_id: `r${id}`,
     session: 's1',
     human: 'alice',
     agent: 'coding-agent',
