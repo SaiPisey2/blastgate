@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import { mockFetch } from './test/fetch';
 import { emit } from './api';
@@ -32,7 +32,7 @@ describe('App', () => {
   it('a stream count beats a slower initial fetch', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    mockFetch({
+    const calls = mockFetch({
       'GET /api/me': { body: { name: 'bob', csrf: 'c' } },
       'GET /api/feed': { body: [] },
       'GET /api/approvals': async () => {
@@ -42,6 +42,7 @@ describe('App', () => {
     });
     render(<App />);
     await screen.findByText('bob');
+    await waitFor(() => expect(calls.some((c) => c.url.startsWith('/api/approvals'))).toBe(true));
     act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     await act(async () => release());

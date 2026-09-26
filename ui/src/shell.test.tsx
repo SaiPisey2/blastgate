@@ -248,7 +248,7 @@ describe('Auth', () => {
   it('the stream event wins over the initial pending fetch', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    mockFetch({
+    const calls = mockFetch({
       'GET /api/me': { body: ME },
       'GET /api/feed': { body: [] },
       'GET /api/approvals': async () => {
@@ -259,6 +259,7 @@ describe('Auth', () => {
     window.location.hash = '#/activity';
     renderWithMotion(<App />);
     await screen.findByText('bob');
+    await waitFor(() => expect(calls.some((c) => c.url.startsWith('/api/approvals'))).toBe(true));
     act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     // The slower fetch answers with an empty list: it must not undo the

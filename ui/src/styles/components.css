@@ -1758,7 +1758,7 @@
 
 .activity-row {
   display: grid;
-  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  grid-template-columns: minmax(5.5rem, max-content) minmax(0, 1fr) auto;
   gap: var(--s-4);
   align-items: baseline;
   padding: var(--s-3) var(--s-2);
@@ -1892,7 +1892,7 @@ a.activity-sentence:hover {
 
 .outside-row {
   display: grid;
-  grid-template-columns: 5.5rem minmax(0, 1fr) minmax(0, 1.4fr) 5.5rem;
+  grid-template-columns: minmax(5.5rem, max-content) minmax(0, 1fr) minmax(0, 1.4fr) 5.5rem;
   gap: var(--s-4);
   align-items: baseline;
   padding: var(--s-3) var(--s-2);

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import Activity, { resetOutsideNotice } from './Activity';
+import Activity, { resetOutsideNotice, SUMMARY_MS } from './Activity';
 import { announce } from '../components/Shell';
 import { emit, type FeedRow } from '../api';
 import { mockFetch, type Call } from '../test/fetch';
@@ -18,7 +18,10 @@ beforeEach(() => {
   resetOutsideNotice();
   vi.mocked(announce).mockClear();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const EVIL = '<img src=x onerror=alert(1)>';
 
@@ -37,6 +40,7 @@ const log = () => screen.getByRole('log');
 const rowEls = () => Array.from(log().querySelectorAll<HTMLElement>('.activity-row'));
 const names = () => rowEls().map((r) => r.querySelector('.activity-target')!.textContent);
 const rowOf = (text: string) => screen.getByText(text).closest<HTMLElement>('.activity-row')!;
+const summaryText = () => document.querySelector('.activity-summary')!.textContent;
 const feedCalls = (calls: Call[]) => calls.filter((c) => c.url.startsWith('/api/feed'));
 
 describe('Activity', () => {
@@ -348,6 +352,8 @@ describe('Activity', () => {
     expect(names().slice(0, 3)).toEqual(['live-9', 'live-8', 'live-7']);
     expect(screen.queryByRole('button', { name: /new/ })).toBeNull();
     expect(list.scrollTop).toBe(0);
+    // The pill is gone; focus lands on the list it filled, not the page.
+    expect(document.activeElement).toBe(list);
   });
 
   it('scrolling or the pointer over the list holds new rows too', async () => {
@@ -399,6 +405,143 @@ describe('Activity', () => {
     expect(pause.getAttribute('aria-pressed')).toBe('false');
     expect(names()).toEqual(['held-back-2', 'held-back', 'first']);
     expect(screen.queryByRole('button', { name: /new/ })).toBeNull();
+  });
+
+  it('the list is not a live region; one summary speaks for a burst', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockFetch({ 'GET /api/bypass': { body: [] }, 'GET /api/feed': { body: [ok({ id: 1, name: 'first' })] } });
+    render(<Activity />);
+    await screen.findByText('first');
+    expect(log().getAttribute('aria-live')).toBe('off');
+    expect(summaryText()).toBe('');
+    act(() => {
+      for (let i = 0; i < 3; i++) emit('audit', ok({ id: 10 + i, name: `burst-${i}` }));
+    });
+    expect(screen.getByText('burst-2')).toBeTruthy();
+    // Nothing is said at once; one summary covers the whole burst.
+    act(() => vi.advanceTimersByTime(SUMMARY_MS - 500));
+    expect(summaryText()).toBe('');
+    act(() => vi.advanceTimersByTime(500));
+    expect(summaryText()).toBe('3 new requests');
+
+    // Held rows are summarised as waiting.
+    fireEvent.pointerEnter(log());
+    act(() => emit('audit', ok({ id: 20, name: 'held-a' })));
+    act(() => emit('audit', ok({ id: 21, name: 'held-b' })));
+    act(() => vi.advanceTimersByTime(SUMMARY_MS));
+    expect(summaryText()).toBe('2 new requests waiting above the list');
+  });
+
+  it('load older and the chips never change the summary', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const full = Array.from({ length: 50 }, (_, i) => ok({ id: 500 - i, name: `p-${i}` }));
+    mockFetch({
+      'GET /api/bypass': { body: [] },
+      'GET /api/feed': (c) => ({ body: params(c).get('before') ? Array.from({ length: 20 }, (_, i) => ok({ id: 100 - i, name: `old-${i}` })) : full }),
+    });
+    render(<Activity />);
+    await screen.findByText('p-0');
+    act(() => emit('audit', ok({ id: 900, name: 'live-one' })));
+    act(() => vi.advanceTimersByTime(SUMMARY_MS));
+    expect(summaryText()).toBe('1 new request');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older' }));
+    expect(await screen.findByText('old-19')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Denied' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    act(() => vi.advanceTimersByTime(SUMMARY_MS * 2));
+    expect(summaryText()).toBe('1 new request');
+  });
+
+  it('the tint is forgotten once it has played, so a chip change does not replay it', async () => {
+    mockFetch({ 'GET /api/bypass': { body: [] }, 'GET /api/feed': { body: [] } });
+    render(<Activity />);
+    await screen.findByText('No requests yet.');
+    act(() => emit('audit', ok({ id: 1, name: 'arrived' })));
+    expect(rowOf('arrived').className).toContain('activity-row-fresh');
+    await waitFor(() => expect(rowOf('arrived').className).not.toContain('activity-row-fresh'));
+    await userEvent.click(screen.getByRole('button', { name: 'Denied' }));
+    await userEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(rowOf('arrived').className).not.toContain('activity-row-fresh');
+  });
+
+  it('while reading, an older row of a request on screen waits with the rest', async () => {
+    mockFetch({
+      'GET /api/bypass': { body: [] },
+      'GET /api/feed': { body: [ok({ id: 10, request_id: 'qa', name: 'a-req' }), ok({ id: 8, name: 'b-req' })] },
+    });
+    render(<Activity />);
+    await screen.findByText('a-req');
+    fireEvent.pointerEnter(log());
+    // Its decision (id 5) places the request below b-req (8).
+    act(() => emit('audit', feedRow({ id: 5, request_id: 'qa', kind: 'decision', status: 0, outcome: '', name: 'a-req' })));
+    expect(names()).toEqual(['a-req', 'b-req']);
+    fireEvent.pointerLeave(log());
+    act(() => emit('audit', ok({ id: 30, name: 'c-req' })));
+    expect(names()).toEqual(['c-req', 'b-req', 'a-req']);
+  });
+
+  it('the pill counts only what the chosen chip would show', async () => {
+    mockFetch({ 'GET /api/bypass': { body: [] }, 'GET /api/feed': { body: [feedRow({ id: 1, kind: 'result', decision: 'deny', status: 403, outcome: 'denied', name: 'd-0' })] } });
+    render(<Activity />);
+    await screen.findByText('d-0');
+    await userEvent.click(screen.getByRole('button', { name: 'Denied' }));
+    fireEvent.pointerEnter(log());
+    act(() => emit('audit', ok({ id: 2, name: 'allowed-live' })));
+    act(() => emit('audit', feedRow({ id: 3, kind: 'result', decision: 'deny', status: 403, outcome: 'denied', name: 'denied-live' })));
+    expect(screen.getByRole('button', { name: /new/ }).textContent).toBe('↑ 1 new');
+  });
+
+  it('while focus is in the list, a request on screen finishes in place', async () => {
+    mockFetch({
+      'GET /api/bypass': { body: [] },
+      'GET /api/feed': { body: [ok({ id: 9, name: 'top' }), feedRow({ id: 5, request_id: 'qx', kind: 'decision', status: 0, outcome: '', name: 'running' })] },
+    });
+    render(<Activity />);
+    await screen.findByText('running');
+    expect(within(rowOf('running')).getByText('In flight')).toBeTruthy();
+    const row = rowOf('running');
+    act(() => row.focus());
+    act(() => emit('audit', feedRow({ id: 12, request_id: 'qx', kind: 'result', status: 200, outcome: '', name: 'running' })));
+    expect(within(rowOf('running')).getByText('Allowed')).toBeTruthy();
+    expect(rowOf('running')).toBe(row);
+    expect(screen.queryByRole('button', { name: /new/ })).toBeNull();
+  });
+
+  it('while reading, an update that would show a hidden row waits behind the pill', async () => {
+    mockFetch({
+      'GET /api/bypass': { body: [] },
+      'GET /api/feed': {
+        body: [feedRow({ id: 9, kind: 'result', decision: 'hold', status: 403, outcome: 'held', name: 'held-top' }), feedRow({ id: 5, request_id: 'qh', kind: 'decision', decision: 'hold', status: 0, outcome: '', name: 'soon-held' })],
+      },
+    });
+    render(<Activity />);
+    await screen.findByText('soon-held');
+    await userEvent.click(screen.getByRole('button', { name: 'Waiting' }));
+    expect(names()).toEqual(['held-top']);
+    fireEvent.pointerEnter(log());
+    act(() => emit('audit', feedRow({ id: 12, request_id: 'qh', kind: 'result', decision: 'hold', status: 403, outcome: 'held', name: 'soon-held' })));
+    expect(names()).toEqual(['held-top']);
+    expect(screen.getByRole('button', { name: /new/ }).textContent).toBe('↑ 1 new');
+    await userEvent.click(screen.getByRole('button', { name: /new/ }));
+    expect(names()).toEqual(['held-top', 'soon-held']);
+  });
+
+  it('when the cap trims rows that load older reached, it offers them again', async () => {
+    const page = Array.from({ length: 1000 }, (_, i) => ok({ id: 5000 - i, name: `r-${i}` }));
+    mockFetch({
+      'GET /api/bypass': { body: [] },
+      'GET /api/feed': (c) => ({ body: params(c).get('before') ? [ok({ id: 10, name: 'deep' })] : page }),
+    });
+    render(<Activity />);
+    await screen.findByText('r-0');
+    await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
+    await screen.findByText('deep');
+    // A short page: nothing older to offer, for now.
+    expect(screen.queryByRole('button', { name: 'Load older' })).toBeNull();
+    act(() => emit('audit', ok({ id: 9000, name: 'newest' })));
+    expect(screen.queryByText('deep')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Load older' })).toBeTruthy();
   });
 
   it('the banner appears only when there are outside changes', async () => {

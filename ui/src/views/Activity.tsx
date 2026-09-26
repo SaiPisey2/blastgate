@@ -7,8 +7,8 @@ import Tag from '../components/Tag';
 import { announce } from '../components/Shell';
 import { useListKeys } from '../hooks/useListKeys';
 import { describe } from '../lib/describe';
-import { displayClass, fold, keyOf, minRawId, outcomeOf, type Entry } from '../lib/feedModel';
-import { clock } from '../lib/format';
+import { displayClass, fold, keyOf, MAX_ROWS, minRawId, outcomeOf, type Entry } from '../lib/feedModel';
+import { clock, plural } from '../lib/format';
 import type { Tone } from '../lib/friction';
 import { DUR } from '../motion';
 import { APPROVAL_ID, navigate } from '../router';
@@ -51,6 +51,29 @@ function matches(r: FeedRow, f: Filters): boolean {
 
 function shows(e: Entry, chip: Chip): boolean {
   return chip === 'All' || outcomeOf(e) === chip;
+}
+
+// countNew: requests the pill would add, as the reader would see them.
+// The held rows are folded into the list first, so a held row of a
+// request that is on screen but hidden by the chip counts once it would
+// show, and one that is already showing never counts.
+function countNew(rows: Entry[] | null, pending: FeedRow[], chip: Chip): number {
+  if (pending.length === 0 || rows === null) return 0;
+  const showing = new Set(rows.filter((e) => shows(e, chip)).map((e) => e.key));
+  const touched = new Set(pending.map(keyOf));
+  return fold(rows, pending, Infinity).filter((e) => touched.has(e.key) && !showing.has(e.key) && shows(e, chip)).length;
+}
+
+// The live summary is spoken at most this often. The list itself is not
+// a live region: read node by node, a burst of rows or a page of older
+// ones would talk over everything else (spec §8).
+export const SUMMARY_MS = 3000;
+
+function summary(inserted: number, held: number): string {
+  const parts: string[] = [];
+  if (inserted > 0) parts.push(`${inserted} new ${plural(inserted, 'request')}`);
+  if (held > 0) parts.push(inserted > 0 ? `${held} more waiting above the list` : `${held} new ${plural(held, 'request')} waiting above the list`);
+  return parts.join('. ');
 }
 
 // The outside-changes banner is spoken once per page load. It stays on
@@ -156,7 +179,68 @@ export default function Activity() {
   const pendingRef = useRef<FeedRow[]>([]);
   const pausedRef = useRef(false);
   const pointerInside = useRef(false);
+  const chipRef = useRef(chip);
+  // Set inside a rows updater when the cap trims the oldest requests off
+  // the bottom; an effect then offers "Load older" again to reach them.
+  const trimmed = useRef(false);
+  const [said, setSaid] = useState('');
+  const inserted = useRef(0);
+  const sayTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const tintTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   rowsRef.current = rows;
+  chipRef.current = chip;
+
+  useEffect(() => {
+    const timers = tintTimers.current;
+    return () => {
+      clearTimeout(sayTimer.current);
+      timers.forEach(clearTimeout);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!trimmed.current) return;
+    trimmed.current = false;
+    setMore(true);
+  }, [rows]);
+
+  // foldLive folds live rows under the cap, noting when it trims.
+  const foldLive = (prev: Entry[], add: FeedRow[]): Entry[] => {
+    const all = fold(prev, add, Infinity);
+    if (all.length <= MAX_ROWS) return all;
+    trimmed.current = true;
+    return all.slice(0, MAX_ROWS);
+  };
+
+  // say schedules one summary for everything that happened in the next
+  // SUMMARY_MS: what went in, and what is waiting behind the pill then.
+  // Only the stream calls it; Load older and the chips never do.
+  const say = () => {
+    if (sayTimer.current !== undefined) return;
+    sayTimer.current = setTimeout(() => {
+      sayTimer.current = undefined;
+      const text = summary(inserted.current, countNew(rowsRef.current, pendingRef.current, chipRef.current));
+      inserted.current = 0;
+      if (text) setSaid(text);
+    }, SUMMARY_MS);
+  };
+
+  // tint marks requests as just arrived for the length of the tint, then
+  // forgets them: a key left in the set would replay the tint every time
+  // a chip change remounts its row.
+  const tint = (keys: string[]) => {
+    if (keys.length === 0) return;
+    setFresh((prev) => new Set([...prev, ...keys]));
+    const t = setTimeout(() => {
+      tintTimers.current.delete(t);
+      setFresh((prev) => {
+        const next = new Set(prev);
+        keys.forEach((k) => next.delete(k));
+        return next;
+      });
+    }, DUR.tint * 1000);
+    tintTimers.current.add(t);
+  };
 
   // reading: is someone looking at the list right now? Scrolled down,
   // focus or pointer in it, or paused. Read from the DOM at the moment a
@@ -176,12 +260,13 @@ export default function Activity() {
     setPending([]);
     if (all.length === 0) return;
     const before = new Set((rowsRef.current ?? []).map((e) => e.key));
-    setRows((prev) => (prev === null ? prev : fold(prev, all)));
-    setFresh((prev) => {
-      const next = new Set(prev);
-      for (const r of all) if (!before.has(keyOf(r))) next.add(keyOf(r));
-      return next;
-    });
+    const added = [...new Set(all.map(keyOf))].filter((k) => !before.has(k));
+    setRows((prev) => (prev === null ? prev : foldLive(prev, all)));
+    tint(added);
+    if (added.length > 0) {
+      inserted.current += added.length;
+      say();
+    }
   };
 
   useEffect(() => {
@@ -209,7 +294,8 @@ export default function Activity() {
         // A full page of raw rows means there may be more, however few
         // requests they folded into.
         setMore(got.length >= PAGE);
-        setFresh(new Set(early.map(keyOf)));
+        setFresh(new Set());
+        tint(early.map(keyOf));
         setError('');
       },
       (e) => {
@@ -236,30 +322,35 @@ export default function Activity() {
         // resumed stream repeating it) changes the row's words but not
         // its place, so it can land under a reader. An older row would
         // move the request down, and waits with the rest.
+        // Nor may an update that shows or hides the row under the chip
+        // the reader chose: that adds or removes a line mid-list.
         const key = keyOf(row);
         const shown = rowsRef.current?.find((e) => e.key === key);
         if (shown && row.id >= shown.first) {
-          setRows((prev) => (prev === null ? prev : fold(prev, [row])));
-          return;
+          const after = fold([shown], [row])[0];
+          if (shows(shown, chipRef.current) === shows(after, chipRef.current)) {
+            setRows((prev) => (prev === null ? prev : foldLive(prev, [row])));
+            return;
+          }
         }
         pendingRef.current = [...pendingRef.current, row];
         setPending(pendingRef.current);
+        say();
       }),
     // Subscribed once: flush and reading touch only refs and setters.
     [],
   );
 
-  // Requests the pill would add, as the reader would see them: folded,
-  // not on screen yet, and passing the chip they have chosen.
-  const newCount = useMemo(() => {
-    if (pending.length === 0 || rows === null) return 0;
-    const onScreen = new Set(rows.map((e) => e.key));
-    return fold([], pending, Infinity).filter((e) => !onScreen.has(e.key) && shows(e, chip)).length;
-  }, [pending, rows, chip]);
+  const newCount = useMemo(() => countNew(rows, pending, chip), [pending, rows, chip]);
 
   function showNew() {
     flush([]);
-    if (listRef.current) listRef.current.scrollTop = 0;
+    // The pill unmounts once clicked; focus goes to the list it filled
+    // rather than falling back to the page.
+    if (listRef.current) {
+      listRef.current.scrollTop = 0;
+      listRef.current.focus();
+    }
   }
 
   function togglePause() {
@@ -381,11 +472,16 @@ export default function Activity() {
         />
       )}
 
+      <p className="visually-hidden activity-summary" role="status">
+        {said}
+      </p>
+
       {/* Mounted even when empty, so a reader's scroll, focus and pointer
           are tracked on one element for the life of the page. */}
       <div
         ref={listRef}
         role="log"
+        aria-live="off"
         aria-label="Requests"
         className="activity-list"
         hidden={rows === null || visible.length === 0}
