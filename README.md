@@ -1,5 +1,7 @@
 # blastgate
 
+![The approval queue in blastgate's web UI: an exec running SQL and a scale to zero, both held for a person to decide](assets/ui-queue.png)
+
 A gateway between AI agents and Kubernetes. An agent's kubectl talks to blastgate,
 and blastgate forwards each request **as the human who owns the agent's session**,
 using Kubernetes impersonation — so the cluster's own RBAC decides what the agent
@@ -10,6 +12,41 @@ Every write is measured before it reaches the cluster — what it would delete,
 which Services it would leave without backends, whether it destroys data — and put
 to a policy that allows it, refuses it, or holds it until a person approves. What
 cannot be measured is held.
+
+Held requests wait in a queue that a person decides from the web UI or the CLI, and an
+observe-only admission webhook records writes that reached the cluster without going
+through blastgate at all.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  agent["coding-agent<br/>session kubeconfig"]
+  browser["approver's browser"]
+  cli["blastgate CLI<br/>approve, session, approver"]
+  subgraph gw["blastgate serve"]
+    proxy["proxy<br/>BLASTGATE_LISTEN<br/>measure + policy"]
+    adminapi["admin UI + API<br/>BLASTGATE_ADMIN_LISTEN"]
+    webhook["observe webhook<br/>BLASTGATE_WEBHOOK_LISTEN"]
+    store[("store: SQLite<br/>audit, approvals,<br/>sessions, bypass")]
+  end
+  api["Kubernetes API server"]
+  other["kubectl with its<br/>own credentials"]
+  agent -->|kubectl| proxy
+  browser -->|"HTTPS, cookie<br/>+ CSRF header"| adminapi
+  cli --> store
+  proxy --> store
+  adminapi --> store
+  webhook -->|bypass rows| store
+  proxy -->|impersonating<br/>the human| api
+  webhook -.-|"AdmissionReview for<br/>every write, always allowed"| api
+  api -.-|"writes around blastgate"| other
+```
+
+The agent talks only to the proxy, which measures, decides and forwards. The admin
+listener serves the web UI and its JSON API to approvers, and the webhook listener,
+off by default, is called by the API server for every write so that writes made around
+blastgate leave a record. All three are separate listeners and share one store.
 
 ## Try it
 
@@ -42,6 +79,8 @@ blastgate approvals --status pending
 blastgate approve 3f9c… --by bob
 ```
 
+Or approve it in the browser: see [Using the web UI](#using-the-web-ui).
+
 ```sh
 # Shell 2 again
 kubectl delete pvc data       # the retry is re-measured, then forwarded
@@ -70,6 +109,13 @@ own writes.
 | `BLASTGATE_SCORE_BUDGET` | `5s` | how long measuring one write may take; hold plus **twice** the budget at most `55s` (a held request's retry is re-scored, and its snapshot is bounded by the same budget) |
 | `BLASTGATE_APPROVAL_TTL` | `15m` | how long an approval stays spendable |
 | `BLASTGATE_POLICY` | built in | a policy file (see [Policy](#policy)) |
+| `BLASTGATE_LISTEN` | `127.0.0.1:8443` | the proxy the agent's kubectl talks to |
+| `BLASTGATE_ADMIN_LISTEN` | `127.0.0.1:8444` | the web UI and its API (see [Admin security](#admin-security)) |
+| `BLASTGATE_WEBHOOK_LISTEN` | unset: off | the observe webhook (see [Writes that go around blastgate](#writes-that-go-around-blastgate)) |
+| `BLASTGATE_WEBHOOK_CLIENT_CA` | unset | a PEM file of CAs; when set, the webhook requires a client certificate signed by one of them. Refused without `BLASTGATE_WEBHOOK_LISTEN` |
+| `BLASTGATE_BYPASS_IGNORE` | `system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver` | username prefixes the webhook never records; a value replaces the default list, it does not add to it |
+| `BLASTGATE_ALLOW_REMOTE` | unset | `1` lets any of the three listeners bind a non-loopback address; without it `serve` refuses to start |
+| `BLASTGATE_TLS_HOSTS` | `127.0.0.1,localhost` | the names and addresses the serving certificate covers, for all three listeners |
 
 ## Service account
 
@@ -158,6 +204,91 @@ request, expires after `BLASTGATE_APPROVAL_TTL`, and a pending one after an hour
 Under the default policy every exec, attach and port-forward is held, since none can
 be measured: approve it while the command waits, or approve and retry.
 
+## Using the web UI
+
+`blastgate serve` also serves an approver UI, on `https://127.0.0.1:8444` by default.
+Nobody can sign in until an approver exists:
+
+```sh
+# As blastgate's user, with its data directory. The token is printed once, to stdout.
+(umask 077; blastgate approver new --name bob > bob.token)
+blastgate approver list                 # ID, NAME, CREATED, STATE
+blastgate approver revoke <id>          # also ends every browser session bob holds
+```
+
+1. **Sign in.** Open the admin address and paste the `bga_…` token. The certificate is
+   blastgate's serving certificate, signed by its own CA (`<data dir>/tls/ca.crt`): trust
+   that CA in the browser, or accept the warning once you have checked it is that CA.
+2. **Queue.** Every pending approval as a card: the class, the rule that held it, the
+   object, the human and agent it came from, and what approving it would do (objects
+   affected, volumes destroyed, Services emptied, disruption budgets broken, and the undo).
+   The count in the navigation updates live over a server-sent event stream.
+3. **Impact.** *Details* opens the approval: the parsed action, and the measured impact as
+   a tree, object by object, each with why it is affected.
+
+   ![The impact tree for a held claim delete: the claim, and the volume whose data it destroys](assets/ui-impact.png)
+
+4. **Approve or deny.** The decision is recorded under the name of the signed-in approver,
+   never a name from the request. The agent's held request is released (or refused) exactly
+   as with `blastgate approve`/`deny`, which keep working.
+
+The other pages:
+
+- **Feed**: every request the agents sent, newest first, filtered by agent, human, class
+  or decision, with new rows arriving live.
+
+  ![The live feed: reads allowed, and an exec, a scale and a claim delete held](assets/ui-feed.png)
+
+- **Sessions**: the agents' sessions, with *Revoke*, which stops the session's next request.
+- **Policy**: the running policy, and a replay of a candidate over the last hours of
+  decisions, the same as `blastgate replay`. It changes nothing: to adopt a policy, change
+  the file and restart `serve`.
+
+  ![A policy replay: a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
+
+- **Bypass**: the writes the webhook recorded (below).
+
+`scripts/demo.sh` builds that scene on the kind fixture: it starts blastgate, registers
+the webhook, creates the approver `bob` and a session for alice's `coding-agent`, holds a
+claim delete, a scale to zero and an exec running SQL, and makes one write with the admin
+kubeconfig. The screenshots here are from it.
+
+```sh
+make fixture-up && make build && scripts/demo.sh
+```
+
+## Admin security
+
+The admin listener decides held writes, so it is locked down the same way from the
+first run:
+
+- **Its own listener**, `BLASTGATE_ADMIN_LISTEN`, on loopback by default. A non-loopback
+  address needs `BLASTGATE_ALLOW_REMOTE=1`, as the proxy does. For a remote approver,
+  forward the port over SSH rather than opening it.
+- **No default account and no open mode.** Every `/api/*` route except `POST /api/login`
+  answers 401 without a session. The static UI files are served to anyone; they hold no data.
+- **Login tokens** are `bga_` and 32 random bytes, stored only as a SHA-256 hash. Login
+  attempts are limited to 5 a minute per remote address (a success counts too), then 429,
+  and every failed attempt is logged, without the token.
+- **Browser sessions** last 12 hours, are stored only as a hash, and end at once on *Sign
+  out* or `blastgate approver revoke`. The cookie is `blastgate_session` with `HttpOnly;
+  Secure; SameSite=Strict; Path=/`.
+- **CSRF:** every call that is not a GET must carry `X-Blastgate-CSRF` equal to the
+  session's CSRF value (returned by login and `/api/me`), compared in constant time. A
+  page on another origin that gets the browser to send the cookie still cannot approve.
+- **Headers:** `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src
+  'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri
+  'none'; form-action 'self'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on the API, and no CORS headers.
+- **The API never returns** a token, a token hash, an approval nonce, the signing key or a
+  request body. It does return exec command lines, which are in the stored action. Object
+  names and command lines are rendered as text, never as HTML.
+
+The admin listener is on loopback, and loopback is reachable by every process on the
+machine, the agent's included if it runs there. What keeps the agent out is the login
+token: keep approver tokens where the agent cannot read them, for the same reason as the
+signing key.
+
 ## Policy
 
 The built-in policy's rules as shipped (`internal/policy/default.yaml`, whose header
@@ -214,7 +345,7 @@ It fails closed:
   duplicated key, a duplicated rule name, more than one YAML document — stops `serve`
   from starting; it is never half-applied.
 
-Before changing the policy, see what the change would have done:
+Before changing the policy, see what the change would have done (or use the Policy page):
 
 ```sh
 blastgate replay --policy candidate.yaml --since 168h
@@ -255,6 +386,88 @@ restores **objects, not data**: the contents of a deleted volume are gone.
 A write whose snapshot fails, or does not finish within `BLASTGATE_SCORE_BUDGET`, is not
 forwarded. An approval is spent only after its request's snapshot and decision row are
 written, so a failed snapshot leaves the approval for the agent's next retry.
+
+## Writes that go around blastgate
+
+blastgate only sees what is sent to it. A kubeconfig that talks to the API server
+directly, an agent's own admin credential or a service-account token it found, goes
+around it. The observe webhook does not stop those writes; it records them.
+
+```sh
+# The API server must reach this address, and the certificate must cover the name used.
+export BLASTGATE_WEBHOOK_LISTEN=10.0.0.5:8445
+export BLASTGATE_ALLOW_REMOTE=1
+export BLASTGATE_TLS_HOSTS=127.0.0.1,localhost,10.0.0.5
+blastgate serve
+
+blastgate webhook-config --url https://10.0.0.5:8445/validate > observe.yaml
+kubectl apply -f observe.yaml       # read it first; it is cluster-wide
+```
+
+`webhook-config` prints a `ValidatingWebhookConfiguration` named `blastgate-observe`
+rather than applying it. It embeds blastgate's CA, and refuses a URL whose host the serving
+certificate does not cover, since the API server would then fail TLS on every call and,
+under `failurePolicy: Ignore`, record nothing without saying so. The registration pins:
+
+- `failurePolicy: Ignore` and `timeoutSeconds: 5`: blastgate down, slow or broken means
+  writes go through unrecorded, never that writes fail.
+- `sideEffects: None`, so server-side dry runs reach it too (they are recorded with
+  `dry_run` set).
+- Every `CREATE`, `UPDATE`, `DELETE` and `CONNECT` (exec, attach, port-forward) on every
+  resource.
+
+**It never blocks.** Every review it can read is answered `allowed: true`; anything else gets an error status, which `failurePolicy: Ignore` turns into an allowed write.
+
+**What counts as a bypass:** a write whose user info carries no `blastgate-session` extra
+(the proxy sets it on every request it forwards) and whose username does not start with a
+prefix in `BLASTGATE_BYPASS_IGNORE`. The default list is Kubernetes' own components, so
+ReplicaSets, the garbage collector and kubelets do not drown the records that matter:
+
+| Prefix | Who |
+|---|---|
+| `system:node:` | kubelets |
+| `system:kube-` | the scheduler, the controller manager, kube-proxy |
+| `system:serviceaccount:kube-system:` | **every** service account in kube-system, the controllers among them |
+| `system:apiserver` | the API server itself |
+
+The records are in the Bypass page and `GET /api/bypass`, and the table is append-only.
+
+![Bypass alerts: a configmap created with the admin kubeconfig, around blastgate](assets/ui-bypass.png)
+
+Know its limits:
+
+- **The kube-system blind spot.** The default list hides every kube-system service
+  account, not only the controllers. An agent running as, or holding the token of, a
+  service account in kube-system is not recorded. Keep agents out of kube-system, or
+  narrow the list (a value replaces the whole default).
+- **The session extra can be forged by anyone allowed to impersonate it.** Whoever may
+  impersonate `userextras/blastgate-session` (cluster-admin, or anyone holding
+  blastgate's upstream credential) can mark a write as having come through blastgate, and
+  it is not recorded. The record is evidence against a kubeconfig that skips the gateway,
+  not against someone who already holds impersonation rights.
+- **Without `BLASTGATE_WEBHOOK_CLIENT_CA`, anyone who can reach the webhook port can post
+  reviews.** A posted review can only add bypass rows, false ones included, and never
+  blocks anything, but set the client CA wherever the port is reachable by more than the
+  API server. The API server presents a client certificate to webhooks through its
+  admission configuration (`--admission-control-config-file`), a Kubernetes mechanism the
+  fixture does not exercise:
+
+  ```yaml
+  apiVersion: apiserver.config.k8s.io/v1
+  kind: AdmissionConfiguration
+  plugins:
+  - name: ValidatingAdmissionWebhook
+    configuration:
+      apiVersion: apiserver.config.k8s.io/v1
+      kind: WebhookAdmissionConfiguration
+      kubeConfigFile: /etc/kubernetes/blastgate-webhook.kubeconfig
+  ```
+
+  where that kubeconfig has a user named after the webhook's `host:port`
+  (`10.0.0.5:8445`) with a `client-certificate` and `client-key` signed by a CA in
+  `BLASTGATE_WEBHOOK_CLIENT_CA`.
+- A review over 8 MiB, or one arriving while 32 are already in flight, is let through
+  unrecorded and logged.
 
 ## Who can issue sessions
 
@@ -313,8 +526,7 @@ A session for anyone else is then refused by the API server itself.
 - Measure a create or update sent as protobuf. kubectl's own generators
   (`kubectl create configmap`, `kubectl create deployment`) send protobuf, which a dry-run
   cannot replay faithfully, so they are held; `kubectl apply -f` sends JSON and is measured.
-- Offer a web UI. Approvals are given with the CLI on the blastgate host (it needs the
-  data directory and the signing key).
+- Block a write made around it. The webhook records such writes; it never refuses one.
 - Carry the human's groups: impersonation here sets the user only, so RBAC must bind
   the user name.
 - Stop an agent that holds other credentials to the cluster.
@@ -334,10 +546,23 @@ completes; an exec running `psql`, once denied, stays refused and leaves no seco
 approval pending; a held server-side apply is released by its approval on kubectl's
 retry; an approved `deletecollection` and an approved cluster-scoped delete are
 snapshotted and forwarded; `kubectl debug` is held; and replay reports what a candidate
-policy would change. The suite deletes the claim and changes the demo workloads, so run
+policy would change. The Phase 2 scenarios sign in to the admin API as an approver created
+with `approver new`: approve and deny from the API release and refuse kubectl's retry,
+revoking a session from the API stops it, replay from the API reports the change, the
+stream delivers a held request over HTTP/1.1 and HTTP/2, a write with the admin kubeconfig
+is recorded as a bypass, and neither a write through blastgate nor a controller's writes
+are. The suite deletes the claim and changes the demo workloads, so run
 it on a fresh fixture: `make fixture-down; make fixture-up && make fixture-test`. On a list call against that cluster: direct p50 877µs, p95
 1.416ms; through blastgate p50 1.474ms, p95 2.133ms. Added latency: p50 **597µs**,
 p95 **717µs**.
+
+For the webhook tests the kind API server has to reach a listener on the host. The
+suite tries, in order: the kind network's gateway address, which is the host on Linux
+and in CI and the default path; then, on Docker Desktop, where no host interface has
+that address, `127.0.0.1` registered as `host.docker.internal`, which Docker Desktop
+forwards to the host's loopback, so nothing beyond the machine can connect. It never
+binds a LAN address unless `BLASTGATE_E2E_ALLOW_LAN=1` is set. With no route reachable
+the webhook tests skip and say so.
 
 ## License
 
