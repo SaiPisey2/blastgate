@@ -20,16 +20,26 @@ export function parseObject(raw: string): ObjectRef {
 export type TreeNode = { key: string; ref: ObjectRef; effects: Effect[]; children: TreeNode[] };
 export type TreeGroup = { key: string; label: string; roots: TreeNode[]; objects: number };
 
-// Which kinds own which, by the naming Kubernetes' own controllers use: a
-// ReplicaSet is named after its Deployment plus a hash, a Pod after its
-// ReplicaSet (or StatefulSet, DaemonSet, Job) plus a suffix. The engine
-// sends effects without ownerReferences, so this is only a display
+// Which kinds own which, by the names Kubernetes' own controllers give
+// what they create: a ReplicaSet is its Deployment's name plus a hash, a
+// Pod is its ReplicaSet's (or DaemonSet's, Job's) name plus five random
+// characters, a StatefulSet's pods add an ordinal, a CronJob's jobs add a
+// schedule timestamp. The part after "<owner>-" must have that shape, not
+// merely exist: otherwise web-api-7d9f8c6b5, whose own Deployment is not
+// in the impact, would be drawn under an unrelated Deployment "web". The
+// engine sends effects without ownerReferences, so this is only a display
 // grouping; an object whose owner cannot be inferred stays at the top of
 // its namespace, never dropped.
-const OWNERS: Record<string, string[]> = {
-  'apps/ReplicaSet': ['apps/Deployment'],
-  Pod: ['apps/ReplicaSet', 'apps/StatefulSet', 'apps/DaemonSet', 'batch/Job'],
-  'batch/Job': ['batch/CronJob'],
+const POD_SUFFIX = /^[a-z0-9]{5}$/;
+const OWNERS: Record<string, { owner: string; rest: RegExp }[]> = {
+  'apps/ReplicaSet': [{ owner: 'apps/Deployment', rest: /^[a-z0-9]{1,10}$/ }],
+  Pod: [
+    { owner: 'apps/ReplicaSet', rest: POD_SUFFIX },
+    { owner: 'apps/DaemonSet', rest: POD_SUFFIX },
+    { owner: 'batch/Job', rest: POD_SUFFIX },
+    { owner: 'apps/StatefulSet', rest: /^\d+$/ },
+  ],
+  'batch/Job': [{ owner: 'batch/CronJob', rest: /^\d+$/ }],
 };
 
 const gk = (r: ObjectRef) => (r.group ? `${r.group}/${r.kind}` : r.kind);
@@ -45,7 +55,12 @@ export const UNRECOGNISED = '(unrecognised)';
 export function buildTree(effects: Effect[]): TreeGroup[] {
   const nodes = new Map<string, TreeNode>();
   const order: TreeNode[] = [];
-  for (const ef of effects) {
+  for (const raw of effects) {
+    // The impact is stored JSON: a null entry is skipped (there is nothing
+    // to show), and a non-string object becomes '' so the effect still
+    // lands in the unrecognised group instead of crashing or vanishing.
+    if (!raw || typeof raw !== 'object') continue;
+    const ef: Effect = typeof raw.object === 'string' ? raw : { ...raw, object: '' };
     const ref = parseObject(ef.object);
     // Unparsed strings key on the raw text, parsed ones on their parts, so
     // the two can never merge into one node by accident.
@@ -95,10 +110,11 @@ export function buildTree(effects: Effect[]): TreeGroup[] {
     if (!owners || n.ref.namespace === '') return undefined;
     let best: TreeNode | undefined;
     for (const p of live) {
-      if (p === n || !p.ref.parsed || p.ref.namespace !== n.ref.namespace || !owners.includes(gk(p.ref))) continue;
-      if (!n.ref.name.startsWith(p.ref.name + '-')) continue;
-      // The longest matching name is the nearest owner: web-api-x belongs
-      // to web-api, not to web.
+      if (p === n || !p.ref.parsed || p.ref.namespace !== n.ref.namespace) continue;
+      const rule = owners.find((o) => o.owner === gk(p.ref));
+      if (!rule || !n.ref.name.startsWith(p.ref.name + '-')) continue;
+      if (!rule.rest.test(n.ref.name.slice(p.ref.name.length + 1))) continue;
+      // Should two owners both fit, the longest name is the nearer one.
       if (!best || p.ref.name.length > best.ref.name.length) best = p;
     }
     return best;

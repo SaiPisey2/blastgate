@@ -89,6 +89,39 @@ describe('Approval', () => {
     expect(calls.find((c) => c.method === 'POST')!.headers['x-blastgate-csrf']).toBe('tok');
   });
 
+  // The details page is a second place to approve from, so it must ask
+  // for the same typed confirmation as the queue does.
+  for (const [label, over] of [
+    ['destroying data', { class: 'TERMINAL', data_destroyed: 1 }],
+    ['an empty class', { class: '', data_destroyed: 0 }],
+    ['an unknown class', { class: 'SOMETHING_NEW', data_destroyed: 0 }],
+  ] as const) {
+    it(`approving ${label} from the details page needs the phrase typed`, async () => {
+      const s = summary({ ...over, namespace: 'team-a', name: 'web', resource: 'deployments' });
+      const calls = mockFetch({
+        [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: over.class, dataDestroyed: over.data_destroyed })) },
+        [`POST /api/approvals/${ID1}/approve`]: { body: {} },
+      });
+      render(<Approval id={ID1} />);
+      const card = await screen.findByRole('article');
+      expect(card.dataset.severity).toBe('severe');
+      await userEvent.click(within(card).getByRole('button', { name: /^approve/i }));
+      const confirm = within(card).getByRole('button', { name: /confirm approve/i }) as HTMLButtonElement;
+      // Past the arming delay, and still inert without the phrase.
+      await new Promise((r) => setTimeout(r, 350));
+      expect(confirm.disabled).toBe(true);
+      await userEvent.click(confirm);
+      expect(calls.some((c) => c.method === 'POST')).toBe(false);
+      const typed = within(card).getByLabelText(/type team-a to approve/i);
+      await userEvent.type(typed, 'team-');
+      expect(confirm.disabled).toBe(true);
+      await userEvent.type(typed, 'a');
+      expect(confirm.disabled).toBe(false);
+      await userEvent.click(confirm);
+      await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    });
+  }
+
   it('an unknown approval says so', async () => {
     mockFetch({});
     render(<Approval id={ID1} />);

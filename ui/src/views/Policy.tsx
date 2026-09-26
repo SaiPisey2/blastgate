@@ -214,7 +214,10 @@ function Result({ r }: { r: ReplayResult }) {
                     {clock(c.at)}
                   </td>
                   <td data-label="Request">
-                    <span className="verb">{c.verb}</span> <span className="resource">{c.resource}</span> {target(c.namespace, c.name)}
+                    {/* One span: on narrow screens the cell is a flex row. */}
+                    <span>
+                      <span className="verb">{c.verb}</span> <span className="resource">{c.resource}</span> {target(c.namespace, c.name)}
+                    </span>
                   </td>
                   <td data-label="Rule">
                     <span className="change">

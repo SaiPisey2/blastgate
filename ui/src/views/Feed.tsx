@@ -240,22 +240,27 @@ export default function Feed() {
                     {r.verb}
                   </td>
                   <td data-label="Resource" className="resource">
-                    {r.resource}
-                    {r.subresource && <span className="dim">/{r.subresource}</span>}
+                    {/* One span: on narrow screens the cell is a flex row. */}
+                    <span>
+                      {r.resource}
+                      {r.subresource && <span className="dim">/{r.subresource}</span>}
+                    </span>
                   </td>
                   <td data-label="Target">{target(r.namespace, r.name)}</td>
                   <td data-label="Class">
                     <ClassBadge cls={r.class} />
                   </td>
                   <td data-label="Decision">
-                    <DecisionChip decision={r.decision} />
-                    {/* Checked before it becomes a link: approval_id is
-                        API data, and only a real id may reach the hash. */}
-                    {APPROVAL_ID.test(r.approval_id) && (
-                      <a className="row-link" href={`#/approvals/${r.approval_id}`} aria-label={`Approval for ${r.verb} ${r.name}`}>
-                        approval
-                      </a>
-                    )}
+                    <span>
+                      <DecisionChip decision={r.decision} />
+                      {/* Checked before it becomes a link: approval_id is
+                          API data, and only a real id may reach the hash. */}
+                      {APPROVAL_ID.test(r.approval_id) && (
+                        <a className="row-link" href={`#/approvals/${r.approval_id}`} aria-label={`Approval for ${r.verb} ${r.name}`}>
+                          approval
+                        </a>
+                      )}
+                    </span>
                   </td>
                   <td data-label="Rule">
                     <code className="rule">{r.rule}</code>

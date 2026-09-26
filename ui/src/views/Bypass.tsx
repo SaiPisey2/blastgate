@@ -123,9 +123,10 @@ export default function Bypass() {
                       {r.subresource && <span className="dim">/{r.subresource}</span>}
                     </span>
                   </td>
-                  <td data-label="Target">{target(r.namespace, r.name)}
+                  <td data-label="Namespace / name">{target(r.namespace, r.name)}</td>
+                  <td data-label="Dry run">
+                    {r.dry_run ? <span className="chip chip-neutral">dry run</span> : <span className="dim">—</span>}
                   </td>
-                  <td data-label="Dry run">{r.dry_run ? <span className="chip chip-neutral">dry run</span> : <span className="dim">—</span>}</td>
                 </tr>
               ))}
             </tbody>
