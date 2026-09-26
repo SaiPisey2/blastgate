@@ -2132,3 +2132,20 @@ a.activity-sentence:focus-visible {
     margin-top: var(--s-2);
   }
 }
+
+/* Phone width: the three facts stack, one per line. Two columns left
+   "Undo" alone on a second row under a tall "What it affects", with a
+   hole under "Asked by". */
+@media (max-width: 480px) {
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fact {
+    padding: var(--s-3) 0;
+  }
+
+  .fact + .fact {
+    border-top: 1px solid var(--line);
+  }
+}
