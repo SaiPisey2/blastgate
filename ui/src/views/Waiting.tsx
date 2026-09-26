@@ -8,7 +8,7 @@ import Button from '../components/Button';
 import { useListKeys } from '../hooks/useListKeys';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { describe } from '../lib/describe';
-import { ago, useNow } from '../lib/format';
+import { ago, hhmm, useNow } from '../lib/format';
 import { frictionOf } from '../lib/friction';
 import { AnimatePresence, DUR, EASE, m, useIsPresent } from '../motion';
 
@@ -45,7 +45,6 @@ export function resetLastDecision() {
   lastDecision = null;
 }
 
-const hhmm = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
 
 function sentenceOf(s: ApprovalSummary): string {
   return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name }).sentence;
@@ -72,6 +71,11 @@ export default function Waiting({ me = '' }: { me?: string }) {
   // request leaves the list; on a wide one it stays, marked gone.
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState('');
+  // keyed: the selection last moved by key. A row the selection leaves
+  // while the pointer rests on it turns hovered, and the hover rule's
+  // colour fade would play: a keyboard move must stay instant (spec §7).
+  // The pointer moving again hands the list back to hover.
+  const [keyed, setKeyed] = useState(false);
 
   // The last summary seen for each id, so a request that leaves the list
   // while it is being read can still say what it was.
@@ -196,9 +200,8 @@ export default function Waiting({ me = '' }: { me?: string }) {
     const target = h ?? (rows.length === 0 ? titleRef.current : null);
     if (!target) return;
     focusNext.current = false;
-    // The heading is not a control; -1 lets it hold focus without
-    // becoming a tab stop.
-    target.tabIndex = -1;
+    // Both headings carry tabIndex -1 themselves: they hold focus without
+    // becoming tab stops.
     target.focus();
   });
 
@@ -225,12 +228,12 @@ export default function Waiting({ me = '' }: { me?: string }) {
   const keys = useListKeys({
     count: rows.length,
     index: selectedIndex,
-    onMove: (i) => choose(rows[i].id),
+    onMove: (i) => {
+      setKeyed(true);
+      choose(rows[i].id);
+    },
     onOpen: () => {
-      const h = panelRef.current?.querySelector<HTMLElement>('h2');
-      if (!h) return;
-      h.tabIndex = -1;
-      h.focus();
+      panelRef.current?.querySelector<HTMLElement>('h2')?.focus();
     },
   });
 
@@ -250,7 +253,7 @@ export default function Waiting({ me = '' }: { me?: string }) {
 
   return (
     <div className="page waiting">
-      <h1 ref={titleRef} id={titleId} className={wide ? 'waiting-title' : 'waiting-title visually-hidden'}>
+      <h1 ref={titleRef} id={titleId} className={wide ? 'waiting-title' : 'waiting-title visually-hidden'} tabIndex={-1}>
         Waiting for you
       </h1>
 
@@ -279,7 +282,7 @@ export default function Waiting({ me = '' }: { me?: string }) {
           title="Nothing is waiting for you."
           sub={
             lastDecision
-              ? `Last decision at ${hhmm.format(lastDecision)}. Held requests appear here the moment an agent makes one.`
+              ? `Last decision at ${hhmm(lastDecision)}. Held requests appear here the moment an agent makes one.`
               : 'Held requests appear here the moment an agent makes one.'
           }
         />
@@ -289,7 +292,8 @@ export default function Waiting({ me = '' }: { me?: string }) {
         (wide ? (
           <div className="waiting-split">
             <ul
-              className="waiting-list"
+              className={keyed ? 'waiting-list is-keyboard' : 'waiting-list'}
+              onPointerMove={keyed ? () => setKeyed(false) : undefined}
               role="listbox"
               aria-labelledby={titleId}
               aria-activedescendant={selectedIndex >= 0 ? `${listId}-${rows[selectedIndex].id}` : undefined}
@@ -366,7 +370,7 @@ function Gone({ summary: s }: { summary: ApprovalSummary }) {
   words = words.charAt(0).toLowerCase() + words.slice(1);
   return (
     <article className="decision" aria-labelledby={qid}>
-      <h2 id={qid} className="decision-q">
+      <h2 id={qid} className="decision-q" tabIndex={-1}>
         {s.agent || 'An agent'} wanted to {words}
         {ident && <span className="mono">{ident}</span>}
       </h2>

@@ -1217,6 +1217,13 @@
   background: var(--raised);
 }
 
+/* Moved by key: the row the selection just left may sit under a resting
+   pointer and turn hovered. No fade then; the pointer moving again
+   removes the class. */
+.waiting-list.is-keyboard .waiting-row {
+  transition: none;
+}
+
 .waiting-dot {
   flex: none;
   font-size: 0.7em;

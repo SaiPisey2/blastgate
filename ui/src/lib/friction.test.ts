@@ -163,3 +163,10 @@ describe('canSelfApprove', () => {
     expect(canSelfApprove('   ', '')).toBe(true);
   });
 });
+
+describe('canSelfApprove, carried from review', () => {
+  it('a summary with no human at all never blocks', () => {
+    expect(canSelfApprove('bob', undefined)).toBe(true);
+    expect(canSelfApprove('', undefined)).toBe(true);
+  });
+});

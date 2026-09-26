@@ -33,21 +33,25 @@ const DONE_TEXT: Record<Exclude<Outcome, 'gone'>, string> = {
   denied: 'Denied. The agent was refused.',
 };
 
-// The wording from the old approval card, unchanged: the status comes from
-// the API, so it picks words from a fixed map or is shown raw.
+// The status comes from the API, so it picks words from a fixed map or is
+// shown raw.
 const STATUS: Record<string, string> = {
   approved: 'Approved',
   denied: 'Denied',
   consumed: 'Approved and carried out',
-  expired: 'Expired',
+  expired: 'This request expired',
   superseded: 'Superseded',
 };
+
+// Nobody decides an expiry: "expired by bob" would name someone who did
+// nothing, so an expired request only says when.
+const NO_DECIDER = new Set(['expired']);
 
 function decidedText(status: string, by: string, at: string): string {
   // Object.hasOwn, not `in`: a status of "toString" must not read a
   // function off the prototype.
   let t = Object.hasOwn(STATUS, status) ? STATUS[status] : status || 'Not pending';
-  if (by) t += ` by ${by}`;
+  if (by && !NO_DECIDER.has(status)) t += ` by ${by}`;
   if (at && !Number.isNaN(Date.parse(at))) t += ` at ${clock(at)}`;
   return t + '.';
 }
@@ -328,7 +332,10 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         </p>
       )}
       <Tag tone={friction.tone}>{friction.tag}</Tag>
-      <h2 id={qid} className={position ? 'decision-q decision-q-lg' : 'decision-q'}>
+      {/* tabIndex -1: after a decision, or on Enter from the list, focus
+          lands here so the next thing read is the question. Not a tab
+          stop, since it is not a control. */}
+      <h2 id={qid} className={position ? 'decision-q decision-q-lg' : 'decision-q'} tabIndex={-1}>
         {s.agent || 'An agent'} wants to {words}
         {ident && <span className="mono">{ident}</span>}
       </h2>

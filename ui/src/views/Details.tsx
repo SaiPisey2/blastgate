@@ -56,6 +56,16 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
     try {
       const got = await get<ApprovalDetail>(`/api/approvals/${encodeURIComponent(id)}`);
       if (mine !== seq.current) return;
+      // An answer about some other request is not this one: showing it
+      // under this URL would put another request's question and tree
+      // where the approver expects this one.
+      if (!got || got.id !== id) {
+        pending.current = false;
+        setD(null);
+        setError('');
+        setMissing(true);
+        return;
+      }
       pending.current = got.status === 'pending';
       setD(got);
       setError('');

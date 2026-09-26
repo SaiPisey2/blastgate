@@ -34,6 +34,13 @@ export function clock(iso: string): string {
   return today ? timeFmt.format(d) : `${dayFmt.format(d)} ${timeFmt.format(d)}`;
 }
 
+// hhmm is a fixed 24-hour HH:MM, built by hand: a locale's own format
+// can come back as "12:05 AM" or, with hour12 off, "24:05" at midnight.
+export function hhmm(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function plural(n: number, word: string, many = word + 's'): string {
   return n === 1 ? word : many;
 }

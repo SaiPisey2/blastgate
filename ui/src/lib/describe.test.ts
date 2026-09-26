@@ -157,6 +157,36 @@ describeBlock('describe', () => {
     it('create without a name says what kind and where (a generateName request)', () => {
       expect(describe({ verb: 'create', resource: 'pods', namespace: 'demo', name: '' }).sentence).toBe('Create a pod in demo');
     });
+
+    // Not only create: any request missing its name still reads as a
+    // sentence about what kind and where. Only a missing resource as well
+    // drops to the literal.
+    it.each([
+      [{ verb: 'delete', resource: 'pods' }, 'Delete a pod in demo'],
+      [{ verb: 'patch', resource: 'deployments' }, 'Change a deployment in demo'],
+      [{ verb: 'update', resource: 'deployments' }, 'Change a deployment in demo'],
+      [{ verb: 'patch', resource: 'deployments/scale' }, 'Scale a deployment in demo'],
+      [{ verb: 'create', resource: 'pods/exec' }, 'Run a command in a pod in demo'],
+      [{ verb: 'create', resource: 'pods/attach' }, 'Attach to a pod in demo'],
+      [{ verb: 'create', resource: 'pods/portforward' }, 'Forward a port to a pod in demo'],
+      [{ verb: 'patch', resource: 'pods/ephemeralcontainers' }, 'Add a debug container to a pod in demo'],
+      [{ verb: 'get', resource: 'pods/log' }, 'Read the logs of a pod in demo'],
+      [{ verb: 'create', resource: 'rolebindings' }, 'Grant access with a role binding in demo'],
+      [{ verb: 'delete', resource: 'ingresses' }, 'Delete an ingress in demo'],
+      [{ verb: 'create', resource: 'ingresses' }, 'Create an ingress in demo'],
+    ])('%o without a name reads "%s"', (r, want) => {
+      expect(describe({ ...r, namespace: 'demo', name: '' }).sentence).toBe(want);
+    });
+
+    it('a cluster-scoped request without a name leaves out "in"', () => {
+      expect(describe({ verb: 'delete', resource: 'persistentvolumes', namespace: '', name: '' }).sentence).toBe('Delete a volume');
+    });
+
+    it('the literal is used only when the resource is missing too', () => {
+      expect(describe({ verb: 'delete', resource: '', namespace: 'demo', name: '' }).sentence).toBe('delete');
+      expect(describe({ verb: 'patch', resource: '', namespace: 'demo', name: '' }).sentence).toBe('patch');
+      expect(describe({ verb: 'create', resource: '/exec', namespace: 'demo', name: '' }).sentence).toBe('create /exec');
+    });
   });
 
   it('hostile names stay text, never interpreted', () => {

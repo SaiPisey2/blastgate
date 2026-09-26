@@ -825,3 +825,25 @@ describe('DecisionPanel exiting confirm step', () => {
     expect(document.activeElement).not.toBe(denyButton());
   });
 });
+
+describe('DecisionPanel carried from review', () => {
+  it('the question heading holds focus without being a tab stop (D-R17)', () => {
+    renderPanel(withDetail(reversible, reversibleImpact));
+    const h = screen.getByRole('heading', { level: 2 });
+    expect(h.getAttribute('tabindex')).toBe('-1');
+    h.focus();
+    expect(document.activeElement).toBe(h);
+  });
+
+  it('an expired request says so, with the time and no decider (D-R18)', () => {
+    const s = { ...reversible, status: 'expired' };
+    const at = '2026-09-26T10:00:00Z';
+    renderPanel({ summary: s, detail: { ...detail(s, reversibleImpact), decided_by: 'sweeper', decided: at } });
+    const done = screen.getByRole('status');
+    expect(done.textContent).toMatch(/^This request expired at \S.*\.$/);
+    expect(done.textContent).not.toContain('sweeper');
+    cleanup();
+    renderPanel({ summary: s });
+    expect(screen.getByRole('status').textContent).toBe('This request expired.');
+  });
+});

@@ -85,8 +85,9 @@ export function typedTarget(s: Pick<ApprovalSummary, 'namespace' | 'name' | 'res
 // enforce this itself — it is a UI-only guard (spec §6, §9) — so it
 // fails open rather than lock someone out over a rendering quirk. An
 // empty meName means /api/me has not answered yet, which only means the
-// UI cannot tell who "self" is yet; that never blocks by itself.
-export function canSelfApprove(meName: string, human: string): boolean {
+// UI cannot tell who "self" is yet; that never blocks by itself. human
+// may be missing from stored JSON; it then matches no one.
+export function canSelfApprove(meName: string, human: string | undefined): boolean {
   const me = meName.trim();
   const h = (human ?? '').trim();
   return me === '' || me !== h;

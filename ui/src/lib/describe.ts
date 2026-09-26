@@ -94,11 +94,19 @@ function isAuthority(resource: string, subresource: string | undefined, group: s
 // something concrete — never a blank confirm dialog, and never a
 // sentence that silently drops part of the request.
 function literalFallback(verb: string, resource: string, subresource: string | undefined, r: { namespace: string; name: string }): string {
-  const resourcePart = resource ? resource + (subresource ? `/${subresource}` : '') : '';
+  // A subresource with no resource is still shown ("/exec"): dropping it
+  // would hide the one word that says what the request does.
+  const resourcePart = resource + (subresource ? `/${subresource}` : '');
   const parts = [verb, resourcePart].filter(Boolean);
   const tgt = targetOf(r);
   const full = [...parts, tgt].filter(Boolean).join(' ');
   return full || 'Unknown request';
+}
+
+// some: "a pod", "an ingress". Only for the nouns above and a raw
+// resource string; a plain first-letter check, never a pattern.
+function some(noun: string): string {
+  return ('aeiou'.includes(noun.charAt(0)) ? 'an ' : 'a ') + noun;
 }
 
 export function describe(r: Requestish): Described {
@@ -108,11 +116,19 @@ export function describe(r: Requestish): Described {
   const hasNoun = singular !== '';
   const hasName = r.name !== '';
   const fallback = () => literalFallback(r.verb, resource, subresource, r);
+  // unnamed: the object without a name (a malformed row, or a request
+  // whose name the summary does not carry), still said as a sentence:
+  // "a pod in demo". Only the resource missing as well drops to the
+  // literal.
+  const unnamed = `${some(singular)}${r.namespace ? ` in ${r.namespace}` : ''}`;
+  // pod: what a pod subresource acts on — the named pod, or "a pod in
+  // demo" when the name is missing; '' when neither is known.
+  const pod = hasName ? r.name : hasNoun ? unnamed : '';
 
   let sentence: string;
 
   if (isAuthority(resource, subresource, r.group, r.verb)) {
-    sentence = hasNoun && hasName ? `Grant access with the ${singular} ${r.name}` : fallback();
+    sentence = !hasNoun ? fallback() : hasName ? `Grant access with the ${singular} ${r.name}` : `Grant access with ${unnamed}`;
   } else if (subresource) {
     // Only these subresources ever get their own sentence. Any other
     // pairing — including a recognised one on the wrong verb, such as
@@ -120,22 +136,22 @@ export function describe(r: Requestish): Described {
     // through to the literal fallback instead of guessing.
     switch (subresource) {
       case 'scale':
-        sentence = (r.verb === 'patch' || r.verb === 'update') && hasNoun && hasName ? `Scale the ${singular} ${r.name}` : fallback();
+        sentence = (r.verb === 'patch' || r.verb === 'update') && hasNoun ? (hasName ? `Scale the ${singular} ${r.name}` : `Scale ${unnamed}`) : fallback();
         break;
       case 'exec':
-        sentence = hasName ? `Run a command in ${r.name}` : fallback();
+        sentence = pod ? `Run a command in ${pod}` : fallback();
         break;
       case 'attach':
-        sentence = hasName ? `Attach to ${r.name}` : fallback();
+        sentence = pod ? `Attach to ${pod}` : fallback();
         break;
       case 'portforward':
-        sentence = hasName ? `Forward a port to ${r.name}` : fallback();
+        sentence = pod ? `Forward a port to ${pod}` : fallback();
         break;
       case 'ephemeralcontainers':
-        sentence = hasName ? `Add a debug container to ${r.name}` : fallback();
+        sentence = pod ? `Add a debug container to ${pod}` : fallback();
         break;
       case 'log':
-        sentence = hasName ? `Read the logs of ${r.name}` : fallback();
+        sentence = pod ? `Read the logs of ${pod}` : fallback();
         break;
       default:
         sentence = fallback();
@@ -143,7 +159,7 @@ export function describe(r: Requestish): Described {
   } else {
     switch (r.verb) {
       case 'delete':
-        sentence = hasNoun && hasName ? `Delete the ${singular} ${r.name}` : fallback();
+        sentence = !hasNoun ? fallback() : hasName ? `Delete the ${singular} ${r.name}` : `Delete ${unnamed}`;
         break;
       case 'deletecollection':
         sentence = hasNoun ? (r.namespace ? `Delete every ${singular} in ${r.namespace}` : `Delete every ${singular}`) : fallback();
@@ -153,11 +169,11 @@ export function describe(r: Requestish): Described {
         else if (hasName) sentence = `Create the ${singular} ${r.name}`;
         // No name (a generateName create): still true without one, so
         // say what kind and where rather than drop to the fallback.
-        else sentence = `Create a ${singular}${r.namespace ? ` in ${r.namespace}` : ''}`;
+        else sentence = `Create ${unnamed}`;
         break;
       case 'update':
       case 'patch':
-        sentence = hasNoun && hasName ? `Change the ${singular} ${r.name}` : fallback();
+        sentence = !hasNoun ? fallback() : hasName ? `Change the ${singular} ${r.name}` : `Change ${unnamed}`;
         break;
       case 'get':
         sentence = hasNoun ? (hasName ? `Read the ${singular} ${r.name}` : `Read the list of ${plural}`) : fallback();

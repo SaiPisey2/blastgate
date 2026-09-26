@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, clock, duration, plural, shellQuote } from './format';
+import { ago, clock, duration, hhmm, plural, shellQuote } from './format';
 
 describe('duration', () => {
   it('rounds seconds under a minute', () => {
@@ -97,5 +97,13 @@ describe('shellQuote', () => {
     expect(shellQuote(['sh', '-c', 'echo hi'])).toBe("sh -c 'echo hi'");
     expect(shellQuote(['echo', ''])).toBe("echo ''");
     expect(shellQuote(["it's"])).toBe(`'it'\\''s'`);
+  });
+});
+
+describe('hhmm', () => {
+  it('is a fixed 24-hour HH:MM whatever the locale, midnight included', () => {
+    expect(hhmm(new Date(2026, 8, 26, 0, 5))).toBe('00:05');
+    expect(hhmm(new Date(2026, 8, 26, 9, 7))).toBe('09:07');
+    expect(hhmm(new Date(2026, 8, 26, 23, 59))).toBe('23:59');
   });
 });

@@ -132,7 +132,7 @@ describe('Details', () => {
     mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail({ ...del, status: 'expired' }, deploymentImpact()) } });
     renderWithMotion(<Details id={ID1} me="bob" />);
     const card = await screen.findByRole('article');
-    expect(within(card).getByText('Expired.')).toBeTruthy();
+    expect(within(card).getByText('This request expired.')).toBeTruthy();
     expect(within(card).queryByRole('button', { name: /^approve$/i })).toBeNull();
     expect(within(card).queryByRole('button', { name: /^deny$/i })).toBeNull();
   });
@@ -241,4 +241,14 @@ describe('Details', () => {
       await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
     });
   }
+});
+
+describe('Details, carried from review', () => {
+  it('an answer for a different id shows the not-found state', async () => {
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(summary({ id: 'b'.repeat(32), name: 'other' }), impact()) } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    expect(await screen.findByText('There is no such request.')).toBeTruthy();
+    expect(screen.queryByRole('article')).toBeNull();
+    expect(screen.queryByText(/other/)).toBeNull();
+  });
 });

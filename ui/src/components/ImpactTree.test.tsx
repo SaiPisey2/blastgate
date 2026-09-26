@@ -451,7 +451,7 @@ describe('ImpactTree, fix round 1', () => {
     expect(tree.classList.contains('is-keyboard')).toBe(true);
     expect(componentsCSS).toMatch(/\.itree\.is-keyboard \.itree-caret\s*\{[^}]*transition:\s*none/);
     // The row background animates on hover only, never on selection.
-    expect(componentsCSS).not.toMatch(/\.waiting-row\s*\{[^}]*transition/);
+    expect(componentsCSS).not.toMatch(/\.waiting-row\s*\{[^}]*transition:(?!\s*none)/);
     expect(componentsCSS).not.toMatch(/\.waiting-row\.is-selected\s*\{[^}]*transition/);
   });
 });

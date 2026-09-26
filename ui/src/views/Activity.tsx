@@ -68,6 +68,9 @@ function countNew(rows: Entry[] | null, pending: FeedRow[], chip: Chip): number 
 // a live region: read node by node, a burst of rows or a page of older
 // ones would talk over everything else (spec §8).
 export const SUMMARY_MS = 3000;
+// How long the summary stays empty before the same words come back:
+// long enough for a screen reader to notice it changed.
+export const REFILL_MS = 100;
 
 function summary(inserted: number, held: number): string {
   const parts: string[] = [];
@@ -184,8 +187,10 @@ export default function Activity() {
   // the bottom; an effect then offers "Load older" again to reach them.
   const trimmed = useRef(false);
   const [said, setSaid] = useState('');
+  const saidRef = useRef('');
   const inserted = useRef(0);
   const sayTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const refillTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const tintTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   rowsRef.current = rows;
   chipRef.current = chip;
@@ -194,6 +199,7 @@ export default function Activity() {
     const timers = tintTimers.current;
     return () => {
       clearTimeout(sayTimer.current);
+      clearTimeout(refillTimer.current);
       timers.forEach(clearTimeout);
     };
   }, []);
@@ -221,7 +227,22 @@ export default function Activity() {
       sayTimer.current = undefined;
       const text = summary(inserted.current, countNew(rowsRef.current, pendingRef.current, chipRef.current));
       inserted.current = 0;
-      if (text) setSaid(text);
+      if (!text) return;
+      clearTimeout(refillTimer.current);
+      // A screen reader speaks a change, not a text: "1 new request"
+      // twice running would be heard once. The same words again are
+      // emptied first and put back a moment later.
+      if (text === saidRef.current) {
+        saidRef.current = '';
+        setSaid('');
+        refillTimer.current = setTimeout(() => {
+          saidRef.current = text;
+          setSaid(text);
+        }, REFILL_MS);
+        return;
+      }
+      saidRef.current = text;
+      setSaid(text);
     }, SUMMARY_MS);
   };
 

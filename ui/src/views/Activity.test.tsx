@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import Activity, { resetOutsideNotice, SUMMARY_MS } from './Activity';
+import Activity, { REFILL_MS, resetOutsideNotice, SUMMARY_MS } from './Activity';
 import { announce } from '../components/Shell';
 import { emit, type FeedRow } from '../api';
 import { mockFetch, type Call } from '../test/fetch';
@@ -577,5 +577,23 @@ describe('Activity', () => {
     await screen.findByText('No requests yet.');
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByText(/without going through blastgate/)).toBeNull();
+  });
+});
+
+describe('Activity, carried from review', () => {
+  it('the same summary twice running is emptied and said again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockFetch({ 'GET /api/bypass': { body: [] }, 'GET /api/feed': { body: [] } });
+    render(<Activity />);
+    await screen.findByText('No requests yet.');
+    act(() => emit('audit', ok({ id: 1, name: 'one' })));
+    act(() => vi.advanceTimersByTime(SUMMARY_MS));
+    expect(summaryText()).toBe('1 new request');
+    act(() => emit('audit', ok({ id: 2, name: 'two' })));
+    act(() => vi.advanceTimersByTime(SUMMARY_MS));
+    // Emptied first, so the region changes and is spoken again.
+    expect(summaryText()).toBe('');
+    act(() => vi.advanceTimersByTime(REFILL_MS));
+    expect(summaryText()).toBe('1 new request');
   });
 });

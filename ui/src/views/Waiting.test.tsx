@@ -1,7 +1,7 @@
 // @ts-expect-error -- this package has no @types/node; Vitest runs on Node.
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Waiting, { resetLastDecision } from './Waiting';
 import { emit, setCSRF, type ApprovalSummary } from '../api';
@@ -525,5 +525,56 @@ describe('Waiting', () => {
     expect(await screen.findByText('That request was already decided or has expired.')).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('option')).toBeNull());
     expect(posts(calls)).toEqual([`/api/approvals/${ID2}/deny`]);
+  });
+});
+
+describe('Waiting, carried from review', () => {
+  it('the last decision time is a fixed 24-hour HH:MM, midnight included', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date(2026, 8, 26, 0, 5) });
+    try {
+      setMedia(WIDE, true);
+      server([severe]);
+      renderWithMotion(<Waiting me="bob" />);
+      await waitFor(() => expect(options()).toHaveLength(1));
+      await within(panel()).findByText('None');
+      await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+      expect(await screen.findByText(/^Last decision at 00:05\./)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a key move marks the list so the row it leaves does not fade; the pointer clears it', async () => {
+    setMedia(WIDE, true);
+    server([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    expect(list().classList.contains('is-keyboard')).toBe(false);
+    list().focus();
+    await userEvent.keyboard('j');
+    expect(list().classList.contains('is-keyboard')).toBe(true);
+    fireEvent.pointerMove(list());
+    expect(list().classList.contains('is-keyboard')).toBe(false);
+    expect(componentsCSS).toMatch(/\.waiting-list\.is-keyboard \.waiting-row\s*\{[^}]*transition:\s*none/);
+  });
+
+  it('a request removed elsewhere while a decision is in flight does not come back', async () => {
+    setMedia(WIDE, true);
+    const srv = gated([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    await within(panel()).findByText('None');
+    const releasePost = srv.holdPosts();
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    // While the deny is out, B is decided by someone else and a reload
+    // lands without it.
+    srv.set([severe]);
+    await stream([ID1]);
+    await waitFor(() => expect(options()).toHaveLength(1));
+    await act(async () => releasePost());
+    expect(await screen.findByText('Nothing is waiting for you.')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByRole('option')).toBeNull();
+    expect(screen.queryByText(/demo\/web/)).toBeNull();
   });
 });
