@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import DecisionPanel, { type DecisionPanelProps } from './DecisionPanel';
-import { setCSRF, type ApprovalDetail, type ApprovalSummary } from '../api';
+import { setCSRF, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
 import { ARM_MS } from '../lib/friction';
 import { mockFetch, type Call } from '../test/fetch';
 import { renderWithMotion } from '../test/motion';
@@ -106,9 +106,10 @@ describe('DecisionPanel friction levels', () => {
     renderPanel(withDetail(reversible, reversibleImpact));
     await userEvent.click(approveButton());
     await userEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    // The step collapses (a short exit), and focus goes back to Deny.
+    // The step collapses (a short exit), and focus goes to Approve, never
+    // Deny: a held Enter there would key-repeat into a deny.
     await waitFor(() => expect(screen.queryByRole('button', { name: /confirm/i })).toBeNull());
-    expect(document.activeElement).toBe(denyButton());
+    expect(document.activeElement).toBe(approveButton());
     expect(posts(calls)).toEqual([]);
   });
 
@@ -735,43 +736,6 @@ describe('DecisionPanel exiting confirm step', () => {
     });
   }
 
-  // The second layer, on its own: a Confirm handler taken while the step
-  // was ready and run after the gate closed stands for any stale closure
-  // (an element kept for an exit, an event queued before the re-render).
-  // It reads React's props off the node; the inert step would otherwise
-  // stop the click before the handler could be reached.
-  const reactOnClick = (el: HTMLElement) => {
-    const key = Object.keys(el).find((k) => k.startsWith('__reactProps$'))!;
-    return (el as unknown as Record<string, { onClick?: () => void }>)[key].onClick!;
-  };
-
-  for (const [label, next] of [
-    ['the detail is cleared', undefined],
-    ['the detail becomes unmeasured (typed)', detail(reversible, { ...reversibleImpact, measured: false })],
-    ['the detail becomes data-destroying (typed)', detail(reversible, { ...reversibleImpact, dataDestroyed: 2 })],
-  ] as const) {
-    it(`a Confirm handler captured while ready does nothing after ${label}`, async () => {
-      const calls = routes();
-      const { rerender, props, onDecided } = renderPanel(withDetail(reversible, reversibleImpact));
-      const stale = reactOnClick(await armedStep());
-      rerender(<DecisionPanel {...props} detail={next} />);
-      await act(async () => stale());
-      await new Promise((r) => setTimeout(r, 30));
-      expect(posts(calls)).toEqual([]);
-      expect(onDecided).not.toHaveBeenCalled();
-    });
-  }
-
-  it('a Confirm handler captured while ready does nothing after Cancel', async () => {
-    const calls = routes();
-    renderPanel(withDetail(reversible, reversibleImpact));
-    const stale = reactOnClick(await armedStep());
-    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
-    await act(async () => stale());
-    await new Promise((r) => setTimeout(r, 30));
-    expect(posts(calls)).toEqual([]);
-  });
-
   it('a same-level detail refetch with new undo text closes the step and re-arms', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const s = summary({ class: 'COMPENSABLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
@@ -794,5 +758,70 @@ describe('DecisionPanel exiting confirm step', () => {
     act(() => vi.advanceTimersByTime(1));
     expect(confirm.disabled).toBe(false);
     expect(posts(calls)).toEqual([]);
+  });
+
+  const factChanges: [string, Partial<Impact>, string][] = [
+    ['services left with no backends', { endpointsLeft: { 'demo/web': 0, 'demo/api': 0 } }, '0 objects, 2 services left with no backends'],
+    ['broken disruption budgets', { pdbViolations: ['demo/web-pdb'] }, '0 objects, 1 disruption budget broken'],
+  ];
+  for (const [label, change, shown] of factChanges) {
+    it(`a same-level refetch that adds ${label} closes the armed step`, async () => {
+      const s = summary({ class: 'COMPENSABLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+      const i = impact({ class: 'COMPENSABLE', dataDestroyed: 0, undo: 'scale back', effects: [] });
+      const calls = routes();
+      const { rerender, props } = renderPanel(withDetail(s, i));
+      await armedStep();
+      rerender(<DecisionPanel {...props} detail={detail(s, { ...i, ...change })} />);
+      expect(screen.getByText(shown)).toBeTruthy();
+      // No live, armed Confirm survives the changed fact.
+      expect(screen.queryByRole('button', { name: /confirm approval/i })).toBeNull();
+      const c = exiting();
+      if (c) fireEvent.click(c);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(posts(calls)).toEqual([]);
+    });
+  }
+
+  for (const [label, act2] of [
+    ['Cancel', 'cancel'],
+    ['a detail flap', 'flap'],
+    ['a same-level change', 'same-level'],
+  ] as const) {
+    it(`focus inside the step moves to Approve when it closes by ${label}`, async () => {
+      routes();
+      const { rerender, props } = renderPanel(withDetail(reversible, reversibleImpact));
+      await armedStep();
+      screen.getByRole('button', { name: /cancel/i }).focus();
+      if (act2 === 'cancel') fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+      else if (act2 === 'same-level') rerender(<DecisionPanel {...props} detail={detail(reversible, { ...reversibleImpact, undo: 'none' })} />);
+      else {
+        rerender(<DecisionPanel {...props} detail={undefined} />);
+        // Approve is disabled while the detail reloads, so the panel holds it.
+        expect(document.activeElement).toBe(approveButton().closest('article'));
+        return;
+      }
+      expect(document.activeElement).toBe(approveButton());
+    });
+  }
+
+  it('a closing step at the typed level hands focus to the typed field', async () => {
+    routes();
+    const { rerender, props } = renderPanel(withDetail(reversible, reversibleImpact));
+    await armedStep();
+    screen.getByRole('button', { name: /cancel/i }).focus();
+    rerender(<DecisionPanel {...props} detail={detail(reversible, { ...reversibleImpact, dataDestroyed: 2 })} />);
+    expect(document.activeElement).toBe(typedField());
+  });
+
+  it('holding Enter on Cancel sends nothing', async () => {
+    const calls = routes();
+    renderPanel(withDetail(reversible, reversibleImpact));
+    await userEvent.click(approveButton());
+    screen.getByRole('button', { name: /cancel/i }).focus();
+    await userEvent.keyboard('{Enter>6}{/Enter}');
+    await new Promise((r) => setTimeout(r, ARM_MS + 50));
+    await userEvent.keyboard('{Enter>6}{/Enter}');
+    expect(posts(calls)).toEqual([]);
+    expect(document.activeElement).not.toBe(denyButton());
   });
 });

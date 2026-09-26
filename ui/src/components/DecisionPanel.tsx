@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { ApiError, post, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
 import { ARM_MS, canSelfApprove, frictionOf, typedTarget } from '../lib/friction';
 import { describe } from '../lib/describe';
@@ -125,6 +125,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const rootRef = useRef<HTMLElement>(null);
   const denyRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const approveRef = useRef<HTMLButtonElement>(null);
   const inFlight = useRef(false);
 
   const [typed, setTyped] = useState('');
@@ -169,9 +170,10 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // The impact's identity is part of it too: a same-level refetch whose
   // undo text or counts changed closes the step, so what the approver
   // confirms is always what they last read.
-  const impactKey = impact
-    ? [typeof impact.undo === 'string' ? impact.undo : '', impact.effects?.length ?? 0, impact.dataDestroyed, impact.measured].join('\u0000')
-    : '';
+  // Keyed on the strings the panel renders, not on hand-picked fields: a
+  // field left out here (services emptied, budgets broken) once let a
+  // changed fact slip past an armed step.
+  const impactKey = impact ? [affects(impact), undoLabel(impact.undo), impact.measured].join('\u0000') : '';
   const stepKey = `${friction.level}\u0000${decidable}\u0000${impactKey}`;
   const [seenStepKey, setSeenStepKey] = useState(stepKey);
   if (seenStepKey !== stepKey) {
@@ -195,6 +197,23 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // the handler from the render in which it was ready.
   const live = useRef({ pending, result, needsTyping, stepOpen, ready });
   live.current = { pending, result, needsTyping, stepOpen, ready };
+
+  // When the step closes with focus inside it (Cancel, Escape, a refetch
+  // flap), the exiting step goes inert and the browser would drop focus
+  // to <body>. Hand it to the nearest harmless control instead: the typed
+  // field if typing is now required, else Approve if it can take focus,
+  // else the panel itself. Never Deny, for the reason given at cancel().
+  // A layout effect, so focus moves before the inert step blurs.
+  const wasOpen = useRef(stepOpen);
+  useLayoutEffect(() => {
+    const closed = wasOpen.current && !stepOpen;
+    wasOpen.current = stepOpen;
+    if (!closed) return;
+    const a = document.activeElement;
+    if (!(a instanceof HTMLElement) || !a.closest('.confirm-step-wrap') || !rootRef.current?.contains(a)) return;
+    const target = needsTyping ? inputRef.current : approveRef.current && !approveRef.current.disabled ? approveRef.current : rootRef.current;
+    target?.focus();
+  }, [stepOpen, needsTyping]);
 
   // Arming restarts every time the step opens, whatever closed it.
   useEffect(() => {
@@ -258,9 +277,12 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     }
   }
 
+  // Cancel only closes the step; the layout effect below moves focus to
+  // Approve. Never to Deny: a held Enter on Cancel would key-repeat into
+  // a deny, a single-key decision (spec §6). On Approve the same repeat
+  // only reopens a step that has to arm again.
   function cancel() {
     setConfirming(false);
-    denyRef.current?.focus();
   }
 
   const facts: Fact[] = [
@@ -297,7 +319,9 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     .join(' ');
 
   return (
-    <article ref={rootRef} className="decision" aria-labelledby={qid} data-level={friction.level}>
+    // tabIndex -1: the panel can hold focus as a last resort when a
+    // closing step leaves nothing else harmless to focus.
+    <article ref={rootRef} className="decision" aria-labelledby={qid} data-level={friction.level} tabIndex={-1}>
       {position && (
         <p className="decision-position">
           {position.index} of {position.total} waiting for you
@@ -354,6 +378,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
               Deny
             </Button>
             <Button
+              ref={approveRef}
               variant={needsTyping ? 'danger' : 'default'}
               disabled={needsTyping ? !ready : !open}
               aria-describedby={approveDescribedBy || undefined}
