@@ -60,6 +60,61 @@ describe('frictionOf (impact overrides)', () => {
     expect(f.tag).toBe('Cannot be undone');
     expect(f.unknownImpact).toBe(false);
   });
+
+  it('an impact measured as anything other than exactly true fails closed', () => {
+    // undefined and non-boolean "truthy" values must not read as measured.
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: 0 }, { measured: undefined as never, dataDestroyed: 0 }).tag).toBe(
+      'Impact unknown',
+    );
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: 0 }, { measured: 1 as never, dataDestroyed: 0 }).tag).toBe(
+      'Impact unknown',
+    );
+  });
+});
+
+describe('frictionOf (malformed destroyed counts read as unknown, not zero)', () => {
+  it('a non-number, NaN or negative summary count is unknown', () => {
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: NaN }).tag).toBe('Impact unknown');
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: -1 }).tag).toBe('Impact unknown');
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: '2' as never }).tag).toBe('Impact unknown');
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: Infinity }).tag).toBe('Impact unknown');
+  });
+
+  it('the same holds for the impact side, when an impact is given', () => {
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: 0 }, { measured: true, dataDestroyed: NaN }).tag).toBe(
+      'Impact unknown',
+    );
+    expect(frictionOf({ class: 'READ', measured: true, data_destroyed: 0 }, { measured: true, dataDestroyed: -3 }).tag).toBe(
+      'Impact unknown',
+    );
+  });
+});
+
+describe('frictionOf (ladder order: destroyed data outranks a class tag)', () => {
+  it('AUTHORITY with destroyed data reads Cannot be undone, not Grants access', () => {
+    const f = frictionOf({ class: 'AUTHORITY', measured: true, data_destroyed: 3 });
+    expect(f.tag).toBe('Cannot be undone');
+    expect(f.tone).toBe('danger');
+  });
+
+  it('TERMINAL with destroyed data still reads Cannot be undone', () => {
+    const f = frictionOf({ class: 'TERMINAL', measured: true, data_destroyed: 1 });
+    expect(f.tag).toBe('Cannot be undone');
+  });
+});
+
+describe('frictionOf (measured must be the exact boolean true)', () => {
+  it('a string "true" does not count as measured', () => {
+    expect(frictionOf({ class: 'TERMINAL', measured: 'true' as never, data_destroyed: 0 }).tag).toBe('Impact unknown');
+  });
+
+  it('a truthy 1 does not count as measured', () => {
+    expect(frictionOf({ class: 'TERMINAL', measured: 1 as never, data_destroyed: 0 }).tag).toBe('Impact unknown');
+  });
+
+  it('a lowercase class is not a known class, regardless of measured', () => {
+    expect(frictionOf({ class: 'terminal', measured: true, data_destroyed: 0 }).tag).toBe('Impact unknown');
+  });
 });
 
 describe('typedTarget', () => {
@@ -95,5 +150,16 @@ describe('canSelfApprove', () => {
 
   it('is exact-case: a case difference still allows approval', () => {
     expect(canSelfApprove('alice', 'Alice')).toBe(true);
+  });
+
+  it('trims surrounding whitespace before comparing', () => {
+    expect(canSelfApprove(' alice ', 'alice')).toBe(false);
+    expect(canSelfApprove('alice', ' alice ')).toBe(false);
+  });
+
+  it('an empty meName never blocks, even against an empty human', () => {
+    expect(canSelfApprove('', 'alice')).toBe(true);
+    expect(canSelfApprove('', '')).toBe(true);
+    expect(canSelfApprove('   ', '')).toBe(true);
   });
 });

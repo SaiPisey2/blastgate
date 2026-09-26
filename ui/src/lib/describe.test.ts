@@ -131,9 +131,31 @@ describeBlock('describe', () => {
     it('all empty', () => {
       expect(describe({ verb: '', resource: '', namespace: '', name: '' }).sentence).toBe('Unknown request');
     });
-    it('the sentence is never empty for any input', () => {
-      expect(describe({ verb: '', resource: 'widgets', namespace: '', name: '' }).sentence.length).toBeGreaterThan(0);
-      expect(describe({ verb: 'frobnicate', resource: '', namespace: '', name: '' }).sentence.length).toBeGreaterThan(0);
+
+    // Every verb the switch recognises, crossed with the three ways a
+    // request can be missing the pieces a sentence needs: no name (a
+    // generateName create, or a malformed row), no resource, or both.
+    // None of these combinations may produce a double space, a trailing
+    // space, or an empty sentence — whatever the wording ends up being.
+    const verbs = ['delete', 'deletecollection', 'create', 'update', 'patch', 'get', 'list', 'watch'];
+    const gaps: Array<[string, { resource: string; name: string }]> = [
+      ['empty name', { resource: 'pods', name: '' }],
+      ['empty resource', { resource: '', name: 'x' }],
+      ['both empty', { resource: '', name: '' }],
+    ];
+    for (const verb of verbs) {
+      describeBlock(`verb ${verb}`, () => {
+        it.each(gaps)('%s never produces a malformed sentence', (_label, gap) => {
+          const d = describe({ verb, resource: gap.resource, namespace: 'demo', name: gap.name });
+          expect(d.sentence.length).toBeGreaterThan(0);
+          expect(d.sentence).not.toMatch(/ {2,}/);
+          expect(d.sentence).not.toMatch(/\s$/);
+        });
+      });
+    }
+
+    it('create without a name says what kind and where (a generateName request)', () => {
+      expect(describe({ verb: 'create', resource: 'pods', namespace: 'demo', name: '' }).sentence).toBe('Create a pod in demo');
     });
   });
 
@@ -141,7 +163,6 @@ describeBlock('describe', () => {
     const hostile = '<img src=x onerror=alert(1)>';
     const d = describe({ verb: 'delete', resource: 'pods', namespace: 'demo', name: hostile });
     expect(d.sentence).toContain(hostile);
-    expect(typeof d.sentence).toBe('string');
   });
 
   describeBlock('resource noun map', () => {
@@ -182,6 +203,77 @@ describeBlock('describe', () => {
       const d = describe({ verb: 'get', resource: 'widgets', namespace: 'demo', name: 'x' });
       expect(d.resourceNoun).toBe('widgets');
       expect(d.sentence).toBe('Read the widgets x');
+    });
+
+    // A plain object literal's lookup reads the prototype chain: these
+    // are all real properties (or, for a Map, definitely not) that a
+    // resource string could legitimately collide with — a CRD can be
+    // named "constructor" or "__proto__" in its plural form. None of
+    // these may throw, and none may resolve to anything but the raw
+    // string, since they are not in the noun map.
+    it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])('%s is not read off the prototype', (resource) => {
+      expect(() => describe({ verb: 'get', resource, namespace: 'demo', name: 'x' })).not.toThrow();
+      const d = describe({ verb: 'get', resource, namespace: 'demo', name: 'x' });
+      expect(d.resourceNoun).toBe(resource);
+      expect(d.sentence).toBe(`Read the ${resource} x`);
+    });
+  });
+
+  describeBlock('unrecognised subresources render literally (spec §5: nothing is hidden)', () => {
+    it('delete on an unrecognised subresource does not silently drop it', () => {
+      const d = describe({ verb: 'delete', resource: 'pods', subresource: 'proxy', namespace: 'demo', name: 'db-0' });
+      expect(d.sentence).toBe('delete pods/proxy demo/db-0');
+    });
+
+    it('create on an unrecognised subresource does not silently drop it', () => {
+      const d = describe({ verb: 'create', resource: 'pods', subresource: 'eviction', namespace: 'demo', name: 'db-0' });
+      expect(d.sentence).toBe('create pods/eviction demo/db-0');
+    });
+
+    it('scale read with get (not patch/update) falls to the literal, not the Scale sentence', () => {
+      const d = describe({ verb: 'get', resource: 'deployments', subresource: 'scale', namespace: 'demo', name: 'web' });
+      expect(d.sentence).toBe('get deployments/scale demo/web');
+    });
+  });
+
+  describeBlock('certificate signing request approval is authority', () => {
+    it('approving a CSR grants access', () => {
+      const d = describe({ verb: 'update', resource: 'certificatesigningrequests', subresource: 'approval', namespace: '', name: 'csr-1' });
+      expect(d.sentence).toBe('Grant access with the certificate signing request csr-1');
+    });
+
+    it('reading a CSR approval is not authority-framed (no write verb)', () => {
+      const d = describe({ verb: 'get', resource: 'certificatesigningrequests', subresource: 'approval', namespace: '', name: 'csr-1' });
+      expect(d.sentence).not.toContain('Grant access');
+    });
+  });
+
+  describeBlock('authority is gated on write verbs', () => {
+    it('deleting a cluster role binding reads as a plain delete, not a grant', () => {
+      const d = describe({ verb: 'delete', group: 'rbac.authorization.k8s.io', resource: 'clusterrolebindings', namespace: '', name: 'admin-x' });
+      expect(d.sentence).toBe('Delete the cluster role binding admin-x');
+    });
+  });
+
+  describeBlock('summary-shaped input (ApprovalSummary: subresource joined into resource, no group)', () => {
+    it('exec arrives as resource "pods/exec" with no group', () => {
+      const d = describe({ verb: 'create', resource: 'pods/exec', namespace: 'demo', name: 'db-0' });
+      expect(d.sentence).toBe('Run a command in db-0');
+    });
+
+    it('scale arrives as resource "deployments/scale"', () => {
+      const d = describe({ verb: 'patch', resource: 'deployments/scale', namespace: 'demo', name: 'web' });
+      expect(d.sentence).toBe('Scale the deployment web');
+    });
+
+    it('a role binding write is still authority with no group field at all', () => {
+      const d = describe({ verb: 'create', resource: 'rolebindings', namespace: 'demo', name: 'admin-x' });
+      expect(d.sentence).toBe('Grant access with the role binding admin-x');
+    });
+
+    it('an unrecognised joined subresource still renders literally', () => {
+      const d = describe({ verb: 'delete', resource: 'pods/proxy', namespace: 'demo', name: 'db-0' });
+      expect(d.sentence).toBe('delete pods/proxy demo/db-0');
     });
   });
 });

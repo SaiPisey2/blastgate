@@ -13,14 +13,30 @@ export const KNOWN_CLASSES: ReadonlySet<string> = new Set(['READ', 'REVERSIBLE',
 // a reflex click right after the card appears can never count as a decision.
 export const ARM_MS = 300;
 
+// invalidCount: a destroyed-object count blastgate can't vouch for — the
+// wrong type, NaN/Infinity, or negative — is worse than "nothing
+// destroyed": something upstream already lied, so this reads as unknown
+// too rather than as a calm zero.
+function invalidCount(n: unknown): boolean {
+  return typeof n !== 'number' || !Number.isFinite(n) || n < 0;
+}
+
 export function frictionOf(
   s: Pick<ApprovalSummary, 'class' | 'measured' | 'data_destroyed'>,
   impact?: Pick<Impact, 'measured' | 'dataDestroyed'>,
 ): Friction {
-  // An empty/unknown class or an unmeasured hold (exec, proxy, a scoring
-  // timeout) means blastgate itself does not know the blast radius: the
-  // approver has to decide blind, so this always wins over any tag below.
-  const unknown = !KNOWN_CLASSES.has(s.class) || s.measured !== true || impact?.measured === false;
+  // An empty/unknown class, an unmeasured hold (exec, proxy, a scoring
+  // timeout), an impact whose own `measured` is not exactly `true`
+  // (missing, or any other truthy-but-wrong value fails closed), or
+  // either side's destroyed-count failing to parse as a real count: all
+  // of these mean blastgate itself does not know the blast radius, so
+  // this always wins over any tag below.
+  const unknown =
+    !KNOWN_CLASSES.has(s.class) ||
+    s.measured !== true ||
+    (impact !== undefined && impact.measured !== true) ||
+    invalidCount(s.data_destroyed) ||
+    (impact !== undefined && invalidCount(impact.dataDestroyed));
   if (unknown) {
     return {
       level: 'typed',
@@ -65,9 +81,13 @@ export function typedTarget(s: Pick<ApprovalSummary, 'namespace' | 'name' | 'res
 }
 
 // canSelfApprove: false only when the two names match exactly (trimmed,
-// case-sensitive, as the server records them). An empty meName means
-// /api/me has not answered yet; that never blocks, because the server is
-// the real authority and re-checks on submit regardless.
+// case-sensitive, as the server records them). The server does not
+// enforce this itself — it is a UI-only guard (spec §6, §9) — so it
+// fails open rather than lock someone out over a rendering quirk. An
+// empty meName means /api/me has not answered yet, which only means the
+// UI cannot tell who "self" is yet; that never blocks by itself.
 export function canSelfApprove(meName: string, human: string): boolean {
-  return meName.trim() === '' || meName.trim() !== human.trim();
+  const me = meName.trim();
+  const h = (human ?? '').trim();
+  return me === '' || me !== h;
 }

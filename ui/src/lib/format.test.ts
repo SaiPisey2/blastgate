@@ -35,8 +35,8 @@ describe('clock', () => {
     expect(clock('not-a-date')).toBe('not-a-date');
   });
 
-  it('formats a valid date without throwing', () => {
-    expect(clock(new Date().toISOString())).not.toBe('');
+  it('formats a valid date as a 24h clock reading', () => {
+    expect(clock(new Date().toISOString())).toMatch(/^\d{1,2}:\d{2}:\d{2}$/);
   });
 });
 
@@ -73,5 +73,19 @@ describe('ago', () => {
 
   it('switches to days once past a day', () => {
     expect(ago(90_000)).toBe('1 d ago');
+  });
+
+  it('promotes a value that rounds up to a full unit instead of overflowing it', () => {
+    // 3599/60 = 59.98 min, which rounds to 60: that must promote to
+    // hours rather than print "60 min ago".
+    expect(ago(3599)).toBe('1 h ago');
+    // 86399/3600 = 24.0 h once minutes have already rounded up, which
+    // must promote to days rather than print "24 h ago".
+    expect(ago(86_399)).toBe('1 d ago');
+  });
+
+  it('reads as just now for a non-finite input', () => {
+    expect(ago(NaN)).toBe('just now');
+    expect(ago(Infinity)).toBe('just now');
   });
 });

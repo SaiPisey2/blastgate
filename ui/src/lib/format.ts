@@ -40,10 +40,17 @@ export function plural(n: number, word: string, many = word + 's'): string {
 
 // ago is coarser than duration: it always reads as elapsed time ("2 min
 // ago"), for places that never show a live-counting clock, only a stamp.
+// Each unit is rounded before checking whether it should be promoted to
+// the next one, so a value that rounds up to a full unit (3599s, 86399s)
+// promotes instead of printing "60 min ago" or "24 h ago".
 export function ago(seconds: number): string {
+  if (!Number.isFinite(seconds)) return 'just now';
   const s = Math.max(0, seconds);
   if (s < 45) return 'just now';
-  if (s < 3600) return `${Math.round(s / 60)} min ago`;
-  if (s < 86_400) return `${Math.round(s / 3600)} h ago`;
-  return `${Math.round(s / 86_400)} d ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  return `${d} d ago`;
 }
