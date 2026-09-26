@@ -676,7 +676,345 @@
 
 /* === Agents === */
 
+.agents-page {
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.agents-head {
+  margin: 0 0 var(--s-6);
+}
+
+.agents-head h1 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agents-lede {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.agents-banner-error {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-ctl);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.agents-loading {
+  color: var(--text-muted);
+}
+
+/* A row can grow tall while it asks "Stop <agent> for <human>?", so the
+   table scrolls sideways at narrow widths rather than the page. */
+.agents-table-wrap {
+  overflow-x: auto;
+}
+
+.agents-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.agents-table th {
+  padding: var(--s-2) var(--s-4) var(--s-2) 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.agents-table td {
+  padding: var(--s-3) var(--s-4) var(--s-3) 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.agents-table tr:last-child td {
+  border-bottom: none;
+}
+
+.agents-status-ok {
+  color: var(--ok-fg);
+}
+
+.agents-status-off {
+  color: var(--text-muted);
+}
+
+.agents-row-actions {
+  min-width: 12rem;
+}
+
+.agents-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.agents-confirm > span:first-child {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.agents-confirm-buttons {
+  display: flex;
+  gap: var(--s-2);
+}
+
+.agents-row-error {
+  margin: var(--s-2) 0 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-13);
+  overflow-wrap: anywhere;
+}
+
 /* === Policy === */
+
+.policy-page {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.policy-head {
+  margin: 0 0 var(--s-6);
+}
+
+.policy-head h1 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.policy-lede {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* The loaded policy opens in 180ms, native disclosure timing (spec §7);
+   the marker itself is drawn, not the browser's own triangle, so the
+   toggle affordance stays consistent in both themes. */
+.policy-disclosure {
+  margin: 0 0 var(--s-6);
+  padding: var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+}
+
+.policy-disclosure summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 500;
+  list-style: none;
+}
+
+.policy-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.policy-disclosure summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  margin-right: var(--s-2);
+  color: var(--text-faint);
+  transition: transform 180ms;
+}
+
+.policy-disclosure[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.policy-loaded-text {
+  max-height: 320px;
+  margin: var(--s-4) 0 0;
+  padding: var(--s-3);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--raised);
+  color: var(--text);
+  font-size: var(--fs-13);
+  white-space: pre-wrap;
+}
+
+.policy-try h2 {
+  margin: 0 0 var(--s-4);
+  font-size: var(--fs-18);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.policy-counter {
+  display: block;
+  margin: 0 0 var(--s-2);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-variant-numeric: tabular-nums;
+}
+
+.policy-counter-danger {
+  color: var(--danger-fg);
+}
+
+.policy-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.policy-field > span,
+.policy-hours-field > span {
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+.policy-textarea {
+  padding: var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-13);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.policy-textarea:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.policy-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-4);
+  margin-top: var(--s-4);
+}
+
+.policy-hours-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.policy-hours-input {
+  width: 8ch;
+  height: var(--s-9);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--fs-15) / 1 var(--font-mono);
+}
+
+.policy-hours-input:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.policy-form-error {
+  margin: var(--s-3) 0 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-13);
+}
+
+.policy-error {
+  margin-top: var(--s-6);
+  padding: var(--s-4);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-panel);
+  background: var(--danger-bg);
+}
+
+.policy-error h2 {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-15);
+  font-weight: 600;
+  color: var(--danger-fg);
+}
+
+.policy-error-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--danger-fg);
+  white-space: pre-wrap;
+}
+
+.policy-banner-error {
+  margin-top: var(--s-6);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-ctl);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.policy-result {
+  margin-top: var(--s-6);
+  padding: var(--s-4) var(--s-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+}
+
+.policy-result-count {
+  margin: 0 0 var(--s-4);
+  color: var(--text);
+}
+
+.policy-result-count strong {
+  font-size: var(--fs-18);
+}
+
+.policy-note {
+  margin: 0 0 var(--s-4);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.policy-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.policy-changes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.policy-change {
+  padding: var(--s-3) 0;
+  border-top: 1px solid var(--line);
+}
+
+.policy-change-sentence {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.policy-change-sentence .mono {
+  font-weight: 500;
+}
+
+.policy-change-decision {
+  margin: var(--s-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
 
 /* === Sign in === */
 

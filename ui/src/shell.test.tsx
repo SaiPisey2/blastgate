@@ -293,8 +293,8 @@ describe('Auth', () => {
     renderWithMotion(<App />);
     await screen.findByText('bob');
     for (const [hash, tab, heading] of [
-      ['#/agents', 'Agents', 'Agent sessions'],
-      ['#/sessions', 'Agents', 'Agent sessions'],
+      ['#/agents', 'Agents', 'Agents'],
+      ['#/sessions', 'Agents', 'Agents'],
       ['#/policy', 'Policy', 'Policy'],
       ['#/activity/outside', 'Activity', 'Bypass alerts'],
       ['#/bypass', 'Activity', 'Bypass alerts'],

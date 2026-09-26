@@ -74,7 +74,7 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: 'Waiting' }).getAttribute('aria-current')).toBe('page');
 
     for (const [hash, heading] of [
-      ['#/sessions', 'Agent sessions'],
+      ['#/sessions', 'Agents'],
       ['#/policy', 'Policy'],
       ['#/bypass', 'Bypass alerts'],
     ]) {

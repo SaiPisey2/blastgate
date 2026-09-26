@@ -7,8 +7,8 @@ import SignIn from './views/SignIn';
 import Feed from './views/Feed';
 import Queue from './views/Queue';
 import Approval from './views/Approval';
-import Sessions from './views/Sessions';
-import Policy from './views/Policy';
+import Agents from './views/Agents';
+import PolicyView from './views/PolicyView';
 import Bypass from './views/Bypass';
 
 export default function App() {
@@ -78,9 +78,9 @@ function Screen({ route }: { route: Route }) {
     case 'outside':
       return <Bypass />;
     case 'agents':
-      return <Sessions />;
+      return <Agents />;
     case 'policy':
-      return <Policy />;
+      return <PolicyView />;
     case 'approval':
       return <Approval id={route.id} />;
     case 'notfound':
