@@ -296,8 +296,8 @@ describe('Auth', () => {
       ['#/agents', 'Agents', 'Agents'],
       ['#/sessions', 'Agents', 'Agents'],
       ['#/policy', 'Policy', 'Policy'],
-      ['#/activity/outside', 'Activity', 'Bypass alerts'],
-      ['#/bypass', 'Activity', 'Bypass alerts'],
+      ['#/activity/outside', 'Activity', 'Changes outside blastgate'],
+      ['#/bypass', 'Activity', 'Changes outside blastgate'],
     ]) {
       await go(hash);
       expect(await screen.findByRole('heading', { level: 1, name: heading }), hash).toBeTruthy();

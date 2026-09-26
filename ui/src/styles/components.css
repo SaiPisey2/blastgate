@@ -1565,3 +1565,369 @@
     transition: none;
   }
 }
+
+/* === Activity and outside changes (Task 7) === */
+
+.activity-head,
+.outside-head {
+  margin-bottom: var(--s-6);
+}
+
+.activity-head h1,
+.outside-head h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.activity-lede,
+.outside-lede {
+  margin: var(--s-1) 0 0;
+  color: var(--text-muted);
+}
+
+/* One banner for every change made around blastgate. Amber, not red:
+   it asks for a review, it does not say something broke. Secondary text
+   is tinted from the banner's own hue rather than grey. */
+.activity-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-6);
+  padding: var(--s-4) var(--s-5);
+  border: 1px solid var(--caution-line);
+  border-radius: var(--r-panel);
+  background: var(--caution-bg);
+  color: var(--caution-fg);
+}
+
+.activity-banner-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.activity-banner-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.activity-banner-sub {
+  margin: var(--s-1) 0 0;
+  font-size: var(--fs-13);
+}
+
+.activity-banner-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--s-8);
+  color: var(--caution-fg);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.activity-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.activity-chips,
+.activity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.activity-chip {
+  min-height: var(--s-8);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  background: transparent;
+  color: var(--text-muted);
+  font: 500 var(--fs-13) / 1 var(--font-sans);
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+
+.activity-chip:hover {
+  color: var(--text);
+}
+
+.activity-chip[aria-pressed="true"] {
+  border-color: var(--line-strong);
+  background: var(--raised);
+  color: var(--text);
+}
+
+.activity-chip:focus-visible,
+.activity-row:focus-visible,
+.activity-list:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.activity-pause[aria-pressed="true"] {
+  border-color: var(--info-line);
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+
+.activity-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.activity-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  flex: 0 1 14rem;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+/* Two classes deep: the old stylesheet's input[type='text'] and
+   input:focus load later and would otherwise win. */
+.activity-more .activity-field input,
+.outside-head .outside-range select {
+  height: var(--s-9);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--fs-15) / 1 var(--font-sans);
+}
+
+.activity-more .activity-field input {
+  font-family: var(--font-mono);
+}
+
+.activity-more .activity-field input:focus,
+.outside-head .outside-range select:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-color: var(--line-strong);
+  box-shadow: none;
+}
+
+.activity-paused,
+.activity-loading,
+.outside-loading,
+.outside-cap {
+  margin: 0 0 var(--s-3);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.activity-error,
+.outside-error {
+  margin: 0 0 var(--s-3);
+  color: var(--danger-fg);
+}
+
+/* The slot keeps the pill's height whether or not the pill is showing,
+   so the pill appearing never pushes the list down under a reader. */
+.activity-pill-slot {
+  display: flex;
+  justify-content: center;
+  min-height: var(--s-8);
+  margin-bottom: var(--s-3);
+}
+
+.activity-list {
+  max-height: max(18rem, calc(100dvh - 20rem));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--line);
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  gap: var(--s-4);
+  align-items: baseline;
+  padding: var(--s-3) var(--s-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-when,
+.outside-when {
+  color: var(--text-faint);
+  font-size: var(--fs-13);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.activity-what,
+.outside-what,
+.outside-who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-sentence {
+  color: var(--text);
+}
+
+a.activity-sentence {
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+}
+
+a.activity-sentence:hover {
+  text-decoration-color: currentColor;
+}
+
+.activity-target,
+.outside-target {
+  font-size: 0.93em;
+}
+
+.activity-who,
+.outside-groups {
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+/* Reads are the bulk of traffic and never need attention; muted, so the
+   writes stand out. */
+.activity-row-read .activity-sentence {
+  color: var(--text-muted);
+}
+
+/* A row that arrived live, for DUR.tint (110ms), passed in as a custom
+   property. Colour only; the reduced-motion block in base.css shortens
+   it further. */
+.activity-row-fresh {
+  animation: activity-tint var(--activity-tint, 110ms) cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes activity-tint {
+  from {
+    background-color: var(--info-bg);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.activity-outcome {
+  justify-self: end;
+}
+
+/* Allowed, In flight and Dry run need no attention: a quiet outline and
+   the word, no colour and no glyph. */
+.activity-outcome-neutral,
+.outside-dry {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--s-1) var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-tag);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.activity-more-rows {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--s-4);
+}
+
+.outside-back {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-13);
+}
+
+.outside-back a {
+  color: var(--link);
+  text-underline-offset: 3px;
+}
+
+.outside-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-4);
+}
+
+.outside-range {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+.outside-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.outside-row {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) minmax(0, 1.4fr) 5.5rem;
+  gap: var(--s-4);
+  align-items: baseline;
+  padding: var(--s-3) var(--s-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.outside-flags {
+  justify-self: end;
+}
+
+/* Narrow screens: time and outcome share the first line, the sentence
+   takes the full width beneath, so nothing scrolls sideways at 360px. */
+@media (max-width: 640px) {
+  .activity-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--s-1) var(--s-3);
+  }
+
+  .activity-row .activity-what {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .outside-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--s-1) var(--s-3);
+  }
+
+  .outside-row .outside-who,
+  .outside-row .outside-what {
+    grid-column: 1 / -1;
+  }
+
+  .outside-row .outside-flags {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}

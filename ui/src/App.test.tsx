@@ -60,11 +60,11 @@ describe('App', () => {
       'GET /api/bypass': { body: [] },
     });
     render(<App />);
-    const held = (await screen.findByText('held-one')).closest('tr')!;
+    const held = (await screen.findByText('held-one')).closest('.activity-row')!;
     const link = held.querySelector('a[href^="#/approvals/"]')!;
     expect(link.getAttribute('href')).toBe(`#/approvals/${ID1}`);
     // An approval id that is not one never becomes a link.
-    expect(screen.getByText('crafted').closest('tr')!.querySelector('a')).toBeNull();
+    expect(screen.getByText('crafted').closest('.activity-row')!.querySelector('a')).toBeNull();
 
     await act(async () => {
       window.location.hash = link.getAttribute('href')!;
@@ -76,7 +76,7 @@ describe('App', () => {
     for (const [hash, heading] of [
       ['#/sessions', 'Agents'],
       ['#/policy', 'Policy'],
-      ['#/bypass', 'Bypass alerts'],
+      ['#/bypass', 'Changes outside blastgate'],
     ]) {
       await act(async () => {
         window.location.hash = hash;

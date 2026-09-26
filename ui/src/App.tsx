@@ -4,12 +4,12 @@ import { navigate, parseHash, useHash, type Route } from './router';
 import Shell from './components/Shell';
 import EmptyState from './components/EmptyState';
 import SignIn from './views/SignIn';
-import Feed from './views/Feed';
+import Activity from './views/Activity';
 import Waiting from './views/Waiting';
 import Details from './views/Details';
 import Agents from './views/Agents';
 import PolicyView from './views/PolicyView';
-import Bypass from './views/Bypass';
+import Outside from './views/Outside';
 
 export default function App() {
   const hash = useHash();
@@ -74,9 +74,9 @@ function Screen({ route, me }: { route: Route; me: string }) {
     case 'login':
       return <Waiting me={me} />;
     case 'activity':
-      return <Feed />;
+      return <Activity />;
     case 'outside':
-      return <Bypass />;
+      return <Outside />;
     case 'agents':
       return <Agents />;
     case 'policy':
