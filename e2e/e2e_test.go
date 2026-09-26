@@ -267,29 +267,28 @@ func (a *adminClient) do(t *testing.T, method, path string, body, out any) int {
 // startWithWebhook runs blastgate with its observe webhook listening
 // where the kind API server can reach it, registers the webhook in the
 // cluster with `blastgate webhook-config` and the fixture's admin
-// kubeconfig, and removes the registration when the test ends.
-//
-// The address is the kind network's gateway (BLASTGATE_E2E_HOST_IP), the
-// host's side of the bridge the node sits on. With Docker Desktop the
-// bridge lives inside Docker's VM, so no host interface has that address
-// and the bind fails; there the host's own outbound address is used
-// instead, which the node reaches through the VM's NAT. Either way the
-// node is asked to reach the listener before anything is registered: a
+// kubeconfig, and removes the registration when the test ends. The node
+// is asked to reach the listener before anything is registered: a
 // registration it cannot reach would, under failurePolicy Ignore, record
 // nothing, and every webhook assertion would be about an empty table.
 func startWithWebhook(t *testing.T) *gate {
 	t.Helper()
-	host := webhookHost(t)
-	addr := freeAddr(t, host)
-	g := start(t, "BLASTGATE_WEBHOOK_LISTEN="+addr, "BLASTGATE_ALLOW_REMOTE=1", "BLASTGATE_TLS_HOSTS=127.0.0.1,localhost,"+host)
+	r := webhookRoute(t)
+	listen := freeAddr(t, r.listen)
+	_, port, _ := net.SplitHostPort(listen)
+	url := "https://" + net.JoinHostPort(r.host, port) + "/validate"
+	env := []string{"BLASTGATE_WEBHOOK_LISTEN=" + listen, "BLASTGATE_TLS_HOSTS=127.0.0.1,localhost," + r.host}
+	if r.remote {
+		env = append(env, "BLASTGATE_ALLOW_REMOTE=1")
+	}
+	g := start(t, env...)
+	t.Logf("webhook route %s: listening on %s, registered as %s", r.name, listen, url)
 	// GET on /validate is a 405: reached, TLS done, the handler answering.
-	probe, _ := exec.Command("docker", "exec", fixtureNode, "curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-		"--max-time", "5", "https://"+addr+"/validate").Output()
-	if code := strings.TrimSpace(string(probe)); code != "405" && code != "400" {
-		t.Logf("probe of https://%s/validate from %s answered %q", addr, fixtureNode, code)
+	if code := nodeProbe(url); code != "405" && code != "400" {
+		t.Logf("probe of %s from %s answered %q", url, fixtureNode, code)
 		t.Skip("host not reachable from kind")
 	}
-	cfg, err := g.run(t, "webhook-config", "--url", "https://"+addr+"/validate")
+	cfg, err := g.run(t, "webhook-config", "--url", url)
 	if err != nil {
 		t.Fatalf("webhook-config: %v", err)
 	}
@@ -307,26 +306,77 @@ func startWithWebhook(t *testing.T) *gate {
 // fixtureNode is the kind node container of the blastgate-fixture cluster.
 const fixtureNode = "blastgate-fixture-control-plane"
 
-func webhookHost(t *testing.T) string {
+// nodeProbe fetches url from inside the kind node and returns the HTTP
+// status, or "000" when nothing answered.
+func nodeProbe(url string) string {
+	out, _ := exec.Command("docker", "exec", fixtureNode, "curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
+		"--max-time", "5", url).Output()
+	return strings.TrimSpace(string(out))
+}
+
+// route is how the kind API server reaches a listener on this
+// host: the address blastgate binds, the name the registration and the
+// serving certificate use, and whether binding it needs
+// BLASTGATE_ALLOW_REMOTE.
+type route struct {
+	name, listen, host string
+	remote             bool
+}
+
+// webhookRoute picks the first route the node can actually reach, tried
+// with a throwaway listener before blastgate starts:
+//
+//  1. The kind network's gateway (BLASTGATE_E2E_HOST_IP), the host's side
+//     of the bridge the node sits on: Linux and CI. It only binds where
+//     the host really has that address.
+//  2. Docker Desktop, where the bridge lives inside Docker's VM and no
+//     host interface has the gateway's address: loopback, reached from
+//     containers as host.docker.internal, which Docker Desktop forwards
+//     to the host's loopback. Nothing outside the machine can connect.
+//  3. The host's own outbound address, only with BLASTGATE_E2E_ALLOW_LAN=1
+//     (ruling P2-R28): that address faces the local network, and a test
+//     suite must not open a listener there unless asked.
+//
+// With none reachable the webhook tests skip, and say so.
+func webhookRoute(t *testing.T) route {
 	t.Helper()
 	gw := os.Getenv("BLASTGATE_E2E_HOST_IP")
 	if net.ParseIP(gw) == nil {
 		t.Fatalf("BLASTGATE_E2E_HOST_IP %q is not an address; run through make fixture-test", gw)
 	}
-	if l, err := net.Listen("tcp", net.JoinHostPort(gw, "0")); err == nil {
-		l.Close()
-		return gw
+	routes := []route{
+		{name: "kind gateway", listen: gw, host: gw, remote: true},
+		{name: "docker desktop loopback", listen: "127.0.0.1", host: "host.docker.internal"},
 	}
-	// A UDP "connection" sends nothing; it only asks the routing table
-	// which local address traffic toward the gateway would leave from.
-	c, err := net.Dial("udp", net.JoinHostPort(gw, "9"))
-	if err != nil {
-		t.Skip("host not reachable from kind")
+	if os.Getenv("BLASTGATE_E2E_ALLOW_LAN") == "1" {
+		// A UDP "connection" sends nothing; it only asks the routing
+		// table which local address traffic toward the gateway leaves from.
+		if c, err := net.Dial("udp", net.JoinHostPort(gw, "9")); err == nil {
+			lan := c.LocalAddr().(*net.UDPAddr).IP.String()
+			c.Close()
+			routes = append(routes, route{name: "lan address (BLASTGATE_E2E_ALLOW_LAN=1)", listen: lan, host: lan, remote: true})
+		}
 	}
-	defer c.Close()
-	host := c.LocalAddr().(*net.UDPAddr).IP.String()
-	t.Logf("kind gateway %s is not a local address (Docker Desktop); webhook listens on %s", gw, host)
-	return host
+	for _, r := range routes {
+		l, err := net.Listen("tcp", net.JoinHostPort(r.listen, "0"))
+		if err != nil {
+			t.Logf("webhook route %s: cannot bind %s: %v", r.name, r.listen, err)
+			continue
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		})}
+		go srv.Serve(l)
+		_, port, _ := net.SplitHostPort(l.Addr().String())
+		code := nodeProbe("http://" + net.JoinHostPort(r.host, port) + "/validate")
+		srv.Close()
+		if code == "405" {
+			return r
+		}
+		t.Logf("webhook route %s: not reachable from %s (%q)", r.name, fixtureNode, code)
+	}
+	t.Skip("host not reachable from kind")
+	return route{}
 }
 
 // bypassRow is one row of GET /api/bypass.
