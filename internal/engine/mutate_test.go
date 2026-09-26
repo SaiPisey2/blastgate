@@ -18,6 +18,7 @@ import (
 
 	"github.com/SaiPisey2/blastgate/internal/normalize"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
+	"github.com/SaiPisey2/blastgate/internal/webhook"
 )
 
 type fakeLook struct {
@@ -81,9 +82,13 @@ func TestScaleDownAssessesDisruptionWorstCase(t *testing.T) {
 	if look.lastRm.Count != 3 || look.lastRm.Selector == nil || look.lastRm.Selector.MatchLabels["app"] != "web" {
 		t.Errorf("removal = %+v", look.lastRm)
 	}
-	// The dry-run and the before read must both act as the human.
+	// The dry-run and the before read must both act as the human. They
+	// carry the session under the extra the webhook reads: server-side dry
+	// runs reach it too, and under any other key each would be recorded
+	// as a write around blastgate.
 	for _, r := range seen {
-		if r.Header.Get("Impersonate-User") != "alice" || r.Header.Get("Impersonate-Extra-Blastgate-Agent") != "coding-agent" {
+		if r.Header.Get("Impersonate-User") != "alice" || r.Header.Get("Impersonate-Extra-Blastgate-Agent") != "coding-agent" ||
+			r.Header.Get("Impersonate-Extra-"+webhook.SessionExtra) != alice.Session {
 			t.Errorf("request %s %s not impersonated: %v", r.Method, r.URL, r.Header)
 		}
 	}
