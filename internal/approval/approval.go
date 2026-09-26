@@ -141,6 +141,21 @@ func (s *Service) Deny(ctx context.Context, id, by string) (store.Approval, erro
 	return s.Store.ApprovalByID(ctx, id)
 }
 
+// ErrNotPending is what Approve and Deny return, via errors.Is, for an
+// approval a human can no longer decide: already decided, spent, or
+// pending past its expiry. The admin API answers it with 409 rather than
+// 500; without a sentinel it could only tell "wrong state" from "blastgate
+// failed" by matching message text.
+var ErrNotPending = errors.New("approval is not pending")
+
+// notPendingError keeps the CLI's long-standing message text while
+// matching ErrNotPending.
+type notPendingError string
+
+func notPending(msg string) error              { return notPendingError(msg) }
+func (e notPendingError) Error() string        { return string(e) }
+func (e notPendingError) Is(target error) bool { return target == ErrNotPending }
+
 // decidable loads an approval a human may still decide: pending and not
 // past its expiry. A stale pending one must not be approved — the impact
 // the human is looking at may be an hour old.
@@ -150,10 +165,10 @@ func (s *Service) decidable(ctx context.Context, id string) (store.Approval, err
 		return store.Approval{}, err
 	}
 	if a.Status != "pending" {
-		return store.Approval{}, fmt.Errorf("approval %s is %s, not pending", id, a.Status)
+		return store.Approval{}, notPending(fmt.Sprintf("approval %s is %s, not pending", id, a.Status))
 	}
 	if s.Now().After(a.Expires) {
-		return store.Approval{}, fmt.Errorf("approval %s is pending but expired", id)
+		return store.Approval{}, notPending(fmt.Sprintf("approval %s is pending but expired", id))
 	}
 	return a, nil
 }

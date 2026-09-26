@@ -351,3 +351,39 @@ func TestServeRefusesAHoldOver50s(t *testing.T) {
 		t.Errorf("refusal does not name BLASTGATE_HOLD: %s", errb.String())
 	}
 }
+
+// TestAuditExportBytesAreStable pins the export's exact bytes, every
+// field set, a column that is not JSON and one that is empty: the row
+// type moved into internal/admin (shared with the UI feed), and a
+// renamed tag, a reordered field or the feed's id leaking into the
+// export would silently change what downstream readers of the JSONL get.
+func TestAuditExportBytesAreStable(t *testing.T) {
+	dir, env := cliEnv(t)
+	withStore(t, dir, func(st *store.Store) {
+		for _, r := range []store.AuditRow{
+			{
+				At: time.Date(2026, 1, 2, 3, 4, 5, 678e6, time.UTC), Kind: "decision", RequestID: "r1", Session: "0123456789abcdef",
+				Human: "alice", Agent: "coding-agent", Source: "proxy", Verb: "delete", Group: "apps", Resource: "deployments",
+				Subresource: "scale", Namespace: "demo", Name: "web", RequestDigest: "d1", ActionJSON: []byte(`{"verb":"delete"}`),
+				ImpactJSON: []byte(`{"class":"TERMINAL"}`), LabelsJSON: []byte(`not json`), Class: "TERMINAL", Measured: true,
+				Rule: "data-destruction", Decision: "hold", ApprovalID: "0123456789abcdef0123456789abcdef",
+				Status: 403, Outcome: "held", LatencyMS: 12, Snapshot: "snap-1",
+			},
+			{At: time.Date(2026, 1, 2, 3, 4, 6, 0, time.UTC), Kind: "result", RequestID: "r1", Status: 200, Outcome: "ok"},
+		} {
+			if err := st.AppendAudit(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	code, out, errs := runCLI(env, "audit", "export", "--since", "1000000h")
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, errs)
+	}
+	const want = `{"at":"2026-01-02T03:04:05.678Z","kind":"decision","request_id":"r1","session":"0123456789abcdef","human":"alice","agent":"coding-agent","source":"proxy","verb":"delete","group":"apps","resource":"deployments","subresource":"scale","namespace":"demo","name":"web","request_digest":"d1","class":"TERMINAL","measured":true,"rule":"data-destruction","decision":"hold","approval_id":"0123456789abcdef0123456789abcdef","status":403,"outcome":"held","latency_ms":12,"snapshot":"snap-1","action":{"verb":"delete"},"impact":{"class":"TERMINAL"},"labels":"not json"}
+{"at":"2026-01-02T03:04:06Z","kind":"result","request_id":"r1","session":"","human":"","agent":"","source":"","verb":"","group":"","resource":"","subresource":"","namespace":"","name":"","request_digest":"","class":"","measured":false,"rule":"","decision":"","approval_id":"","status":200,"outcome":"ok","latency_ms":0,"snapshot":""}
+`
+	if out != want {
+		t.Errorf("export bytes changed:\ngot:\n%s\nwant:\n%s", out, want)
+	}
+}

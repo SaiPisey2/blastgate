@@ -199,13 +199,20 @@ func TestApproveRefusesDecidedOrStale(t *testing.T) {
 	if _, err := s.Deny(context.Background(), a.ID, "bob"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Approve(context.Background(), a.ID, "carol"); err == nil {
-		t.Error("approved a denied approval")
+	// ErrNotPending is how the admin API tells a 409 from a 500.
+	if _, err := s.Approve(context.Background(), a.ID, "carol"); !errors.Is(err, ErrNotPending) {
+		t.Errorf("approving a denied approval: %v, want ErrNotPending", err)
 	}
 	b := pending(t, st, now)
 	now = now.Add(2 * time.Hour)
-	if _, err := s.Approve(context.Background(), b.ID, "carol"); err == nil {
-		t.Error("approved a pending approval past its expiry")
+	if _, err := s.Approve(context.Background(), b.ID, "carol"); !errors.Is(err, ErrNotPending) {
+		t.Errorf("approving a stale pending approval: %v, want ErrNotPending", err)
+	}
+	if _, err := s.Deny(context.Background(), b.ID, "carol"); !errors.Is(err, ErrNotPending) {
+		t.Errorf("denying a stale pending approval: %v, want ErrNotPending", err)
+	}
+	if _, err := s.Approve(context.Background(), "ffffffffffffffffffffffffffffffff", "carol"); errors.Is(err, ErrNotPending) || !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("approving an unknown id: %v, want ErrNotFound only", err)
 	}
 	if row, _ := st.ApprovalByID(context.Background(), b.ID); row.Token != "" {
 		t.Error("a token was stored for a stale approval")
