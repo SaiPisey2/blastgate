@@ -88,6 +88,15 @@ describe('displayClass', () => {
       expect(displayClass(r)).toEqual({ cls: '', measured: false });
     }
   });
+
+  it('leaves a real class alone, even for a read (I2)', () => {
+    // Only the blank-class legacy-read combination is special-cased; a row
+    // that already carries a real class is shown as-is. Guards against a
+    // fix that drops the `class === ''` check and starts overwriting every
+    // allowed read's class with the READ label.
+    const measuredRead = feedRow({ kind: 'result', rule: 'read', decision: 'allow', class: 'REVERSIBLE', measured: true });
+    expect(displayClass(measuredRead)).toEqual({ cls: 'REVERSIBLE', measured: true });
+  });
 });
 
 describe('outcomeOf', () => {
@@ -112,12 +121,20 @@ describe('outcomeOf', () => {
     expect(outcomeOf(entry({ decision: 'allow', status: 502, outcome: '' }, true))).toBe('Failed');
   });
 
-  it('Failed when the outcome is error', () => {
-    expect(outcomeOf(entry({ decision: 'allow', status: 200, outcome: 'error' }, true))).toBe('Failed');
+  it('Interrupted for the proxy\'s "aborted" outcome (a forwarded stream dropped)', () => {
+    expect(outcomeOf(entry({ decision: 'allow', status: 200, outcome: 'aborted' }, true))).toBe('Interrupted');
   });
 
-  it('Allowed otherwise', () => {
-    expect(outcomeOf(entry({ decision: 'allow', status: 200, outcome: 'ok' }, true))).toBe('Allowed');
+  it('Interrupted for the proxy\'s "client cancelled; outcome unknown" outcome', () => {
+    expect(outcomeOf(entry({ decision: 'allow', status: 0, outcome: 'client cancelled; outcome unknown' }, true))).toBe('Interrupted');
+  });
+
+  it('Interrupted for any other non-empty outcome the server has not been seen to emit yet', () => {
+    expect(outcomeOf(entry({ decision: 'allow', status: 200, outcome: 'held' }, true))).toBe('Interrupted');
+  });
+
+  it('Allowed when the outcome is empty and nothing else applies', () => {
+    expect(outcomeOf(entry({ decision: 'allow', status: 200, outcome: '' }, true))).toBe('Allowed');
   });
 });
 

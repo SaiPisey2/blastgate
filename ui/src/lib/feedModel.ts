@@ -77,10 +77,16 @@ export function minRawId(entries: Entry[]): number | undefined {
 // read the rule or the number. Decision strings (allow/hold/deny) come
 // from the gate's policy.Decision; outcome/status come from the result
 // row the gate appends in Complete.
-export function outcomeOf(e: Entry): 'Allowed' | 'Waiting' | 'Denied' | 'In flight' | 'Failed' {
+// The proxy never sets outcome to "error"; its two real abnormal outcomes
+// are "aborted" (a forwarded stream dropped) and "client cancelled;
+// outcome unknown" (outcomeAborted/outcomeUnknown, internal/proxy/proxy.go).
+// Either one, or any other non-empty outcome a future build adds, reads as
+// Interrupted rather than Allowed.
+export function outcomeOf(e: Entry): 'Allowed' | 'Waiting' | 'Denied' | 'In flight' | 'Failed' | 'Interrupted' {
   if (!e.done) return 'In flight';
   if (e.row.decision === 'hold') return 'Waiting';
   if (e.row.decision === 'deny') return 'Denied';
-  if (e.row.status >= 500 || e.row.outcome === 'error') return 'Failed';
+  if (e.row.status >= 500) return 'Failed';
+  if (e.row.outcome !== '') return 'Interrupted';
   return 'Allowed';
 }
