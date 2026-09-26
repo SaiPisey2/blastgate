@@ -264,8 +264,32 @@ func (s *Store) SessionByTokenHash(ctx context.Context, h []byte) (Session, erro
 	return sess, err
 }
 
+// SessionByID finds one session by its id, for the admin API's revoke,
+// which answers with the session as it now stands.
+func (s *Store) SessionByID(ctx context.Context, id string) (Session, error) {
+	sess, err := scanSession(s.db.QueryRowContext(ctx, `SELECT `+sessionCols+` FROM sessions WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	return sess, err
+}
+
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionCols+` FROM sessions ORDER BY created_at DESC, id`)
+	return s.querySessions(ctx, `SELECT `+sessionCols+` FROM sessions ORDER BY created_at DESC, id`)
+}
+
+// ListSessionsLimit is ListSessions stopping after the newest limit rows:
+// the admin API serves it per request, and nothing ever deletes a
+// session. A limit below 1 returns nothing rather than meaning "no limit".
+func (s *Store) ListSessionsLimit(ctx context.Context, limit int) ([]Session, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	return s.querySessions(ctx, `SELECT `+sessionCols+` FROM sessions ORDER BY created_at DESC, id LIMIT ?`, limit)
+}
+
+func (s *Store) querySessions(ctx context.Context, q string, args ...any) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

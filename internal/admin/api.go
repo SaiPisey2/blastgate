@@ -42,6 +42,7 @@ const (
 	maxSinceHours  = 720
 	feedLimit      = 50
 	approvalsLimit = 200
+	sessionsLimit  = 200
 	listLimitMax   = 500
 	bypassLimit    = 100
 	bypassSince    = 24
@@ -88,7 +89,8 @@ type apiStore interface {
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
-	ListSessions(ctx context.Context) ([]store.Session, error)
+	ListSessionsLimit(ctx context.Context, limit int) ([]store.Session, error)
+	SessionByID(ctx context.Context, id string) (store.Session, error)
 	RevokeSession(ctx context.Context, id string, at time.Time) error
 	BypassSince(ctx context.Context, since time.Time, limit int) ([]store.BypassRow, error)
 }
@@ -488,7 +490,14 @@ func sessionRow(s store.Session, now time.Time) SessionRow {
 }
 
 func (h *api) sessions(w http.ResponseWriter, r *http.Request, _ store.UISession) {
-	l, err := h.st.ListSessions(r.Context())
+	// Every `session new` adds a row and none is ever deleted, so the page
+	// is bounded like every other list here.
+	limit, ok := listLimit(r, sessionsLimit)
+	if !ok {
+		fail(w, http.StatusBadRequest, errBadQuery)
+		return
+	}
+	l, err := h.st.ListSessionsLimit(r.Context(), limit)
 	if err != nil {
 		h.internal(w, "list sessions", err)
 		return
@@ -521,18 +530,16 @@ func (h *api) revoke(w http.ResponseWriter, r *http.Request, u store.UISession) 
 		return
 	}
 	h.log.Info("agent session revoked", "session", id, "by", u.ApproverName)
-	l, err := h.st.ListSessions(r.Context())
-	if err != nil {
-		h.internal(w, "list sessions", err)
+	s, err := h.st.SessionByID(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		fail(w, http.StatusNotFound, errNotFound)
 		return
 	}
-	for _, s := range l {
-		if s.ID == id {
-			reply(w, http.StatusOK, sessionRow(s, now))
-			return
-		}
+	if err != nil {
+		h.internal(w, "session lookup", err)
+		return
 	}
-	fail(w, http.StatusNotFound, errNotFound)
+	reply(w, http.StatusOK, sessionRow(s, now))
 }
 
 // ---- policy ----

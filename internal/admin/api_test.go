@@ -94,9 +94,14 @@ func (c *countingStore) ApprovalByID(ctx context.Context, id string) (store.Appr
 	c.n.Add(1)
 	return c.Store.ApprovalByID(ctx, id)
 }
-func (c *countingStore) ListSessions(ctx context.Context) ([]store.Session, error) {
+func (c *countingStore) ListSessionsLimit(ctx context.Context, limit int) ([]store.Session, error) {
 	c.n.Add(1)
-	return c.Store.ListSessions(ctx)
+	c.lastLimit.Store(int64(limit))
+	return c.Store.ListSessionsLimit(ctx, limit)
+}
+func (c *countingStore) SessionByID(ctx context.Context, id string) (store.Session, error) {
+	c.n.Add(1)
+	return c.Store.SessionByID(ctx, id)
 }
 func (c *countingStore) RevokeSession(ctx context.Context, id string, at time.Time) error {
 	c.n.Add(1)
@@ -1133,5 +1138,43 @@ func TestSummaryCarriesMeasured(t *testing.T) {
 	_, body = c.get(t, "/api/approvals/"+exec)
 	if d := decode[map[string]any](t, body); d["measured"] != false {
 		t.Errorf("detail of an unmeasured hold: %s", body)
+	}
+}
+
+// TestSessionsListIsBounded: the sessions table only grows (every
+// `session new` adds a row, none is deleted), so the page reads at most
+// limit rows, and revoke looks the one session up by id rather than
+// reading the table to find it (M8).
+func TestSessionsListIsBounded(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	// One more than the default page: the oldest is off the list, and
+	// revoking it must still work and answer with its row.
+	for i := range sessionsLimit + 1 {
+		s := store.Session{ID: fmt.Sprintf("%016x", i+1), Human: "alice", Agent: "coding-agent",
+			Created: t0.Add(time.Duration(i) * time.Second), Expires: t0.Add(time.Hour)}
+		if err := f.st.CreateSession(ctx, s, []byte(s.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := f.signIn(t, "carol")
+	_, body := c.get(t, "/api/sessions")
+	l := decode[[]SessionRow](t, body)
+	if len(l) != sessionsLimit || f.cs.lastLimit.Load() != sessionsLimit || l[0].ID != fmt.Sprintf("%016x", sessionsLimit+1) {
+		t.Errorf("default page: %d rows, store asked for %d, first %v", len(l), f.cs.lastLimit.Load(), l[0].ID)
+	}
+	if _, body := c.get(t, "/api/sessions?limit=2"); len(decode[[]SessionRow](t, body)) != 2 {
+		t.Errorf("limit=2: %s", body)
+	}
+	if code, _ := c.get(t, "/api/sessions?limit=100000"); code != 200 || f.cs.lastLimit.Load() != 500 {
+		t.Errorf("limit=100000: %d, store asked for %d", code, f.cs.lastLimit.Load())
+	}
+	if code, body := c.get(t, "/api/sessions?limit=0"); code != 400 || body != `{"error":"bad query parameter"}` {
+		t.Errorf("limit=0: %d %s", code, body)
+	}
+	oldest := fmt.Sprintf("%016x", 1)
+	code, body := c.post(t, "/api/sessions/"+oldest+"/revoke", "")
+	if d := decode[SessionRow](t, body); code != 200 || d.ID != oldest || d.State != "revoked" {
+		t.Errorf("revoking a session beyond the first page: %d %s", code, body)
 	}
 }

@@ -179,3 +179,30 @@ func TestConnectionsWaitForLocks(t *testing.T) {
 		t.Errorf("busy_timeout = %d, want 5000", ms)
 	}
 }
+
+func TestSessionByIDAndListSessionsLimit(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	for i, id := range []string{"s1", "s2", "s3"} {
+		if err := s.CreateSession(ctx, Session{ID: id, Human: "h", Agent: "x", Created: t0.Add(time.Duration(i) * time.Minute), Expires: t0.Add(time.Hour)}, []byte(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RevokeSession(ctx, "s1", t0.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SessionByID(ctx, "s1")
+	if err != nil || got.ID != "s1" || got.Human != "h" || !got.Revoked.Equal(t0.Add(time.Second)) {
+		t.Errorf("SessionByID = %+v, %v", got, err)
+	}
+	if _, err := s.SessionByID(ctx, "ghost"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing session: %v", err)
+	}
+	l, err := s.ListSessionsLimit(ctx, 2)
+	if err != nil || len(l) != 2 || l[0].ID != "s3" || l[1].ID != "s2" {
+		t.Errorf("ListSessionsLimit(2) = %+v, %v", l, err)
+	}
+	if l, _ := s.ListSessionsLimit(ctx, 0); len(l) != 0 {
+		t.Errorf("limit 0 is nothing, not unlimited: %d", len(l))
+	}
+}
