@@ -121,6 +121,24 @@ describe('Shell', () => {
     expect(componentsCSS).toMatch(/\.shell-tabs\s*\{[^}]*flex-wrap:\s*wrap/);
   });
 
+  it('the current tab is underlined with a border, never a shadow', () => {
+    // Spec §7: hairlines, not shadows. Every tab carries the 2px border so
+    // the current one's text does not shift.
+    expect(componentsCSS).toMatch(/\.shell-tab\s*\{[^}]*border-bottom:\s*2px solid transparent/);
+    expect(componentsCSS).toMatch(/\.shell-tab\[aria-current="page"\]\s*\{[^}]*border-bottom-color:\s*var\(--text\)/);
+    expect(componentsCSS).not.toMatch(/\.shell-[a-z-]+[^{]*\{[^}]*box-shadow/);
+  });
+
+  it('a long approver name keeps its full text in the title', () => {
+    const long = 'approver-with-a-very-long-name-that-truncates';
+    render(
+      <Shell route={{ name: 'waiting' }} pending={0} me={{ name: long, csrf: 'c' }} onSignOut={() => {}}>
+        <p />
+      </Shell>,
+    );
+    expect(screen.getByText(long).getAttribute('title')).toBe(long);
+  });
+
   it('sign out calls logout', async () => {
     const onSignOut = vi.fn();
     shell({ name: 'waiting' }, null, onSignOut);
@@ -154,6 +172,25 @@ describe('Announcer', () => {
     act(() => announce('2 new requests are waiting'));
     expect(region.textContent).toBe('');
     await waitFor(() => expect(region.textContent).toBe('2 new requests are waiting'));
+  });
+
+  it('a new shell does not repeat the last announcement', async () => {
+    const first = shell({ name: 'waiting' });
+    act(() => announce('1 new request is waiting'));
+    await waitFor(() => expect(document.getElementById('announcer')!.textContent).toBe('1 new request is waiting'));
+    // Sign out and back in: the shell unmounts and a new one mounts.
+    first.unmount();
+    shell({ name: 'waiting' });
+    expect(document.getElementById('announcer')!.textContent).toBe('');
+  });
+
+  it('a refill pending at unmount never lands in the next shell', async () => {
+    const first = shell({ name: 'waiting' });
+    act(() => announce('late words'));
+    first.unmount();
+    shell({ name: 'waiting' });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(document.getElementById('announcer')!.textContent).toBe('');
   });
 
   it('announce is plain text', async () => {
@@ -465,6 +502,26 @@ describe('Keyboard', () => {
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it('clicking the help text keeps focus in the dialog, so Esc still closes it', async () => {
+    render(
+      <>
+        <button type="button">start</button>
+        <ShortcutHelp />
+      </>,
+    );
+    const start = screen.getByRole('button', { name: 'start' });
+    start.focus();
+    await userEvent.keyboard('?');
+    const dialog = screen.getByRole('dialog');
+    await userEvent.click(within(dialog).getByText('Move down and up a list'));
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await userEvent.tab();
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(start);
   });
 
   it('the shortcut help closes from its Close button too', async () => {

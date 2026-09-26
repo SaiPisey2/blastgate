@@ -79,7 +79,11 @@
   font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
-  transition: color 120ms;
+  /* Transparent on every tab so the current one's underline does not
+     shift its text. */
+  border-bottom: 2px solid transparent;
+  padding-top: 2px;
+  transition: color 120ms, border-color 120ms;
 }
 
 .shell-tab:hover {
@@ -91,7 +95,7 @@
    rest on the muted/text contrast alone. */
 .shell-tab[aria-current="page"] {
   color: var(--text);
-  box-shadow: inset 0 -2px 0 var(--text);
+  border-bottom-color: var(--text);
 }
 
 .shell-badge {
@@ -99,7 +103,7 @@
   height: 20px;
   padding: 0 var(--s-2);
   border: 1px solid var(--danger-line);
-  border-radius: 10px;
+  border-radius: var(--r-tag);
   background: var(--danger-bg);
   color: var(--danger-fg);
   font-size: var(--fs-12);

@@ -73,9 +73,12 @@ export default function ShortcutHelp() {
   }
 
   if (!open) return null;
+  // tabIndex -1 on the dialog: a click on its text would otherwise send
+  // focus to <body>, outside the dialog, where Esc and the Tab trap no
+  // longer hear anything.
   return (
     <div className="shortcut-backdrop" onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
-      <div ref={dialog} className="shortcut-help" role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={onKeyDown}>
+      <div ref={dialog} className="shortcut-help" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={onKeyDown}>
         <h2 id={titleId} className="shortcut-title">
           Keyboard shortcuts
         </h2>

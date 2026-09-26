@@ -1,4 +1,4 @@
-import { useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useSyncExternalStore, type ReactNode } from 'react';
 import type { Me } from '../api';
 import type { Route } from '../router';
 import Button from './Button';
@@ -45,6 +45,17 @@ export function announce(text: string) {
   }, REFILL_MS);
 }
 
+// resetAnnouncer forgets what was last said and drops a pending refill.
+// The store is module state, so without this the next alert region (after
+// sign-out and sign-in, or the next test) would mount still holding the
+// previous announcement.
+export function resetAnnouncer() {
+  clearTimeout(timer);
+  timer = undefined;
+  spoken = '';
+  tell();
+}
+
 function listen(fn: () => void) {
   hearers.add(fn);
   return () => {
@@ -54,6 +65,8 @@ function listen(fn: () => void) {
 
 function Announcer() {
   const text = useSyncExternalStore(listen, () => spoken);
+  // The region goes with the shell; what it last said goes with it.
+  useEffect(() => resetAnnouncer, []);
   // Rendered as a text child, never as markup: announcements carry
   // agent and object names.
   return (
@@ -100,7 +113,7 @@ export default function Shell({ route, pending, me, onSignOut, children }: Props
           <div className="shell-meta">
             <LiveStatus />
             <ThemeToggle />
-            <span className="shell-who" title="Signed in approver">
+            <span className="shell-who" title={me.name}>
               {me.name}
             </span>
             <Button className="shell-signout" onClick={onSignOut}>
