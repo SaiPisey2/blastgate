@@ -40,6 +40,19 @@ var agentName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 // printable ASCII (a CR/LF above all) could smuggle a second header in.
 // The agent name becomes an impersonation extra, and is kept to a DNS label.
 func Validate(human, agent string) error {
+	if err := ValidateHuman(human); err != nil {
+		return err
+	}
+	if !agentName.MatchString(agent) {
+		return fmt.Errorf("agent name %q must be lowercase letters, digits and dashes, at most 63", agent)
+	}
+	return nil
+}
+
+// ValidateHuman is Validate's check on the human alone. Approver names
+// pass it too: an approver's name is recorded as who decided a hold, in
+// the same trail and logs as the humans agents act for.
+func ValidateHuman(human string) error {
 	if human == "" {
 		return errors.New("a human is required")
 	}
@@ -53,9 +66,6 @@ func Validate(human, agent string) error {
 		if c := human[i]; c < 0x21 || c > 0x7e {
 			return fmt.Errorf("human name %q may contain only printable ASCII without spaces", human)
 		}
-	}
-	if !agentName.MatchString(agent) {
-		return fmt.Errorf("agent name %q must be lowercase letters, digits and dashes, at most 63", agent)
 	}
 	return nil
 }

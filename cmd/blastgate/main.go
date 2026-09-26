@@ -21,6 +21,7 @@ const usage = `usage: blastgate <command>
 commands:
   serve       run the proxy
   session     new | list | revoke
+  approver    who may sign in to the UI: new --name <name> | list | revoke <id>
   approvals   list approvals [--status pending]
   approve     approve a held request: approve <id> --by <name>
   deny        deny a held request: deny <id> --by <name>
@@ -51,6 +52,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 0
 	case "session":
 		return sessionCmd(args[1:], getenv, stdout, stderr)
+	case "approver":
+		return approverCmd(args[1:], getenv, stdout, stderr)
 	case "approvals":
 		return approvalsCmd(args[1:], getenv, stdout, stderr)
 	case "approve", "deny":
