@@ -380,6 +380,7 @@ h1 {
 
 input[type='text'],
 input[type='password'],
+input[type='number'],
 select {
   height: 38px;
   padding: 0 12px;
@@ -393,7 +394,8 @@ select {
   min-width: 0;
 }
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--focus);
@@ -858,6 +860,303 @@ table.feed {
   border-color: var(--danger-line);
 }
 
+/* ---- shared page pieces --------------------------------------------- */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.small {
+  font-size: 13px;
+}
+
+.back {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.section h2 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+/* Monospace blocks hold agent- and operator-supplied text. They wrap
+   rather than widen the page; a single unbroken token breaks anywhere. */
+.code-block {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.code-scroll {
+  /* YAML indentation is meaning: the loaded policy keeps its lines and
+     scrolls inside its own block instead of wrapping. */
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.decided {
+  font-weight: 600;
+  color: var(--text-2);
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  overflow-wrap: anywhere;
+}
+
+.row-link {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.wrap {
+  overflow-wrap: anywhere;
+}
+
+/* ---- impact tree ---------------------------------------------------- */
+
+.impact-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.tree-alert {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+}
+.tree-alert h3 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+.tree-alert ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.tree-alert .target {
+  color: var(--danger-fg);
+}
+
+.tree,
+.tree-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tree-children {
+  margin-left: 9px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border-strong);
+}
+.tree-group > details > .tree-children {
+  margin-top: 4px;
+}
+
+.tree summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 0;
+}
+.tree summary::-webkit-details-marker {
+  display: none;
+}
+.tree summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 16px;
+  color: var(--muted);
+  transition: transform 120ms;
+  vertical-align: top;
+}
+.tree details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.tree-leaf {
+  padding: 4px 0 4px 16px;
+}
+
+.tree-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  max-width: calc(100% - 16px);
+  vertical-align: top;
+}
+.tree-ns {
+  font-family: var(--mono);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.tree-kind {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.tree-name {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.tree-count {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tree-why {
+  list-style: none;
+  margin: 2px 0 4px 16px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.tree-node.data-destroyed > .tree-leaf,
+.tree-node.data-destroyed > details > summary {
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 3px 0 0 var(--danger-line);
+  padding-left: 8px;
+}
+.tree-node.data-destroyed .tree-name {
+  color: var(--danger-fg);
+}
+.tree-node.data-unknown > .tree-leaf,
+.tree-node.data-unknown > details > summary {
+  border: 1px dashed var(--danger-line);
+  border-radius: var(--radius-sm);
+  padding-left: 8px;
+}
+.tree .chip {
+  max-width: none;
+}
+
+/* ---- tables beyond the feed ----------------------------------------- */
+
+.row-actions {
+  text-align: right;
+}
+.row-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+/* ---- policy --------------------------------------------------------- */
+
+.policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.source {
+  font-size: 14px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.replay-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+textarea {
+  width: 100%;
+  min-height: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.replay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+.field-hours input {
+  width: 120px;
+}
+.parse-error {
+  border-color: var(--danger-line);
+  margin-bottom: 16px;
+}
+.parse-error h2 {
+  color: var(--danger-fg);
+}
+.parse-error .code-block {
+  background: var(--danger-bg);
+  border-color: var(--danger-line);
+  color: var(--danger-fg);
+}
+.stats-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.change {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.arrow {
+  color: var(--muted);
+}
+
 /* ---- narrow screens ------------------------------------------------- */
 
 @media (max-width: 760px) {
@@ -892,11 +1191,31 @@ table.feed {
   .field-inline {
     max-width: none;
   }
+  /* In the stacked page head a flex-basis would be a height. */
+  .page-head .field-inline {
+    flex: none;
+  }
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .card {
     padding: 16px;
+  }
+  .policy-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .stats-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .tree-children {
+    margin-left: 6px;
+    padding-left: 10px;
+  }
+  .feed td.row-actions {
+    justify-content: flex-end;
+  }
+  .feed td.row-actions::before {
+    content: none;
   }
 
   /* The feed becomes a stack of cards: ten columns do not fit 360px. */

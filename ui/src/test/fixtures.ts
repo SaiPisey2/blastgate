@@ -1,4 +1,4 @@
-import type { ApprovalDetail, ApprovalSummary, FeedRow, Impact } from '../api';
+import type { ApprovalDetail, ApprovalSummary, BypassRow, FeedRow, Impact, Session } from '../api';
 
 let nextID = 100;
 
@@ -74,4 +74,63 @@ export function impact(over: Partial<Impact> = {}): Impact {
 
 export function detail(s: ApprovalSummary, i: Impact): ApprovalDetail {
   return { ...s, action: { verb: s.verb }, impact: i, decided_by: '', decided: '' };
+}
+
+export const SID1 = '1'.repeat(16);
+export const SID2 = '2'.repeat(16);
+
+export function session(over: Partial<Session> = {}): Session {
+  return {
+    id: SID1,
+    human: 'alice',
+    agent: 'coding-agent',
+    created: '2026-09-26T08:00:00Z',
+    expires: '2026-09-26T20:00:00Z',
+    state: 'active',
+    ...over,
+  };
+}
+
+export function bypassRow(over: Partial<BypassRow> = {}): BypassRow {
+  return {
+    at: '2026-09-26T09:00:00Z',
+    user: 'system:serviceaccount:team-a:deployer',
+    groups: ['system:serviceaccounts', 'system:serviceaccounts:team-a'],
+    verb: 'delete',
+    group: 'apps',
+    resource: 'deployments',
+    subresource: '',
+    namespace: 'team-a',
+    name: 'web',
+    uid: 'u-1',
+    dry_run: false,
+    ...over,
+  };
+}
+
+// deploymentImpact is a delete of a Deployment in sounding's owner-first
+// order, plus a claim whose volume is destroyed and one whose fate is not
+// known. Object strings are the engine's: group/Kind/namespace/name, with
+// the group omitted for core objects and the namespace empty for
+// cluster-scoped ones.
+export function deploymentImpact(over: Partial<Impact> = {}): Impact {
+  return impact({
+    effects: [
+      { kind: 'destroys', object: 'apps/Deployment/team-a/web' },
+      { kind: 'destroys', object: 'apps/ReplicaSet/team-a/web-7d9f8c' },
+      { kind: 'destroys', object: 'Pod/team-a/web-7d9f8c-abcde' },
+      { kind: 'destroys', object: 'Pod/team-a/web-7d9f8c-fghij' },
+      { kind: 'destroys', object: 'PersistentVolumeClaim/team-a/data' },
+      {
+        kind: 'destroys-data',
+        object: 'PersistentVolume//pv-1',
+        explanation: 'pvc/data is bound to pv/pv-1 with reclaimPolicy=Delete: the csi driver destroys the underlying volume and the data is not recoverable',
+      },
+      { kind: 'unknown-data-fate', object: 'PersistentVolumeClaim//scratch', explanation: 'pvc/scratch has no spec.volumeName, so nothing is known about what backs it' },
+    ],
+    dataDestroyed: 1,
+    endpointsLeft: { web: 0, api: 2 },
+    pdbViolations: ['team-a/web-pdb'],
+    ...over,
+  });
 }

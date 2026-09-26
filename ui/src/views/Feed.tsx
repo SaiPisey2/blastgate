@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { get, onStreamStatus, streamStatus, subscribe, type FeedRow, type StreamStatus } from '../api';
 import ClassBadge, { DecisionChip } from '../components/ClassBadge';
 import { clock, target } from '../format';
+import { APPROVAL_ID } from '../router';
 
 const PAGE = 50;
 // Live rows accumulate on a page left open all day; past this the oldest
@@ -248,6 +249,13 @@ export default function Feed() {
                   </td>
                   <td data-label="Decision">
                     <DecisionChip decision={r.decision} />
+                    {/* Checked before it becomes a link: approval_id is
+                        API data, and only a real id may reach the hash. */}
+                    {APPROVAL_ID.test(r.approval_id) && (
+                      <a className="row-link" href={`#/approvals/${r.approval_id}`} aria-label={`Approval for ${r.verb} ${r.name}`}>
+                        approval
+                      </a>
+                    )}
                   </td>
                   <td data-label="Rule">
                     <code className="rule">{r.rule}</code>

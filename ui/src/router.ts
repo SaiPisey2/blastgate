@@ -12,7 +12,7 @@ export type Route =
   | { name: 'login' }
   | { name: 'notfound' };
 
-const APPROVAL_ID = /^[0-9a-f]{32}$/;
+export const APPROVAL_ID = /^[0-9a-f]{32}$/;
 
 export function parseHash(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/');

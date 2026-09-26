@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, post, type ApprovalDetail, type ApprovalSummary } from '../api';
 import ClassBadge from './ClassBadge';
-import { duration, plural, target, useNow } from '../format';
+import { clock, duration, plural, target, useNow } from '../format';
 
 export type Outcome = 'approved' | 'denied' | 'gone';
 
@@ -11,6 +11,9 @@ type Props = {
   detailError?: string;
   onRetry: () => void;
   onDecided: (id: string, outcome: Outcome) => void;
+  // standalone: the card heads its own details page, so it has no link
+  // to itself.
+  standalone?: boolean;
 };
 
 // How long the confirm button stays inert after the confirm step opens:
@@ -63,7 +66,24 @@ function undoText(undo: string): string {
   return undo;
 }
 
-export default function ApprovalCard({ summary: s, detail, detailError, onRetry, onDecided }: Props) {
+const STATUS: Record<string, string> = {
+  approved: 'Approved',
+  denied: 'Denied',
+  consumed: 'Approved and carried out',
+  expired: 'Expired',
+  superseded: 'Superseded',
+};
+
+// decidedText describes an approval that is no longer pending. The status
+// comes from the API, so it picks words from a fixed map or is shown raw.
+function decidedText(status: string, by: string, at: string): string {
+  let t = Object.hasOwn(STATUS, status) ? STATUS[status] : status || 'Not pending';
+  if (by) t += ` by ${by}`;
+  if (at && !Number.isNaN(Date.parse(at))) t += ` at ${clock(at)}`;
+  return t + '.';
+}
+
+export default function ApprovalCard({ summary: s, detail, detailError, onRetry, onDecided, standalone }: Props) {
   const now = useNow();
   const [confirming, setConfirming] = useState<'approve' | 'deny' | null>(null);
   const [typed, setTyped] = useState('');
@@ -182,11 +202,19 @@ export default function ApprovalCard({ summary: s, detail, detailError, onRetry,
         </p>
       )}
 
-      {confirming === null ? (
+      {s.status !== 'pending' ? (
+        // Only a pending approval can be decided; offering the buttons on
+        // any other would only ever produce a 409.
+        <p className="decided" role="status">
+          {decidedText(s.status, detail?.decided_by ?? '', detail?.decided ?? '')}
+        </p>
+      ) : confirming === null ? (
         <div className="actions">
-          <a className="details-link" href={`#/approvals/${encodeURIComponent(s.id)}`}>
-            Details
-          </a>
+          {!standalone && (
+            <a className="details-link" href={`#/approvals/${encodeURIComponent(s.id)}`}>
+              Details
+            </a>
+          )}
           <div className="buttons">
             <button type="button" className="btn btn-secondary" onClick={() => setConfirming('deny')}>
               Deny

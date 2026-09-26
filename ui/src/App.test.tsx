@@ -4,6 +4,7 @@ import App from './App';
 import { mockFetch } from './test/fetch';
 import { emit } from './api';
 import { act } from '@testing-library/react';
+import { detail, feedRow, ID1, impact, summary } from './test/fixtures';
 
 beforeEach(() => {
   window.location.hash = '#/feed';
@@ -46,5 +47,43 @@ describe('App', () => {
     await act(async () => release());
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.getByLabelText('2 pending')).toBeTruthy();
+  });
+
+  it('each new screen has a route, and held feed rows link to their approval', async () => {
+    mockFetch({
+      'GET /api/me': { body: { name: 'bob', csrf: 'c' } },
+      'GET /api/approvals?status=pending': { body: [] },
+      'GET /api/feed': { body: [feedRow({ decision: 'hold', approval_id: ID1, name: 'held-one' }), feedRow({ decision: 'hold', approval_id: '../x', name: 'crafted' })] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(summary(), impact()) },
+      'GET /api/sessions': { body: [] },
+      'GET /api/policy': { body: { source: 'built-in', text: 'rules: []' } },
+      'GET /api/bypass': { body: [] },
+    });
+    render(<App />);
+    const held = (await screen.findByText('held-one')).closest('tr')!;
+    const link = held.querySelector('a[href^="#/approvals/"]')!;
+    expect(link.getAttribute('href')).toBe(`#/approvals/${ID1}`);
+    // An approval id that is not one never becomes a link.
+    expect(screen.getByText('crafted').closest('tr')!.querySelector('a')).toBeNull();
+
+    await act(async () => {
+      window.location.hash = link.getAttribute('href')!;
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(await screen.findByRole('article')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Queue' }).getAttribute('aria-current')).toBe('page');
+
+    for (const [hash, heading] of [
+      ['#/sessions', 'Agent sessions'],
+      ['#/policy', 'Policy'],
+      ['#/bypass', 'Bypass alerts'],
+    ]) {
+      await act(async () => {
+        window.location.hash = hash;
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+      expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeTruthy();
+    }
+    expect(screen.queryByText(/not built yet/i)).toBeNull();
   });
 });

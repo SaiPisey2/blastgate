@@ -5,6 +5,10 @@ import Nav from './components/Nav';
 import Login from './views/Login';
 import Feed from './views/Feed';
 import Queue from './views/Queue';
+import Approval from './views/Approval';
+import Sessions from './views/Sessions';
+import Policy from './views/Policy';
+import Bypass from './views/Bypass';
 
 export default function App() {
   const hash = useHash();
@@ -69,13 +73,13 @@ function Screen({ route }: { route: Route }) {
     case 'queue':
       return <Queue />;
     case 'approval':
-      return <Later title="Approval" what="The full impact tree for one approval" />;
+      return <Approval id={route.id} />;
     case 'sessions':
-      return <Later title="Sessions" what="Agent sessions, with revoke" />;
+      return <Sessions />;
     case 'policy':
-      return <Later title="Policy" what="The loaded policy and replay of a candidate over past requests" />;
+      return <Policy />;
     case 'bypass':
-      return <Later title="Bypass alerts" what="Writes that reached the cluster without going through blastgate" />;
+      return <Bypass />;
     case 'notfound':
       return (
         <div className="page">
@@ -88,21 +92,4 @@ function Screen({ route }: { route: Route }) {
         </div>
       );
   }
-}
-
-function Later({ title, what }: { title: string; what: string }) {
-  return (
-    <div className="page">
-      <div className="page-head">
-        <div>
-          <h1>{title}</h1>
-          <p className="lede">{what}.</p>
-        </div>
-      </div>
-      <div className="empty">
-        <p className="empty-title">Not built yet.</p>
-        <p className="empty-sub">This screen arrives in the next release.</p>
-      </div>
-    </div>
-  );
 }

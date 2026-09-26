@@ -116,6 +116,9 @@ export type ReplayResult = {
   evaluated: number;
   changed: number;
   skipped: number;
+  // truncated: the window held more decisions than the replay evaluated
+  // (the server caps the rows it reads), so the counts cover only a prefix.
+  truncated: boolean;
   changes: ReplayChange[];
 };
 

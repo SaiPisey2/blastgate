@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import Feed from './views/Feed';
 import Queue from './views/Queue';
+import Approval from './views/Approval';
+import Bypass from './views/Bypass';
+import Sessions from './views/Sessions';
+import Policy from './views/Policy';
 import { mockFetch } from './test/fetch';
-import { detail, feedRow, impact, summary } from './test/fixtures';
+import { bypassRow, detail, feedRow, impact, session, summary } from './test/fixtures';
 
 afterEach(cleanup);
 
@@ -40,5 +45,77 @@ describe('hostile text', () => {
     expect(queue.container.innerHTML).toContain('&lt;img');
     // Typed confirm uses the namespace as the phrase: still literal text.
     expect(within(card).getAllByText(EVIL, { exact: false }).length).toBeGreaterThan(0);
+    queue.unmount();
+
+    // The impact tree: object names (parsed and unparseable), explanations,
+    // service and budget names, and the exec command line and path.
+    const ns = EVIL.replace(/\//g, '');
+    mockFetch({
+      [`GET /api/approvals/${s.id}`]: {
+        body: {
+          ...detail(
+            s,
+            impact({
+              class: EVIL,
+              undo: EVIL,
+              reason: EVIL,
+              effects: [
+                { kind: EVIL, object: EVIL, explanation: EVIL },
+                { kind: 'destroys', object: `apps/Deployment/${ns}/${ns}`, explanation: EVIL },
+                { kind: 'destroys', object: `apps/ReplicaSet/${ns}/${ns}-1`, explanation: EVIL },
+                { kind: 'destroys-data', object: `PersistentVolume//${ns}`, explanation: EVIL },
+              ],
+              endpointsLeft: { [EVIL]: 0 },
+              pdbViolations: [EVIL],
+            }),
+          ),
+          action: { verb: EVIL, path: EVIL, rawQuery: EVIL, query: { command: [EVIL, EVIL] } },
+          decided_by: EVIL,
+        },
+      },
+    });
+    const approval = render(<Approval id={s.id} />);
+    await approval.findByLabelText('Action');
+    await waitFor(() => expect(approval.container.querySelectorAll('[data-effect]').length).toBe(4));
+    expect(approval.container.querySelector('[data-object]')).toBeTruthy();
+    expect(approval.getAllByText(EVIL, { exact: false }).length).toBeGreaterThanOrEqual(10);
+    expect(approval.getAllByText(ns, { exact: false }).length).toBeGreaterThanOrEqual(3);
+    expect(approval.getByLabelText('Action').textContent).toContain(EVIL);
+    expect(approval.container.querySelector('img')).toBeNull();
+    expect(approval.container.querySelector('[onerror]')).toBeNull();
+    expect(approval.container.innerHTML).toContain('&lt;img');
+    approval.unmount();
+
+    // Bypass: user, groups, resource and names come from whoever wrote.
+    mockFetch({
+      'GET /api/bypass': {
+        body: [bypassRow({ user: EVIL, groups: [EVIL, EVIL], verb: EVIL, group: EVIL, resource: EVIL, subresource: EVIL, namespace: EVIL, name: EVIL })],
+      },
+    });
+    const bypass = render(<Bypass />);
+    await waitFor(() => expect(bypass.getAllByText(EVIL, { exact: false }).length).toBeGreaterThanOrEqual(6));
+    expect(bypass.container.querySelector('img')).toBeNull();
+    expect(bypass.container.querySelector('[onerror]')).toBeNull();
+    expect(bypass.container.innerHTML).toContain('&lt;img');
+    bypass.unmount();
+
+    // Sessions and policy: agent-chosen names, and parser errors that echo
+    // the candidate's own text back.
+    mockFetch({
+      'GET /api/sessions': { body: [session({ human: EVIL, agent: EVIL, state: EVIL as 'active' })] },
+      'GET /api/policy': { body: { source: EVIL, text: EVIL } },
+      'POST /api/policy/replay': { status: 400, body: { error: EVIL } },
+    });
+    const sessions = render(<Sessions />);
+    await waitFor(() => expect(sessions.getAllByText(EVIL).length).toBeGreaterThanOrEqual(3));
+    expect(sessions.container.querySelector('img')).toBeNull();
+    sessions.unmount();
+    const policy = render(<Policy />);
+    await policy.findByLabelText('Loaded policy');
+    await userEvent.click(policy.getByRole('button', { name: /^replay over the last/i }));
+    const err = await policy.findByLabelText('Policy error');
+    expect(err.textContent).toBe(EVIL);
+    expect(policy.container.querySelector('img')).toBeNull();
+    expect(policy.container.querySelector('[onerror]')).toBeNull();
   });
 });
