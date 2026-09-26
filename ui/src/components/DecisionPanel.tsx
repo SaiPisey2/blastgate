@@ -3,7 +3,7 @@ import { ApiError, post, type ApprovalDetail, type ApprovalSummary, type Impact 
 import { ARM_MS, canSelfApprove, frictionOf, typedTarget } from '../lib/friction';
 import { describe } from '../lib/describe';
 import { actionText, ago, clock, plural, useNow } from '../lib/format';
-import { AnimatePresence, DUR, EASE, m, useReducedMotion } from '../motion';
+import { AnimatePresence, DUR, EASE, m, useIsPresent, useReducedMotion } from '../motion';
 import Button from './Button';
 import Facts, { type Fact } from './Facts';
 import Tag from './Tag';
@@ -166,7 +166,13 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     setSeenTypedKey(typedKey);
     setTyped('');
   }
-  const stepKey = `${friction.level}\u0000${decidable}`;
+  // The impact's identity is part of it too: a same-level refetch whose
+  // undo text or counts changed closes the step, so what the approver
+  // confirms is always what they last read.
+  const impactKey = impact
+    ? [typeof impact.undo === 'string' ? impact.undo : '', impact.effects?.length ?? 0, impact.dataDestroyed, impact.measured].join('\u0000')
+    : '';
+  const stepKey = `${friction.level}\u0000${decidable}\u0000${impactKey}`;
   const [seenStepKey, setSeenStepKey] = useState(stepKey);
   if (seenStepKey !== stepKey) {
     setSeenStepKey(stepKey);
@@ -182,6 +188,13 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // Not tied to busy: the step stays put while its request is in flight
   // rather than collapsing and reopening around a failed POST.
   const stepOpen = decidable && confirming && !needsTyping;
+
+  // live: the gate as of the latest render. decide() reads it, never its
+  // own closure: an element React or Motion keeps around after this panel
+  // re-rendered (the confirm step during its exit animation) still holds
+  // the handler from the render in which it was ready.
+  const live = useRef({ pending, result, needsTyping, stepOpen, ready });
+  live.current = { pending, result, needsTyping, stepOpen, ready };
 
   // Arming restarts every time the step opens, whatever closed it.
   useEffect(() => {
@@ -207,23 +220,33 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // opened; on Confirm the same repeat would approve (spec §6: no
   // single-key approve).
 
-  async function decide(action: 'approve' | 'deny') {
+  // via: where an approval came from. A step click counts only while the
+  // step is really open at this level; a typed submit only while typing
+  // is what the ladder asks for now.
+  async function decide(action: 'approve' | 'deny', via?: 'step' | 'typed') {
+    const g = live.current;
     // inFlight, not only busy: two key events in one tick both see the
     // busy of the last render, and only one of them may send.
-    if (!pending || busy || inFlight.current || result !== null) return;
-    if (action === 'approve' && !ready) return;
+    if (!g.pending || inFlight.current || g.result !== null) return;
+    if (action === 'approve') {
+      if (!g.ready) return;
+      if (via === 'step' && (g.needsTyping || !g.stepOpen)) return;
+      if (via === 'typed' && !g.needsTyping) return;
+    }
     inFlight.current = true;
     setBusy(true);
     setError('');
     try {
       await post(`/api/approvals/${encodeURIComponent(s.id)}/${action}`);
       const outcome = action === 'approve' ? 'approved' : 'denied';
+      live.current.result = outcome;
       setResult(outcome);
       onDecided(s.id, outcome);
     } catch (e) {
       // 409: someone else decided it, or it expired, while this was open.
       // 404: it no longer exists. Either way it is not ours to decide.
       if (e instanceof ApiError && (e.status === 409 || e.status === 404)) {
+        live.current.result = 'gone';
         setResult('gone');
         onDecided(s.id, 'gone');
         return;
@@ -320,7 +343,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
               expected={expected}
               value={typed}
               onChange={setTyped}
-              onSubmit={() => void decide('approve')}
+              onSubmit={() => void decide('approve', 'typed')}
               inputRef={inputRef}
               labelId={typedLabelId}
               hintId={typedHintId}
@@ -336,7 +359,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
               aria-describedby={approveDescribedBy || undefined}
               aria-expanded={needsTyping ? undefined : stepOpen}
               onClick={() => {
-                if (needsTyping) void decide('approve');
+                if (needsTyping) void decide('approve', 'typed');
                 else if (open) setConfirming(true);
               }}
             >
@@ -353,38 +376,15 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
 
       <AnimatePresence initial={false}>
         {stepOpen && (
-          <m.div
+          <ConfirmStep
             key="confirm"
-            className="confirm-step-wrap"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: reduceMotion ? 0 : DUR.disclose, ease: EASE }}
-          >
-            <div
-              className="confirm-step"
-              role="group"
-              aria-label="Confirm approval"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') cancel();
-              }}
-            >
-              <p>Approve this? The agent will be let through.</p>
-              {friction.level === 'confirm-undo' && impact && (
-                <p className="confirm-step-undo">
-                  To undo it later: <span>{undoLabel(impact.undo)}</span>
-                </p>
-              )}
-              <div className="decision-buttons">
-                <Button variant="quiet" onClick={cancel} disabled={busy}>
-                  Cancel
-                </Button>
-                <Button disabled={!ready} onClick={() => void decide('approve')}>
-                  Confirm approval
-                </Button>
-              </div>
-            </div>
-          </m.div>
+            undo={friction.level === 'confirm-undo' && impact ? undoLabel(impact.undo) : undefined}
+            ready={ready}
+            busy={busy}
+            instant={reduceMotion === true}
+            onCancel={cancel}
+            onConfirm={() => void decide('approve', 'step')}
+          />
         )}
       </AnimatePresence>
 
@@ -406,5 +406,59 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         </pre>
       )}
     </article>
+  );
+}
+
+type ConfirmStepProps = {
+  undo?: string;
+  ready: boolean;
+  busy: boolean;
+  instant: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+};
+
+// ConfirmStep is the inline "are you sure" under the buttons. While it
+// animates out, AnimatePresence keeps rendering it with the props of its
+// last live render, when Confirm was enabled. useIsPresent is the one
+// live signal it still gets, so on the way out it disables its buttons,
+// hides itself from assistive tech and takes no pointer events: a click
+// in those 180ms cannot approve something the panel no longer offers.
+function ConfirmStep({ undo, ready, busy, instant, onCancel, onConfirm }: ConfirmStepProps) {
+  const present = useIsPresent();
+  return (
+    <m.div
+      className={present ? 'confirm-step-wrap' : 'confirm-step-wrap is-closing'}
+      aria-hidden={present ? undefined : true}
+      inert={!present}
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: 'auto', opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={{ duration: instant ? 0 : DUR.disclose, ease: EASE }}
+    >
+      <div
+        className="confirm-step"
+        role="group"
+        aria-label="Confirm approval"
+        onKeyDown={(e) => {
+          if (present && e.key === 'Escape') onCancel();
+        }}
+      >
+        <p>Approve this? The agent will be let through.</p>
+        {undo !== undefined && (
+          <p className="confirm-step-undo">
+            To undo it later: <span>{undo}</span>
+          </p>
+        )}
+        <div className="decision-buttons">
+          <Button variant="quiet" onClick={onCancel} disabled={!present || busy}>
+            Cancel
+          </Button>
+          <Button disabled={!present || !ready} onClick={present ? onConfirm : undefined}>
+            Confirm approval
+          </Button>
+        </div>
+      </div>
+    </m.div>
   );
 }

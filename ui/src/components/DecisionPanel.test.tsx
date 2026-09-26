@@ -1,12 +1,13 @@
 // @ts-expect-error -- this package has no @types/node; Vitest runs on Node.
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import DecisionPanel, { type DecisionPanelProps } from './DecisionPanel';
 import { setCSRF, type ApprovalDetail, type ApprovalSummary } from '../api';
 import { ARM_MS } from '../lib/friction';
 import { mockFetch, type Call } from '../test/fetch';
+import { renderWithMotion } from '../test/motion';
 import { detail, ID1, ID2, impact, summary } from '../test/fixtures';
 
 afterEach(() => {
@@ -49,7 +50,7 @@ function renderPanel(over: Partial<DecisionPanelProps> & { summary: ApprovalSumm
   const onDecided = vi.fn();
   const onRetry = vi.fn();
   const props: DecisionPanelProps = { me: 'bob', onRetry, onDecided, ...over };
-  const utils = render(<DecisionPanel {...props} />);
+  const utils = renderWithMotion(<DecisionPanel {...props} />);
   return { ...utils, onDecided, onRetry, props };
 }
 
@@ -509,7 +510,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
     const calls = routes();
     const s1 = summary();
     const props = base({ summary: s1, detail: detail(s1, impact()) });
-    const { rerender } = render(<DecisionPanel {...props} />);
+    const { rerender } = renderWithMotion(<DecisionPanel {...props} />);
     await userEvent.type(typedField(), 'demo/data');
     expect(approveButton().disabled).toBe(false);
     const s2 = summary({ id: ID2 });
@@ -523,7 +524,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
   it('an id change closes an armed confirm step', async () => {
     const calls = routes();
     const props = base(withDetail(reversible, reversibleImpact));
-    const { rerender } = render(<DecisionPanel {...props} />);
+    const { rerender } = renderWithMotion(<DecisionPanel {...props} />);
     await userEvent.click(approveButton());
     await waitFor(() => expect((screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement).disabled).toBe(false));
     const s2 = { ...reversible, id: ID2 };
@@ -540,7 +541,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
     const onDecided = vi.fn();
     const s1 = summary();
     const props = base({ summary: s1, detail: detail(s1, impact()), onDecided });
-    const { rerender } = render(<DecisionPanel {...props} />);
+    const { rerender } = renderWithMotion(<DecisionPanel {...props} />);
     await userEvent.type(typedField(), 'demo/data');
     await userEvent.click(approveButton());
     const s2 = summary({ id: ID2 });
@@ -555,7 +556,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
 
   it('a detail for another id keeps Approve disabled', async () => {
     const calls = routes();
-    render(<DecisionPanel {...base({ summary: reversible, detail: detail({ ...reversible, id: ID2 }, reversibleImpact) })} />);
+    renderWithMotion(<DecisionPanel {...base({ summary: reversible, detail: detail({ ...reversible, id: ID2 }, reversibleImpact) })} />);
     expect(approveButton().disabled).toBe(true);
     await userEvent.click(approveButton());
     expect(screen.queryByRole('button', { name: /confirm/i })).toBeNull();
@@ -568,7 +569,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
     // so clearing the detail for a refetch drops to a confirm level and back.
     const unmeasured = () => detail(reversible, { ...reversibleImpact, measured: false });
     const props = base({ summary: reversible, detail: unmeasured() });
-    const { rerender } = render(<DecisionPanel {...props} />);
+    const { rerender } = renderWithMotion(<DecisionPanel {...props} />);
     await userEvent.type(typedField(), 'demo/web');
     expect(approveButton().disabled).toBe(false);
     rerender(<DecisionPanel {...props} detail={undefined} />);
@@ -585,7 +586,7 @@ describe('DecisionPanel retargeting and refetch flaps', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const calls = routes();
     const props = base(withDetail(reversible, reversibleImpact));
-    const { rerender } = render(<DecisionPanel {...props} />);
+    const { rerender } = renderWithMotion(<DecisionPanel {...props} />);
     fireEvent.click(approveButton());
     act(() => vi.advanceTimersByTime(ARM_MS));
     expect((screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement).disabled).toBe(false);
@@ -677,5 +678,121 @@ describe('DecisionPanel disabled reasons', () => {
   it('while the detail loads Approve says so', () => {
     renderPanel({ summary: reversible });
     expect(describedText(approveButton())).toMatch(/once blastgate has loaded/);
+  });
+});
+
+// These run inside the real Motion wrapper (renderWithMotion), where an
+// exiting confirm step stays mounted for its 180ms exit with the props of
+// its last live render: Confirm enabled, its handler from when it was ready.
+describe('DecisionPanel exiting confirm step', () => {
+  const armedStep = async () => {
+    await userEvent.click(approveButton());
+    const confirm = screen.getByRole('button', { name: /confirm approval/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    return confirm;
+  };
+  // hidden: true reaches the step while it is aria-hidden on the way out.
+  const exiting = () => screen.queryByRole('button', { name: /confirm approval/i, hidden: true }) as HTMLButtonElement | null;
+
+  for (const [label, next] of [
+    ['the detail is cleared', undefined],
+    ['the detail becomes unmeasured (typed)', detail(reversible, { ...reversibleImpact, measured: false })],
+    ['the detail becomes data-destroying (typed)', detail(reversible, { ...reversibleImpact, dataDestroyed: 2 })],
+  ] as const) {
+    it(`a click on the exiting Confirm does nothing after ${label}`, async () => {
+      const calls = routes();
+      const { rerender, props, onDecided } = renderPanel(withDetail(reversible, reversibleImpact));
+      await armedStep();
+      rerender(<DecisionPanel {...props} detail={next} />);
+      const c = exiting();
+      // It is still in the DOM for the exit, and already inert.
+      expect(c).not.toBeNull();
+      expect(c!.disabled).toBe(true);
+      expect(c!.closest('.confirm-step-wrap')!.classList.contains('is-closing')).toBe(true);
+      expect(c!.closest('[aria-hidden="true"]')).not.toBeNull();
+      fireEvent.click(c!);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(posts(calls)).toEqual([]);
+      expect(onDecided).not.toHaveBeenCalled();
+    });
+  }
+
+  for (const how of ['Cancel', 'Escape'] as const) {
+    it(`${how} then Confirm within the exit window does nothing`, async () => {
+      const calls = routes();
+      renderPanel(withDetail(reversible, reversibleImpact));
+      const confirm = await armedStep();
+      if (how === 'Cancel') fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+      else fireEvent.keyDown(confirm, { key: 'Escape' });
+      const c = exiting();
+      expect(c).not.toBeNull();
+      expect(c!.disabled).toBe(true);
+      fireEvent.click(c!);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(posts(calls)).toEqual([]);
+      // And once the exit is over, the step is gone.
+      await waitFor(() => expect(exiting()).toBeNull());
+    });
+  }
+
+  // The second layer, on its own: a Confirm handler taken while the step
+  // was ready and run after the gate closed stands for any stale closure
+  // (an element kept for an exit, an event queued before the re-render).
+  // It reads React's props off the node; the inert step would otherwise
+  // stop the click before the handler could be reached.
+  const reactOnClick = (el: HTMLElement) => {
+    const key = Object.keys(el).find((k) => k.startsWith('__reactProps$'))!;
+    return (el as unknown as Record<string, { onClick?: () => void }>)[key].onClick!;
+  };
+
+  for (const [label, next] of [
+    ['the detail is cleared', undefined],
+    ['the detail becomes unmeasured (typed)', detail(reversible, { ...reversibleImpact, measured: false })],
+    ['the detail becomes data-destroying (typed)', detail(reversible, { ...reversibleImpact, dataDestroyed: 2 })],
+  ] as const) {
+    it(`a Confirm handler captured while ready does nothing after ${label}`, async () => {
+      const calls = routes();
+      const { rerender, props, onDecided } = renderPanel(withDetail(reversible, reversibleImpact));
+      const stale = reactOnClick(await armedStep());
+      rerender(<DecisionPanel {...props} detail={next} />);
+      await act(async () => stale());
+      await new Promise((r) => setTimeout(r, 30));
+      expect(posts(calls)).toEqual([]);
+      expect(onDecided).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a Confirm handler captured while ready does nothing after Cancel', async () => {
+    const calls = routes();
+    renderPanel(withDetail(reversible, reversibleImpact));
+    const stale = reactOnClick(await armedStep());
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    await act(async () => stale());
+    await new Promise((r) => setTimeout(r, 30));
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('a same-level detail refetch with new undo text closes the step and re-arms', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const s = summary({ class: 'COMPENSABLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    const i = impact({ class: 'COMPENSABLE', dataDestroyed: 0, undo: 'scale web back to 3', effects: [] });
+    const calls = routes();
+    const { rerender, props } = renderPanel(withDetail(s, i));
+    fireEvent.click(approveButton());
+    act(() => vi.advanceTimersByTime(ARM_MS));
+    expect((screen.getByRole('button', { name: /confirm approval/i }) as HTMLButtonElement).disabled).toBe(false);
+    rerender(<DecisionPanel {...props} detail={detail(s, { ...i, undo: 'scale web back to 5' })} />);
+    // The old step is closing; no live Confirm is offered.
+    expect(screen.queryByRole('button', { name: /confirm approval/i })).toBeNull();
+    fireEvent.click(approveButton());
+    const step = screen.getByRole('group', { name: /confirm/i });
+    expect(within(step).getByText('scale web back to 5')).toBeTruthy();
+    const confirm = within(step).getByRole('button', { name: /confirm approval/i }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(ARM_MS - 1));
+    expect(confirm.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(1));
+    expect(confirm.disabled).toBe(false);
+    expect(posts(calls)).toEqual([]);
   });
 });

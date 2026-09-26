@@ -17,7 +17,9 @@ import {
 } from 'motion/react';
 import type { JSX, ReactNode } from 'react';
 
-export { m, LazyMotion, domAnimation, useReducedMotion } from 'motion/react';
+// useIsPresent: lets an exiting child know it is on its way out, so a
+// control inside it can go inert for the length of its exit animation.
+export { m, LazyMotion, domAnimation, useIsPresent, useReducedMotion } from 'motion/react';
 
 // children is spelled out: Motion types it through PropsWithChildren on
 // the component, not on AnimatePresenceProps, so the narrowed type would

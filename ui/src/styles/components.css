@@ -359,6 +359,12 @@
   overflow: hidden;
 }
 
+/* On its way out the step is inert: its last render had Confirm enabled,
+   and a click during the exit must not reach it. */
+.confirm-step-wrap.is-closing {
+  pointer-events: none;
+}
+
 .confirm-step {
   display: flex;
   flex-direction: column;
