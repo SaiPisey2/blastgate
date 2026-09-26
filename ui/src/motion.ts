@@ -15,12 +15,15 @@ import {
   type AnimatePresenceProps,
   type MotionConfigProps,
 } from 'motion/react';
-import type { JSX } from 'react';
+import type { JSX, ReactNode } from 'react';
 
 export { m, LazyMotion, domAnimation, useReducedMotion } from 'motion/react';
 
+// children is spelled out: Motion types it through PropsWithChildren on
+// the component, not on AnimatePresenceProps, so the narrowed type would
+// otherwise reject every child.
 export const AnimatePresence = MotionAnimatePresence as (
-  props: Omit<AnimatePresenceProps, 'mode'> & { mode?: 'sync' | 'wait' },
+  props: Omit<AnimatePresenceProps, 'mode'> & { mode?: 'sync' | 'wait'; children?: ReactNode },
 ) => JSX.Element;
 
 export const MotionConfig = MotionMotionConfig as (

@@ -54,3 +54,35 @@ export function ago(seconds: number): string {
   const d = Math.round(h / 24);
   return `${d} d ago`;
 }
+
+// A plain argument needs no quotes; anything else is single-quoted, the
+// one quoting whose only special character is the quote itself.
+const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+// shellQuote renders an exec command the way a shell would need it typed,
+// so "psql -c 'drop table x'" is not shown as four loose words and an
+// argument with spaces cannot pass for two.
+export function shellQuote(args: string[]): string {
+  return args.map((a) => (PLAIN.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(' ');
+}
+
+const str = (v: unknown) => (typeof v === 'string' ? v : '');
+
+// actionText lays out the stored action for reading. The action is the
+// engine's normalized JSON; any field may be missing or of the wrong type,
+// and none of it is trusted to be anything but text.
+export function actionText(action: unknown): string {
+  const a = action && typeof action === 'object' ? (action as Record<string, unknown>) : {};
+  const lines: string[] = [];
+  const verb = str(a.verb);
+  const path = str(a.path);
+  const raw = str(a.rawQuery);
+  if (verb) lines.push(`verb  ${verb}`);
+  if (path) lines.push(`path  ${path}${raw ? `?${raw}` : ''}`);
+  const q = a.query && typeof a.query === 'object' ? (a.query as Record<string, unknown>) : {};
+  const container = Array.isArray(q.container) ? q.container.map(String) : [];
+  if (container.length) lines.push(`container  ${container.join(', ')}`);
+  const command = Array.isArray(q.command) ? q.command.map(String) : [];
+  if (command.length) lines.push(`$ ${shellQuote(command)}`);
+  return lines.join('\n');
+}
