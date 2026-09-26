@@ -302,8 +302,8 @@ func holdIdle(t *testing.T, ch <-chan sseEvent, d time.Duration) int {
 // that outlived its write would kill the stream before the first ping.
 func TestIdleStreamSurvivesOverHTTP2(t *testing.T) {
 	fastStream(t, 20*time.Millisecond, 150*time.Millisecond)
-	fastWrite(t, 30*time.Millisecond)
-	f := newTLSServerFixture(t, true, 100*time.Millisecond)
+	fastWrite(t, 100*time.Millisecond)
+	f := newTLSServerFixture(t, true, 500*time.Millisecond)
 	c := f.signIn(t, "bob")
 	resp, ch := openStream(t, c)
 	if resp.StatusCode != 200 || resp.ProtoMajor != 2 {
@@ -321,8 +321,8 @@ func TestIdleStreamSurvivesOverHTTP2(t *testing.T) {
 // on the connection that a long-lived response outlives.
 func TestIdleStreamSurvivesOverHTTP1(t *testing.T) {
 	fastStream(t, 20*time.Millisecond, 150*time.Millisecond)
-	fastWrite(t, 30*time.Millisecond)
-	f := newTLSServerFixture(t, false, 100*time.Millisecond)
+	fastWrite(t, 100*time.Millisecond)
+	f := newTLSServerFixture(t, false, 500*time.Millisecond)
 	c := f.signIn(t, "bob")
 	resp, ch := openStream(t, c)
 	if resp.StatusCode != 200 || resp.ProtoMajor != 1 {

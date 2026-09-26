@@ -441,7 +441,14 @@ func TestServeShutdownEndsOpenStreams(t *testing.T) {
 			waitListening(t, a["admin"])
 			tok := approverNewToken(t, env, "bob")
 			c := caClient(t, a["data"])
-			c.Transport.(*http.Transport).ForceAttemptHTTP2 = h2
+			tr := c.Transport.(*http.Transport)
+			tr.ForceAttemptHTTP2 = h2
+			// One connection: the stream must reuse the login's. With two
+			// allowed, a stream sent before the login connection is back in
+			// the pool starts a second dial that then sits in the pool
+			// unused, and Shutdown waits 5s on a connection that never sent
+			// a request (net/http's StateNew rule), not on the stream.
+			tr.MaxConnsPerHost = 1
 			c.Timeout = 0
 			b, _ := json.Marshal(map[string]string{"token": tok})
 			resp, err := c.Post("https://"+a["admin"]+"/api/login", "application/json", bytes.NewReader(b))
