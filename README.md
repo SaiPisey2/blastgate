@@ -1,6 +1,6 @@
 # blastgate
 
-![blastgate's approver console, Waiting tab: three held requests, and an exec running SQL whose impact could not be measured, waiting for its target to be typed before it can be approved](assets/ui-waiting.png)
+![blastgate's approver console, Waiting tab: three held requests, and a database command whose impact could not be measured, its command shown in full, waiting for its target to be typed before it can be approved](assets/ui-waiting.png)
 
 A gateway between AI agents and Kubernetes. An agent's kubectl talks to blastgate,
 and blastgate forwards each request **as the human who owns the agent's session**,
@@ -228,7 +228,9 @@ The console has four tabs: **Waiting**, **Activity**, **Agents** and **Policy**.
 header also shows whether the live stream is connected (*Live*, *Connecting*,
 *Reconnecting*, *Offline*), a theme switch (System, Dark, Light; dark unless the system
 asks for light), the signed-in approver and *Sign out*. Press `?` for the keyboard
-shortcuts. Links to the old pages (`#/queue`, `#/feed`, `#/bypass`, `#/sessions`) still
+shortcuts. `Esc` goes back: from Details to Waiting, and from Changes outside blastgate
+to Activity. In a text field, a confirm step or the shortcut list it only cancels or
+closes that. Links to the old pages (`#/queue`, `#/feed`, `#/bypass`, `#/sessions`) still
 open their replacements.
 
 ### Waiting
@@ -242,10 +244,19 @@ waiting for you"), and the next one appears after each decision. A pending appro
 past its hour leaves the list.
 
 The panel says what is being asked in plain words, with names in monospace: "coding-agent
-wants to run a command in `demo/db-…`". Above it, a tag says how hard the change is to
-take back; below it, one sentence why, then who asked, what it affects (objects,
-volumes destroyed, Services left with no backends, disruption budgets broken) and the
-undo. *Show the command* expands the recorded action; *Show details* opens the full page.
+wants to run a command in `demo/db-…`", or "run a database command" when blastgate
+detected SQL in it. Above it, a tag says how hard the change is to take back; below it,
+one sentence why, then who asked, what it affects (objects, volumes destroyed, Services
+left with no backends, disruption budgets broken, and *Runs SQL* when SQL was detected)
+and the undo. The undo reads *Objects saved (manifests only)* when blastgate snapshotted
+the objects, or *Objects saved, data lost* when a volume's data is destroyed anyway: a
+snapshot restores objects, not data (see [Audit and undo](#audit-and-undo)). *None*
+means nothing was kept.
+
+For an unmeasured request, and for any exec, attach, port-forward, proxy or debug
+container, the command is the impact, so the recorded command is shown in full above
+the buttons. For other requests *Show the command* expands it. *Show details* opens the
+full page.
 
 How much it takes to approve follows the tag, first match wins:
 
@@ -254,16 +265,16 @@ How much it takes to approve follows the tag, first match wins:
 | Impact unknown | the class is missing or not one blastgate knows, or the impact was not measured (an exec, a proxied request, a scoring timeout) | type the target |
 | Cannot be undone | data is destroyed, or the class is TERMINAL | type the target |
 | Grants access | AUTHORITY | type the target |
-| Needs a follow-up to undo | COMPENSABLE | *Approve*, then *Confirm approval*, which shows the undo |
+| Needs a follow-up to undo | COMPENSABLE | *Approve*, then *Confirm approval*, which says how to undo it ("restore the saved objects", or the follow-up blastgate worked out) |
 | Can be undone | REVERSIBLE or READ | *Approve*, then *Confirm approval* |
 
 The target is `namespace/name` (for a cluster-scoped object its name, and failing that
 the resource or verb). It must be typed exactly: paste and drop are refused, and a
 plain Enter does nothing; `⌘/Ctrl+Enter` or *Approve* sends it once it matches. *Confirm
 approval* only becomes pressable 300ms after it appears. *Deny* has the focus by default
-(the typed field, when typing is required), and no single key approves. An unmeasured
-request reads *Unknown*, never a count of zero: its zeros mean nothing was measured, not
-that nothing happens.
+(the typed field, when typing is required; on the Details page, the question), and no
+single key approves. An unmeasured request reads *Unknown*, never a count of zero: its
+zeros mean nothing was measured, not that nothing happens.
 
 The console will not approve a request made on the signed-in approver's own behalf (the
 approver's name equals the request's human): *Approve* is disabled and says so. That is
@@ -285,14 +296,15 @@ details* holds the verb, resource, namespace, name, rule, approval id and the re
 action. An expired request says so
 and has no buttons.
 
-![Details for a held claim delete: one volume destroyed, and the tree showing the claim and the volume whose data it destroys](assets/ui-details.png)
+![Details for a held claim delete: one volume destroyed, undo reading objects saved, data lost, and the tree showing the claim and the volume whose data it destroys](assets/ui-details.png)
 
 ### Activity
 
 Every request the agents sent through blastgate, one row each, newest first: the time, a
 plain sentence, who via which agent, and the outcome (*Allowed*, *Held*, *Waiting for
-approval*, *Denied*, *In flight*, *Failed*). A held row links to its details. Chips show
-All, Held, Denied or Allowed; *More filters* narrows by agent or human.
+approval*, *Denied*, *In flight*, *Failed*, or *Interrupted* when the request was cut
+off or cancelled before blastgate saw how it ended). A held row links to its details.
+Chips show All, Held, Denied or Allowed; *More filters* narrows by agent or human.
 
 A write is recorded twice, when it is decided and when it ends, and the two fold into
 one row: until the request ends (an exec that is still running, say) it reads *In
@@ -321,8 +333,8 @@ revokes the session, which stops its next request.
 The loaded policy (collapsed, with where it came from), and *Try a policy*: edit a
 candidate and replay it over the last 1 to 720 hours of decisions, the same as
 `blastgate replay`. The result says how many decisions would change and lists each one
-("Waited for approval → Denied"). It changes nothing: to adopt a policy, change the file
-and restart `serve`.
+("Held → Denied"). It changes nothing: to adopt a policy, change the file and restart
+`serve`.
 
 ![A policy replay: a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
 
