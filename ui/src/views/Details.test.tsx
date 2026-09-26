@@ -252,3 +252,22 @@ describe('Details, carried from review', () => {
     expect(screen.queryByText(/other/)).toBeNull();
   });
 });
+
+describe('Details, design pass', () => {
+  it('reads tag, question, why, who asked, numbers and command, then the buttons, with no facts row', async () => {
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: execDetail() } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    // Said once: the numbers stand in for the three facts.
+    expect(within(card).queryByRole('list', { name: 'Facts' })).toBeNull();
+    expect(within(card).getByText(/^Asked by alice/)).toBeTruthy();
+    const numbers = within(card).getByRole('list', { name: /in numbers/i });
+    const cmd = within(card).getByLabelText('Command');
+    const deny = within(card).getByRole('button', { name: /^deny$/i });
+    const before = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(before(numbers, cmd)).toBe(true);
+    expect(before(cmd, deny)).toBe(true);
+    // The command is already in view: no button to show it again.
+    expect(within(card).queryByRole('button', { name: 'Show the command' })).toBeNull();
+  });
+});

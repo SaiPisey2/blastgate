@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, get, post, type ReplayResult } from '../api';
 import { describe } from '../lib/describe';
+import Sentence from '../components/Sentence';
 import Button from '../components/Button';
 
 type Loaded = { source: string; text: string };
@@ -218,7 +219,9 @@ function Result({ r }: { r: ReplayResult }) {
             const d = describe({ verb: c.verb, resource: c.resource, namespace: c.namespace, name: c.name });
             return (
               <li key={`${c.request_id}-${i}`} className="policy-change">
-                <p className="policy-change-sentence">{d.sentence}</p>
+                <p className="policy-change-sentence">
+                  <Sentence sentence={d.sentence} target={d.target} name={c.name} identClass="policy-change-target" />
+                </p>
                 <p className="policy-change-decision">{`${decisionWord(c.decision_before)} → ${decisionWord(c.decision_after)}`}</p>
               </li>
             );

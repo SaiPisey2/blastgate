@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ApiError, post, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
 import { ARM_MS, canSelfApprove, frictionOf, typedTarget } from '../lib/friction';
 import { describe } from '../lib/describe';
@@ -23,6 +23,12 @@ export type DecisionPanelProps = {
   position?: { index: number; total: number };
   // standalone: the panel heads its own details page, so no link to itself.
   standalone?: boolean;
+  // body: shown in place of the three facts, between the why and the
+  // controls. The details page puts its big numbers and the command here
+  // (spec 4.2), so what approving would do is read before the buttons,
+  // and says it once rather than as facts and again as numbers. A body
+  // carries the command itself, so the panel drops "Show the command".
+  body?: ReactNode;
 };
 
 export const SELF_APPROVAL_REASON = "You can't approve a request made on your behalf";
@@ -115,7 +121,7 @@ export default function DecisionPanel(props: DecisionPanelProps) {
   return <Panel key={props.summary.id} {...props} />;
 }
 
-function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone }: DecisionPanelProps) {
+function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone, body }: DecisionPanelProps) {
   const now = useNow();
   // Height is not a transform, so MotionConfig's reducedMotion leaves it
   // animating; asking the OS for less motion gets an instant step here.
@@ -340,7 +346,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         {ident && <span className="mono">{ident}</span>}
       </h2>
       <p className="decision-why">{friction.why}</p>
-      <Facts items={facts} />
+      {body ?? <Facts items={facts} />}
 
       {detailError && !detail && (
         <div className="decision-detail-error" role="alert">
@@ -421,7 +427,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       </AnimatePresence>
 
       <div className="decision-links">
-        {detail && (
+        {detail && body === undefined && (
           <Button variant="quiet" aria-expanded={showCommand} aria-controls={commandId} onClick={() => setShowCommand((v) => !v)}>
             Show the command
           </Button>
@@ -432,7 +438,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
           </a>
         )}
       </div>
-      {detail && showCommand && (
+      {detail && body === undefined && showCommand && (
         <pre id={commandId} className="decision-command mono">
           {actionText(detail.action) || '(no action recorded)'}
         </pre>

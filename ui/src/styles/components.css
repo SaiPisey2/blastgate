@@ -48,6 +48,9 @@
 }
 
 .shell-brand {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--s-6);
   color: var(--text);
   font-weight: 600;
   font-size: var(--fs-15);
@@ -163,6 +166,25 @@
 
   .shell-tab {
     min-height: var(--s-11);
+  }
+}
+
+/* At phone width the brand and the controls share one row, tabs below:
+   the name moves to the screen reader only (it stays in the DOM and its
+   title), and the gaps close up, so the header is two rows, not three. */
+@media (max-width: 480px) {
+  .shell-meta {
+    column-gap: var(--s-2);
+  }
+
+  .shell-who,
+  .theme-toggle-prefix {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 
@@ -284,6 +306,33 @@
 
 .live-status.tone-danger .live-status-dot {
   background: var(--danger-line);
+}
+
+/* === Page frame === */
+
+/* The page sits on the header's gutter, so every screen's left edge lines
+   up under the brand; it narrows with the header below 880px. */
+.shell-main {
+  padding: var(--s-7) var(--s-7) var(--s-12);
+}
+
+.page {
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+.page-wide {
+  max-width: 1280px;
+}
+
+.boot {
+  min-height: 100vh;
+}
+
+@media (max-width: 880px) {
+  .shell-main {
+    padding: var(--s-5) var(--s-4) var(--s-10);
+  }
 }
 
 /* === Severity tags: colour, glyph and word together === */
@@ -1270,6 +1319,9 @@
 }
 
 .details-back a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--s-6);
   color: var(--link);
   text-underline-offset: 3px;
 }
@@ -1304,9 +1356,9 @@
 
 .big-numbers {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--s-3);
-  margin: var(--s-8) 0 var(--s-6);
+  margin: var(--s-6) 0;
   padding: 0;
   list-style: none;
 }
@@ -1319,6 +1371,12 @@
   padding: var(--s-3) var(--s-4);
   border: 1px solid var(--line);
   border-radius: var(--r-panel);
+}
+
+/* An odd count would leave a hole at the end of the grid: the last
+   number takes the whole row instead. */
+.big-number:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .big-number-value {
@@ -1869,6 +1927,9 @@ a.activity-sentence:hover {
 }
 
 .outside-back a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--s-6);
   color: var(--link);
   text-underline-offset: 3px;
 }
@@ -1937,4 +1998,28 @@ a.activity-sentence:hover {
     grid-column: 2;
     grid-row: 1;
   }
+}
+
+/* === Design pass (Task 9) === */
+
+/* Details: who asked, above the numbers, in the facts row's quiet voice. */
+.details-asked {
+  margin: calc(-1 * var(--s-3)) 0 0;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.details-body .details-command {
+  margin-bottom: var(--s-6);
+}
+
+/* Activity row links and the policy disclosure reach the 24px target
+   floor (WCAG 2.5.8) without changing how the rows read. */
+.activity-sentence,
+.policy-disclosure summary {
+  min-height: var(--s-6);
+}
+
+a.activity-sentence {
+  display: inline-block;
 }

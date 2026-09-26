@@ -5,6 +5,7 @@ import EmptyState from '../components/EmptyState';
 import NewItemsPill from '../components/NewItemsPill';
 import Tag from '../components/Tag';
 import { announce } from '../components/Shell';
+import Sentence from '../components/Sentence';
 import { useListKeys } from '../hooks/useListKeys';
 import { describe } from '../lib/describe';
 import { displayClass, fold, keyOf, MAX_ROWS, minRawId, outcomeOf, type Entry } from '../lib/feedModel';
@@ -124,24 +125,6 @@ function OutsideBanner() {
         Review changes
       </a>
     </section>
-  );
-}
-
-// Sentence puts the identifier in mono inside describe()'s sentence.
-// Plain lastIndexOf, no pattern: the name is untrusted text. describe
-// always ends a named sentence with the name, or its literal fallback
-// with namespace/name, so the last occurrence is the identifier and not
-// a word that happens to contain it.
-function Sentence({ sentence, target, name }: { sentence: string; target: string; name: string }) {
-  const pick = target && sentence.lastIndexOf(target) >= 0 ? target : name && sentence.lastIndexOf(name) >= 0 ? name : '';
-  if (!pick) return <>{sentence}</>;
-  const i = sentence.lastIndexOf(pick);
-  return (
-    <>
-      {sentence.slice(0, i)}
-      <span className="mono activity-target">{pick}</span>
-      {sentence.slice(i + pick.length)}
-    </>
   );
 }
 
@@ -526,11 +509,11 @@ export default function Activity() {
                     data, and only a real id may reach the hash. */}
                 {href ? (
                   <a className="activity-sentence" href={href}>
-                    <Sentence sentence={d.sentence} target={d.target} name={r.name} />
+                    <Sentence sentence={d.sentence} target={d.target} name={r.name} identClass="activity-target" />
                   </a>
                 ) : (
                   <span className="activity-sentence">
-                    <Sentence sentence={d.sentence} target={d.target} name={r.name} />
+                    <Sentence sentence={d.sentence} target={d.target} name={r.name} identClass="activity-target" />
                   </span>
                 )}
                 <span className="activity-who">

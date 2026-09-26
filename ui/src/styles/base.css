@@ -48,6 +48,9 @@
 }
 
 body {
+  /* The browser's 8px margin would put a strip of page colour around the
+     header's hairline and pull every page off the header's gutter. */
+  margin: 0;
   font: var(--fs-15)/1.5 var(--font-sans);
   background: var(--bg);
   color: var(--text);

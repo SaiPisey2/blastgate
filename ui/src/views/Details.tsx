@@ -5,7 +5,7 @@ import DecisionPanel, { undoLabel } from '../components/DecisionPanel';
 import EmptyState from '../components/EmptyState';
 import ImpactTree from '../components/ImpactTree';
 import { GLYPH } from '../components/Tag';
-import { actionText } from '../lib/format';
+import { actionText, ago, useNow } from '../lib/format';
 import { APPROVAL_ID } from '../router';
 
 type Big = { label: string; value: string; tone?: 'danger' | 'caution' };
@@ -37,6 +37,11 @@ function bigNumbers(i: Impact): Big[] {
   ];
 }
 
+function ageOf(d: ApprovalDetail, now: number): string {
+  const t = Date.parse(d.created);
+  return ago(Number.isNaN(t) ? d.age_seconds : (now - t) / 1000);
+}
+
 // me: the signed-in approver's name, for the panel's self-approval guard.
 export default function Details({ id, me = '' }: { id: string; me?: string }) {
   // The router validates the id already; checked again so nothing that is
@@ -47,6 +52,7 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
   const [missing, setMissing] = useState(!valid);
   const pending = useRef(false);
   const seq = useRef(0);
+  const now = useNow();
   const techId = useId();
   const affectedId = useId();
 
@@ -123,31 +129,44 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
       {d && (
         <div className="details-grid">
           <div className="details-main">
-            <DecisionPanel summary={d} detail={d} me={me} onRetry={() => void load()} onDecided={() => void load()} standalone />
-
-            {d.impact ? (
-              <ul className="big-numbers" aria-label="In numbers">
-                {bigNumbers(d.impact).map((b) => (
-                  <li key={b.label} className={b.tone ? `big-number tone-${b.tone}` : 'big-number'}>
-                    {/* Colour, glyph and word: a tone never rides on colour alone. */}
-                    {b.tone && (
-                      <span className="big-number-glyph" aria-hidden="true">
-                        {GLYPH[b.tone]}
-                      </span>
-                    )}
-                    <span className="big-number-value">{b.value}</span>
-                    <span className="big-number-label">{b.label}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-
-            {/* The command itself, in view (spec 4.2): what the agent
-                will run is the one thing an approver should never have to
-                open something to read. */}
-            <pre className="details-action details-command mono" aria-label="Command">
-              {actionText(d.action) || '(no action recorded)'}
-            </pre>
+            <DecisionPanel
+              summary={d}
+              detail={d}
+              me={me}
+              onRetry={() => void load()}
+              onDecided={() => void load()}
+              standalone
+              body={
+                <div className="details-body">
+                  <p className="details-asked">
+                    Asked by {d.human || 'Unknown'}
+                    <span className="fact-aside"> · {ageOf(d, now)}</span>
+                  </p>
+                  {d.impact ? (
+                    <ul className="big-numbers" aria-label="In numbers">
+                      {bigNumbers(d.impact).map((b) => (
+                        <li key={b.label} className={b.tone ? `big-number tone-${b.tone}` : 'big-number'}>
+                          {/* Colour, glyph and word: a tone never rides on colour alone. */}
+                          {b.tone && (
+                            <span className="big-number-glyph" aria-hidden="true">
+                              {GLYPH[b.tone]}
+                            </span>
+                          )}
+                          <span className="big-number-value">{b.value}</span>
+                          <span className="big-number-label">{b.label}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {/* The command itself, in view (spec 4.2): what the agent
+                      will run is the one thing an approver should never have
+                      to open something to read. */}
+                  <pre className="details-action details-command mono" aria-label="Command">
+                    {actionText(d.action) || '(no action recorded)'}
+                  </pre>
+                </div>
+              }
+            />
 
             <details className="details-tech">
               <summary id={techId}>Technical details</summary>

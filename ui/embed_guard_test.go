@@ -158,6 +158,47 @@ func TestBuiltUIHasNothingTheCSPBlocks(t *testing.T) {
 	}
 }
 
+// The demo fixtures (src/demo/fixtures.ts) stand in for the whole admin
+// API, sign-in included, and are loaded only on the dev server. Shipped,
+// they would answer /api/* from inside the page with made-up approvals. A
+// build drops them because import.meta.env.DEV is false there; this test
+// fails if their marker, or a file named for them, ever reaches dist/.
+const demoMarker = "blastgate-demo-fixture"
+
+func TestBuiltUIHasNoDemoFixtures(t *testing.T) {
+	src, err := os.ReadFile("src/demo/fixtures.ts")
+	if err != nil {
+		t.Fatalf("read the fixtures: %v", err)
+	}
+	// Pinned both ways: renaming the marker in the fixtures without here
+	// would leave this test searching for a string nothing contains.
+	if !strings.Contains(string(src), `"`+demoMarker+`"`) && !strings.Contains(string(src), `'`+demoMarker+`'`) {
+		t.Fatalf("src/demo/fixtures.ts no longer defines the marker %q", demoMarker)
+	}
+	err = fs.WalkDir(FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.Contains(strings.ToLower(path.Base(p)), "demo") {
+			t.Errorf("dist has a demo file: %s", p)
+		}
+		if d.IsDir() {
+			return nil
+		}
+		b, err := fs.ReadFile(FS(), p)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(b), demoMarker) {
+			t.Errorf("%s: demo fixtures shipped in the build", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The fonts ship as files, so the OFL licence ships beside them as a file
 // (vite.config.ts emits assets/OFL.txt); pinned here so a config change
 // cannot drop it unnoticed.

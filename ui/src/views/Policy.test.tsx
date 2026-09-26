@@ -48,6 +48,13 @@ const RESULT: ReplayResult = {
   ],
 };
 
+// changeNamed finds a change by its whole sentence: the identifier in it
+// is set in its own mono span, so the text spans two elements.
+function changeNamed(result: HTMLElement, sentence: string): HTMLElement {
+  const p = within(result).getByText((_, el) => !!el && el.classList.contains('policy-change-sentence') && el.textContent === sentence);
+  return p.closest('li')!;
+}
+
 describe('Policy', () => {
   it('shows the loaded policy read-only in a disclosure and replays a candidate with the csrf header', async () => {
     const calls = mockFetch({
@@ -121,13 +128,15 @@ describe('Policy', () => {
     expect(within(result).getByText('3 of 412')).toBeTruthy();
     expect(within(result).getByText('decisions would change')).toBeTruthy();
 
-    const first = within(result).getByText('Delete the pod web-7d9f8c-abcde').closest('li')!;
+    const first = changeNamed(result, 'Delete the pod web-7d9f8c-abcde');
     expect(within(first).getByText('Allowed → Waited for approval')).toBeTruthy();
+    // The identifier inside the sentence is set in mono, as everywhere else.
+    expect(within(first).getByText('web-7d9f8c-abcde').className).toContain('mono');
 
-    const second = within(result).getByText('Run a command in db-0').closest('li')!;
+    const second = changeNamed(result, 'Run a command in db-0');
     expect(within(second).getByText('Waited for approval → Denied')).toBeTruthy();
 
-    const third = within(result).getByText('Change the service api').closest('li')!;
+    const third = changeNamed(result, 'Change the service api');
     expect(within(third).getByText('weird → Allowed')).toBeTruthy();
   });
 
