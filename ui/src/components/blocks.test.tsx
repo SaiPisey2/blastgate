@@ -60,21 +60,27 @@ describe('Facts', () => {
 });
 
 describe('TypedConfirm', () => {
-  it('reports validity and submits on Enter only when the value matches exactly', async () => {
+  it('reports validity and submits only on the chord with an exact match', async () => {
     const onValid = vi.fn();
     const onSubmit = vi.fn();
     render(<TypedConfirm expected="demo/data" onValid={onValid} onSubmit={onSubmit} />);
     const field = screen.getByLabelText(/to approve, type/i);
-    await userEvent.type(field, 'demo/DATA{Enter}');
+    expect(screen.getByText('⌘/Ctrl+Enter to approve')).toBeTruthy();
+    await userEvent.type(field, 'demo/DATA');
+    await userEvent.keyboard('{Enter}{Meta>}{Enter}{/Meta}');
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onValid).toHaveBeenLastCalledWith(false);
     await userEvent.clear(field);
-    await userEvent.type(field, ' demo/data{Enter}');
+    await userEvent.type(field, ' demo/data');
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
     expect(onSubmit).not.toHaveBeenCalled();
     await userEvent.clear(field);
     await userEvent.type(field, 'demo/data');
     expect(onValid).toHaveBeenLastCalledWith(true);
-    await userEvent.type(field, '{Enter}');
+    // A plain Enter never submits, even with the value right.
+    await userEvent.keyboard('{Enter}');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
     await userEvent.keyboard('{Control>}{Enter}{/Control}');
     expect(onSubmit).toHaveBeenCalledTimes(2);
   });

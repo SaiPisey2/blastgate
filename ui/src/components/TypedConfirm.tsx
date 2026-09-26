@@ -19,6 +19,7 @@ const block = (e: ClipboardEvent | DragEvent) => e.preventDefault();
 // without typing (paste, drop, autofill, autocorrect) is refused.
 export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, describedBy, inputRef }: Props) {
   const id = useId();
+  const hintId = useId();
   const [value, setValue] = useState('');
   // Exact match only: no trim, no case folding. "demo/Data" is not the
   // object being approved, and a near-miss must not pass.
@@ -28,7 +29,9 @@ export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, d
     // isComposing: Enter that ends an IME composition is not a submit.
     if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
     e.preventDefault();
-    if (valid) onSubmit();
+    // Only the chord submits (spec §6). A plain Enter is what a hand does
+    // at the end of typing anything, so it must never be the approval.
+    if (valid && (e.metaKey || e.ctrlKey)) onSubmit();
   }
 
   return (
@@ -54,8 +57,11 @@ export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, d
         autoCorrect="off"
         autoCapitalize="off"
         spellCheck={false}
-        aria-describedby={describedBy}
+        aria-describedby={describedBy ? `${hintId} ${describedBy}` : hintId}
       />
+      <span id={hintId} className="typed-confirm-hint">
+        ⌘/Ctrl+Enter to approve
+      </span>
     </div>
   );
 }

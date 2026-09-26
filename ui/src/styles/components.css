@@ -171,6 +171,11 @@
   color: var(--text);
 }
 
+.typed-confirm-hint {
+  font-size: var(--fs-12);
+  color: var(--text-faint);
+}
+
 /* Two classes deep: the old stylesheet's input[type='text'] and
    input:focus (which removes the outline) load later and would otherwise
    win until that file is retired. */

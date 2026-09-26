@@ -258,31 +258,32 @@ describe('DecisionPanel focus and keys', () => {
     expect(document.activeElement).not.toBe(approveButton());
   });
 
-  it('approve needs a chord after typing (meta)', async () => {
-    const calls = routes();
-    const { onDecided } = renderPanel(withDetail(summary()));
-    const field = typedField();
-    await userEvent.type(field, 'demo/dat');
-    await userEvent.type(field, '{Enter}');
-    await userEvent.type(field, '{Meta>}{Enter}{/Meta}');
-    await userEvent.type(field, '{Control>}{Enter}{/Control}');
-    expect(posts(calls)).toEqual([]);
-    await userEvent.type(field, 'a');
-    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
-    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'approved'));
-    // A second chord after the decision went through sends nothing more.
-    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
-    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
-  });
-
-  it('approve needs a chord after typing (ctrl)', async () => {
-    const calls = routes();
-    const { onDecided } = renderPanel(withDetail(summary()));
-    await userEvent.type(typedField(), 'demo/data');
-    await userEvent.keyboard('{Control>}{Enter}{/Control}');
-    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'approved'));
-    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
-  });
+  for (const [chord, keys] of [
+    ['meta', '{Meta>}{Enter}{/Meta}'],
+    ['ctrl', '{Control>}{Enter}{/Control}'],
+  ] as const) {
+    it(`approve needs a chord after typing (${chord})`, async () => {
+      const calls = routes();
+      const { onDecided } = renderPanel(withDetail(summary()));
+      const field = typedField();
+      // Before the value is valid, nothing submits: not Enter, not a chord.
+      await userEvent.type(field, 'demo/dat');
+      await userEvent.keyboard('{Enter}{Meta>}{Enter}{/Meta}{Control>}{Enter}{/Control}');
+      expect(posts(calls)).toEqual([]);
+      // Valid, and a plain Enter still does nothing.
+      await userEvent.type(field, 'a');
+      expect(field.value).toBe('demo/data');
+      await userEvent.keyboard('{Enter}');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(posts(calls)).toEqual([]);
+      expect(onDecided).not.toHaveBeenCalled();
+      // The chord approves, once.
+      await userEvent.keyboard(keys);
+      await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'approved'));
+      await userEvent.keyboard(keys);
+      expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    });
+  }
 
   it('a bare a or y key never approves', async () => {
     const calls = routes();
