@@ -1,18 +1,22 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Agents from './Agents';
 import { setCSRF } from '../api';
+import { ARM_MS } from '../lib/friction';
 import { mockFetch } from '../test/fetch';
 import { session, SID1, SID2 } from '../test/fixtures';
+
+const EVIL = '<img src=x onerror=alert(1)>';
 
 afterEach(() => {
   cleanup();
   setCSRF('');
+  vi.useRealTimers();
 });
 
 describe('Agents', () => {
-  it('stop asks for confirmation, arms after a delay, and sends the csrf header', async () => {
+  it('stop asks for confirmation, arms after a delay (boundary-checked), and sends the csrf header', async () => {
     let stopped = false;
     const calls = mockFetch({
       'GET /api/sessions': () => ({
@@ -36,15 +40,24 @@ describe('Agents', () => {
     expect(within(other).queryByRole('button', { name: /^stop$/i })).toBeNull();
     expect(within(other).getByText('Expired')).toBeTruthy();
 
-    // The first click only asks.
-    await userEvent.click(within(row).getByRole('button', { name: /^stop$/i }));
+    // fireEvent, not userEvent, while the clock is fake: Testing Library's
+    // async wrapper waits on a real setTimeout that only fake timers know
+    // how to advance (matches DecisionPanel.test.tsx's own arm check).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fireEvent.click(within(row).getByRole('button', { name: /^stop$/i }));
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
     expect(within(row).getByText('Stop coding-agent for alice?')).toBeTruthy();
     const confirm = within(row).getByRole('button', { name: /^stop$/i }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(ARM_MS - 1));
+    expect(confirm.disabled).toBe(true);
     // A double-click on Stop lands its second click here, and is ignored
     // while it is not yet armed.
-    await userEvent.click(confirm);
+    fireEvent.click(confirm);
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
+    act(() => vi.advanceTimersByTime(1));
+    expect(confirm.disabled).toBe(false);
+    vi.useRealTimers();
 
     // Cancel backs out without stopping anything.
     await userEvent.click(within(row).getByRole('button', { name: /cancel/i }));
@@ -105,5 +118,28 @@ describe('Agents', () => {
     mockFetch({ 'GET /api/sessions': { body: [] } });
     render(<Agents />);
     expect(await screen.findByText('No agents have signed in.')).toBeTruthy();
+  });
+
+  it('shows hostile agent, human and error strings as text, never as markup', async () => {
+    mockFetch({
+      'GET /api/sessions': { body: [session({ agent: EVIL, human: EVIL, expires: new Date(Date.now() + 3_600_000).toISOString() })] },
+      'POST /api/sessions/': { status: 500, body: { error: EVIL } },
+    });
+    const { container } = render(<Agents />);
+
+    const cells = await screen.findAllByText(EVIL);
+    expect(cells.length).toBe(2); // the Agent cell and the On behalf of cell
+    expect(container.querySelector('img')).toBeNull();
+
+    const row = cells[0].closest('tr')!;
+    await userEvent.click(within(row).getByRole('button', { name: /^stop$/i }));
+    // The confirm sentence itself embeds the same hostile strings twice.
+    expect(within(row).getByText(`Stop ${EVIL} for ${EVIL}?`)).toBeTruthy();
+    const confirm = within(row).getByRole('button', { name: /^stop$/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await userEvent.click(confirm);
+
+    await waitFor(() => expect(within(row).getByText(EVIL, { selector: '.agents-row-error' })).toBeTruthy());
+    expect(container.querySelector('img')).toBeNull();
   });
 });

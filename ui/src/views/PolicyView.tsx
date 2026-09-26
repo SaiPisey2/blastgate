@@ -113,81 +113,88 @@ export default function PolicyView() {
         </details>
       )}
 
-      <section className="policy-try">
-        <h2>Try a policy</h2>
-        <form
-          className="policy-form"
-          // Our own message says what is wrong and where; the browser's
-          // bubble would block the submit without saying the range.
-          noValidate
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!busy) void replay();
-          }}
-        >
-          <span className={`policy-counter${overLimit ? ' policy-counter-danger' : ''}`}>
-            {bytes.toLocaleString()} / {MAX_POLICY_BYTES.toLocaleString()} bytes
-          </span>
-          <label className="policy-field">
-            <span>Candidate policy</span>
-            <textarea
-              className="mono policy-textarea"
-              value={candidate}
-              onChange={(e) => {
-                touched.current = true;
-                setCandidate(e.target.value);
-              }}
-              spellCheck={false}
-              rows={14}
-            />
-          </label>
-          <div className="policy-controls">
-            <label className="policy-hours-field">
-              <span>Hours of history</span>
-              <input
-                className="policy-hours-input mono"
-                type="number"
-                inputMode="numeric"
-                list="policy-hours-presets"
-                min={MIN_HOURS}
-                max={MAX_HOURS}
-                step={1}
-                value={hours}
-                onChange={(e) => setHours(e.target.value)}
+      {/* Try a policy sits beside its own result at 900px and wider (the
+          approved mockup); below that the two stack, and neither ever
+          forces the page itself to scroll sideways at 360px. */}
+      <div className="policy-grid">
+        <section className="policy-try">
+          <h2>Try a policy</h2>
+          <form
+            className="policy-form"
+            // Our own message says what is wrong and where; the browser's
+            // bubble would block the submit without saying the range.
+            noValidate
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!busy) void replay();
+            }}
+          >
+            <span className={`policy-counter${overLimit ? ' policy-counter-danger' : ''}`}>
+              {bytes.toLocaleString()} / {MAX_POLICY_BYTES.toLocaleString()} bytes
+            </span>
+            <label className="policy-field">
+              <span>Candidate policy</span>
+              <textarea
+                className="mono policy-textarea"
+                value={candidate}
+                onChange={(e) => {
+                  touched.current = true;
+                  setCandidate(e.target.value);
+                }}
+                spellCheck={false}
+                rows={14}
               />
-              <datalist id="policy-hours-presets">
-                {HOURS_PRESETS.map((h) => (
-                  <option key={h} value={h} />
-                ))}
-              </datalist>
             </label>
-            <Button type="submit" disabled={busy}>
-              {busy ? 'Replaying…' : `Replay over the last ${n ?? 'N'} ${n === 1 ? 'hour' : 'hours'}`}
-            </Button>
-          </div>
-          {formError && (
-            <p className="policy-form-error" role="alert">
-              {formError}
+            <div className="policy-controls">
+              <label className="policy-hours-field">
+                <span>Hours of history</span>
+                <input
+                  className="policy-hours-input mono"
+                  type="number"
+                  inputMode="numeric"
+                  list="policy-hours-presets"
+                  min={MIN_HOURS}
+                  max={MAX_HOURS}
+                  step={1}
+                  value={hours}
+                  onChange={(e) => setHours(e.target.value)}
+                />
+                <datalist id="policy-hours-presets">
+                  {HOURS_PRESETS.map((h) => (
+                    <option key={h} value={h} />
+                  ))}
+                </datalist>
+              </label>
+              <Button type="submit" disabled={busy}>
+                {busy ? 'Replaying…' : `Replay over the last ${n ?? 'N'} ${n === 1 ? 'hour' : 'hours'}`}
+              </Button>
+            </div>
+            {formError && (
+              <p className="policy-form-error" role="alert">
+                {formError}
+              </p>
+            )}
+          </form>
+        </section>
+
+        <div className="policy-results">
+          {parseError && (
+            <section className="policy-error" role="alert">
+              <h2>The candidate does not load</h2>
+              <pre className="mono policy-error-text" aria-label="Policy error">
+                {parseError}
+              </pre>
+            </section>
+          )}
+          {error && (
+            <p className="policy-banner-error" role="alert">
+              {error}
             </p>
           )}
-        </form>
-      </section>
 
-      {parseError && (
-        <section className="policy-error" role="alert">
-          <h2>The candidate does not load</h2>
-          <pre className="mono policy-error-text" aria-label="Policy error">
-            {parseError}
-          </pre>
-        </section>
-      )}
-      {error && (
-        <p className="policy-banner-error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {result && <Result r={result} />}
+          {result && <Result r={result} />}
+        </div>
+      </div>
     </div>
   );
 }

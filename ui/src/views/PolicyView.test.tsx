@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import PolicyView from './PolicyView';
 import { setCSRF, type ReplayResult } from '../api';
 import { mockFetch } from '../test/fetch';
+
+const EVIL = '<img src=x onerror=alert(1)>';
 
 afterEach(() => {
   cleanup();
@@ -204,5 +206,129 @@ describe('PolicyView', () => {
     // Not a policy error: the candidate itself is fine.
     expect(screen.queryByLabelText('Policy error')).toBeNull();
     expect(screen.queryByRole('region', { name: 'Replay result' })).toBeNull();
+  });
+
+  it('the try form and its result sit in the two-column grid', async () => {
+    mockFetch({ 'GET /api/policy': { body: { source: 'built-in', text: LOADED } } });
+    const { container } = render(<PolicyView />);
+    await screen.findByText('built-in');
+    expect(container.querySelector('.policy-grid')).toBeTruthy();
+    expect(container.querySelector('.policy-grid > .policy-try')).toBeTruthy();
+    expect(container.querySelector('.policy-grid > .policy-results')).toBeTruthy();
+  });
+
+  it('a stale result disappears once a later replay comes back a 400', async () => {
+    let bad = false;
+    mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'POST /api/policy/replay': () => (bad ? { status: 400, body: { error: PARSE_ERROR } } : { body: RESULT }),
+    });
+    render(<PolicyView />);
+    await screen.findByText('built-in');
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    await screen.findByRole('region', { name: 'Replay result' });
+
+    bad = true;
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    await screen.findByLabelText('Policy error');
+    expect(screen.queryByRole('region', { name: 'Replay result' })).toBeNull();
+  });
+
+  it('a stale result disappears once a later replay comes back a 429', async () => {
+    let busy = false;
+    mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'POST /api/policy/replay': () => (busy ? { status: 429, body: { error: 'busy' } } : { body: RESULT }),
+    });
+    render(<PolicyView />);
+    await screen.findByText('built-in');
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    await screen.findByRole('region', { name: 'Replay result' });
+
+    busy = true;
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    await screen.findByText('A replay is already running; try again when it finishes.');
+    expect(screen.queryByRole('region', { name: 'Replay result' })).toBeNull();
+  });
+
+  it('the loaded policy, the candidate and a parse error render hostile strings as text, never as markup', async () => {
+    mockFetch({
+      'GET /api/policy': { body: { source: EVIL, text: EVIL } },
+      'POST /api/policy/replay': { status: 400, body: { error: EVIL } },
+    });
+    const { container } = render(<PolicyView />);
+
+    const disclosure = await waitFor(() => {
+      const d = container.querySelector('details.policy-disclosure');
+      if (!d) throw new Error('disclosure not yet rendered');
+      return d;
+    });
+    expect(disclosure.querySelector('code')!.textContent).toBe(EVIL);
+    expect(screen.getByLabelText('Loaded policy').textContent).toBe(EVIL);
+
+    const candidate = screen.getByLabelText(/candidate policy/i) as HTMLTextAreaElement;
+    await waitFor(() => expect(candidate.value).toBe(EVIL));
+
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    const err = await screen.findByLabelText('Policy error');
+    expect(err.textContent).toBe(EVIL);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('a change with hostile strings in its fields renders as text, never as markup', async () => {
+    const evilResult: ReplayResult = {
+      evaluated: 1,
+      changed: 1,
+      skipped: 0,
+      truncated: false,
+      changes: [
+        {
+          at: '2026-09-26T09:30:00Z',
+          request_id: 'r-1',
+          verb: 'delete',
+          resource: 'pods',
+          namespace: EVIL,
+          name: EVIL,
+          rule_before: EVIL,
+          rule_after: EVIL,
+          decision_before: EVIL,
+          decision_after: EVIL,
+        },
+      ],
+    };
+    mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'POST /api/policy/replay': { body: evilResult },
+    });
+    const { container } = render(<PolicyView />);
+    await screen.findByText('built-in');
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    const result = await screen.findByRole('region', { name: 'Replay result' });
+    expect(result.textContent).toContain(EVIL);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('the 64 KiB counter warns and refuses a candidate over the limit', async () => {
+    const calls = mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: '' } },
+      'POST /api/policy/replay': { body: RESULT },
+    });
+    const { container } = render(<PolicyView />);
+    await screen.findByText('built-in');
+    const candidate = screen.getByLabelText(/candidate policy/i) as HTMLTextAreaElement;
+
+    expect(container.querySelector('.policy-counter')!.textContent).toBe('0 / 65,536 bytes');
+    expect(container.querySelector('.policy-counter-danger')).toBeNull();
+
+    // fireEvent, not userEvent.type: 70,000 keystrokes would time out the
+    // test, and this only needs the byte count to be over the limit.
+    const over = 'a'.repeat(70_000);
+    fireEvent.change(candidate, { target: { value: over } });
+    await waitFor(() => expect(container.querySelector('.policy-counter')!.textContent).toBe('70,000 / 65,536 bytes'));
+    expect(container.querySelector('.policy-counter-danger')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
+    expect(await screen.findByText(/larger than 64 KiB/i)).toBeTruthy();
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
   });
 });
