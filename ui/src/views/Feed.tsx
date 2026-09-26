@@ -71,7 +71,10 @@ function upsert(m: Map<string, Entry>, r: FeedRow) {
     m.set(key, { key, first: r.id, row: r, done: result });
     return;
   }
-  const row = result || !e.done ? { ...e.row, ...r } : { ...r, ...e.row };
+  const merged = result || !e.done ? { ...e.row, ...r } : { ...r, ...e.row };
+  // The row keeps the time of its request's first row, the one it is
+  // ordered by, so a long exec does not show its end time out of order.
+  const row = { ...merged, at: r.id < e.first ? r.at : e.row.at };
   m.set(key, { key, first: Math.min(e.first, r.id), row, done: e.done || result });
 }
 

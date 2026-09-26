@@ -154,6 +154,22 @@ describe('Feed', () => {
     expect(screen.queryByText('in flight')).toBeNull();
   });
 
+  it('a merged request shows the time of its first row', async () => {
+    mockFetch({ 'GET /api/feed': { body: [] } });
+    render(<Feed />);
+    await screen.findByText(/no requests/i);
+    // A long exec: decided at 10:15, ended at 10:45. It is placed by its
+    // decision, so it shows the decision's time, whichever row came first.
+    act(() => emit('audit', feedRow({ id: 81, request_id: 'q3', kind: 'result', at: '2026-09-26T10:45:00Z', status: 101, name: 'long' })));
+    act(() => emit('audit', feedRow({ id: 80, request_id: 'q3', kind: 'decision', at: '2026-09-26T10:15:00Z', status: 0, name: 'long' })));
+    act(() => emit('audit', feedRow({ id: 91, request_id: 'q4', kind: 'decision', at: '2026-09-26T11:00:00Z', status: 0, name: 'later' })));
+    act(() => emit('audit', feedRow({ id: 92, request_id: 'q4', kind: 'result', at: '2026-09-26T11:30:00Z', status: 200, name: 'later' })));
+    const timeOf = (name: string) => screen.getByText(name).closest('tr')!.querySelector('td.time')!.getAttribute('title');
+    await waitFor(() => expect(screen.getByText('101')).toBeTruthy());
+    expect(timeOf('long')).toBe('2026-09-26T10:15:00Z');
+    expect(timeOf('later')).toBe('2026-09-26T11:00:00Z');
+  });
+
   it('merges a request whose rows fall on two pages, and pages by raw rows', async () => {
     // Page 1 is 50 raw rows but only 26 requests: 24 decision/result
     // pairs, one read, and the result of a request whose decision is on
