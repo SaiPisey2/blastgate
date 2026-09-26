@@ -83,6 +83,7 @@ var approvalStatuses = map[string]bool{"": true, "pending": true, "approved": tr
 // reached the store.
 type apiStore interface {
 	AuditPage(ctx context.Context, f store.AuditFilter) ([]store.AuditRow, error)
+	AuditAfter(ctx context.Context, afterID int64, limit int) ([]store.AuditRow, error)
 	AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]store.AuditRow, error)
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
@@ -100,17 +101,20 @@ type api struct {
 	// replayRowCap rows and burns CPU on CEL; several approvers (or one
 	// double-clicking) must not multiply that.
 	replaySlot chan struct{}
+	// slots counts live streams, per UI session and in total.
+	slots *streamSlots
 }
 
 // Routes mounts the whole /api surface on mux.
 func Routes(mux *http.ServeMux, a *Auth, d Deps) { routes(mux, a, d, d.Store) }
 
-func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) {
+// routes returns the api so a test can look at its stream slots.
+func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) *api {
 	log := d.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	h := &api{auth: a, d: d, st: st, log: log, replaySlot: make(chan struct{}, 1)}
+	h := &api{auth: a, d: d, st: st, log: log, replaySlot: make(chan struct{}, 1), slots: &streamSlots{per: map[string]int{}}}
 	mux.HandleFunc("POST /api/login", a.Login)
 	// Logout sits behind Require (the UI sends the CSRF header on it) so
 	// that every /api route but login answers 401 without a live session;
@@ -127,11 +131,13 @@ func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) {
 	mux.Handle("GET /api/policy", a.Require(h.policy))
 	mux.Handle("POST /api/policy/replay", a.Require(h.replay))
 	mux.Handle("GET /api/bypass", a.Require(h.bypass))
+	mux.Handle("GET /api/stream", a.Require(h.stream))
 	// Anything else under /api is a 401 without a session too, so probing
 	// for routes learns nothing before logging in.
 	mux.Handle("/api/", a.Require(func(w http.ResponseWriter, r *http.Request, _ store.UISession) {
 		fail(w, http.StatusNotFound, errNotFound)
 	}))
+	return h
 }
 
 // reply writes v as JSON. no-store because every answer here is live

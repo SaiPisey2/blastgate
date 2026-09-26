@@ -283,10 +283,7 @@ func (a *Auth) Require(next func(http.ResponseWriter, *http.Request, store.UISes
 			a.internal(w, "ui session lookup", err)
 			return
 		}
-		// Both revocations count: RevokeApprover sweeps the approver's
-		// sessions, but a login racing that sweep can insert a session it
-		// never saw, so the approver's own state is checked here too.
-		if err != nil || !u.Revoked.IsZero() || !u.ApproverRevoked.IsZero() || !a.Now().Before(u.Expires) {
+		if err != nil || !a.live(u) {
 			clearCookie(w)
 			writeJSON(w, http.StatusUnauthorized, errUnauthenticated)
 			return
@@ -303,6 +300,15 @@ func (a *Auth) Require(next func(http.ResponseWriter, *http.Request, store.UISes
 		}
 		next(w, r, u)
 	})
+}
+
+// live says whether a session found by UISessionByHash may still be
+// used. Both revocations count: RevokeApprover sweeps the approver's
+// sessions, but a login racing that sweep can insert a session it never
+// saw, so the approver's own state is checked too. Require and the live
+// stream share it, so a stream cannot outlive a session Require refuses.
+func (a *Auth) live(u store.UISession) bool {
+	return u.Revoked.IsZero() && u.ApproverRevoked.IsZero() && a.Now().Before(u.Expires)
 }
 
 // limiter is a fixed window per host: at most loginAttempts in each

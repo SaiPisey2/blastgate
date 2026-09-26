@@ -41,6 +41,9 @@ type countingStore struct {
 	// onDecide runs once inside DecideApproval before it forwards, so a
 	// test can make another decision win the race.
 	onDecide func(ctx context.Context, id string)
+	// onAuditAfter runs once inside AuditAfter before it forwards, so a
+	// test can land rows between the stream's hello and its first poll.
+	onAuditAfter func()
 }
 
 func (c *countingStore) hooks() (func(), func(context.Context, string)) {
@@ -65,6 +68,17 @@ func (c *countingStore) AuditSinceLimit(ctx context.Context, since time.Time, ki
 		hook()
 	}
 	return c.Store.AuditSinceLimit(ctx, since, kind, limit)
+}
+func (c *countingStore) AuditAfter(ctx context.Context, afterID int64, limit int) ([]store.AuditRow, error) {
+	c.n.Add(1)
+	c.mu.Lock()
+	hook := c.onAuditAfter
+	c.onAuditAfter = nil
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return c.Store.AuditAfter(ctx, afterID, limit)
 }
 func (c *countingStore) ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error) {
 	c.n.Add(1)
@@ -122,6 +136,7 @@ type apiFixture struct {
 	clock *clock
 	auth  *Auth
 	svc   *approval.Service
+	api   *api
 	srv   *httptest.Server
 }
 
@@ -141,7 +156,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.svc = &approval.Service{Store: f.cs, Key: []byte("0123456789abcdef0123456789abcdef"),
 		TokenTTL: 10 * time.Minute, PendingTTL: time.Hour, Now: f.clock.Now}
 	mux := http.NewServeMux()
-	routes(mux, f.auth, Deps{Store: st, Approvals: f.svc, PolicySource: "/etc/blastgate/policy.yaml",
+	f.api = routes(mux, f.auth, Deps{Store: st, Approvals: f.svc, PolicySource: "/etc/blastgate/policy.yaml",
 		PolicyText: []byte(testPolicyText), Log: log}, f.cs)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -827,6 +842,7 @@ func TestEveryAPIRouteNeedsASession(t *testing.T) {
 		{"GET", "/api/policy"},
 		{"POST", "/api/policy/replay"},
 		{"GET", "/api/bypass"},
+		{"GET", "/api/stream"},
 		{"GET", "/api/no-such-route"},
 	}
 	stale := &client{f: f, cookie: "not-a-session", csrf: "x"}
