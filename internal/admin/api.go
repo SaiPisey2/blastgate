@@ -37,15 +37,21 @@ type Deps struct {
 }
 
 const (
-	bodyLimit       = 64 << 10
-	maxPolicyBytes  = 64 << 10
-	maxSinceHours   = 720
-	feedLimit       = 50
-	bypassLimit     = 100
-	bypassLimitMax  = 500
-	bypassSince     = 24
-	replayChangeCap = 500
+	bodyLimit      = 64 << 10
+	maxPolicyBytes = 64 << 10
+	maxSinceHours  = 720
+	feedLimit      = 50
+	approvalsLimit = 200
+	listLimitMax   = 500
+	bypassLimit    = 100
+	bypassSince    = 24
 )
+
+// replayRowCap bounds how many decision rows one replay loads and
+// evaluates. Without it a 720-hour window on a busy gateway is one
+// approver request that reads the whole audit table into memory. A var,
+// not a const, so a test can lower it rather than seed 100,001 rows.
+var replayRowCap = 100_000
 
 // Every error body is one of these constants. The one exception is a
 // replayed policy's parse error, which is the operator's own input echoed
@@ -58,6 +64,7 @@ const (
 	errSince      = "since_hours must be between 1 and 720"
 	errPolicySize = "policy larger than 64 KiB"
 	errBadStatus  = "unknown approval status"
+	errBusy       = "a replay is already running; try again when it finishes"
 )
 
 // Ids are checked against their exact shape before any lookup: a path
@@ -76,8 +83,8 @@ var approvalStatuses = map[string]bool{"": true, "pending": true, "approved": tr
 // reached the store.
 type apiStore interface {
 	AuditPage(ctx context.Context, f store.AuditFilter) ([]store.AuditRow, error)
-	AuditSince(ctx context.Context, since time.Time, kind string) ([]store.AuditRow, error)
-	ListApprovals(ctx context.Context, status string) ([]store.Approval, error)
+	AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]store.AuditRow, error)
+	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	ListSessions(ctx context.Context) ([]store.Session, error)
 	RevokeSession(ctx context.Context, id string, at time.Time) error
@@ -89,6 +96,10 @@ type api struct {
 	d    Deps
 	st   apiStore
 	log  *slog.Logger
+	// replaySlot admits one replay at a time. Each holds up to
+	// replayRowCap rows and burns CPU on CEL; several approvers (or one
+	// double-clicking) must not multiply that.
+	replaySlot chan struct{}
 }
 
 // Routes mounts the whole /api surface on mux.
@@ -99,7 +110,7 @@ func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	h := &api{auth: a, d: d, st: st, log: log}
+	h := &api{auth: a, d: d, st: st, log: log, replaySlot: make(chan struct{}, 1)}
 	mux.HandleFunc("POST /api/login", a.Login)
 	// Logout sits behind Require (the UI sends the CSRF header on it) so
 	// that every /api route but login answers 401 without a live session;
@@ -243,18 +254,24 @@ func queryInt(r *http.Request, name string, def, max int64) (int64, bool) {
 	return n, true
 }
 
+// listLimit reads a list's optional limit. Over listLimitMax is clamped,
+// not refused: asking for "a lot" is not a mistake, only a bound to keep.
+// The clamp happens on the int64, before any narrowing to int.
+func listLimit(r *http.Request, def int64) (int, bool) {
+	n, ok := queryInt(r, "limit", def, 1<<62)
+	return int(min(n, listLimitMax)), ok
+}
+
 func (h *api) feed(w http.ResponseWriter, r *http.Request, _ store.UISession) {
 	before, ok1 := queryInt(r, "before", 0, 1<<62)
-	// A limit over the store's cap of 500 is clamped by the store, not
-	// refused: asking for "a lot" is not a mistake.
-	limit, ok2 := queryInt(r, "limit", feedLimit, 1<<31)
+	limit, ok2 := listLimit(r, feedLimit)
 	if !ok1 || !ok2 {
 		fail(w, http.StatusBadRequest, errBadQuery)
 		return
 	}
 	q := r.URL.Query()
 	rows, err := h.st.AuditPage(r.Context(), store.AuditFilter{
-		BeforeID: before, Limit: int(limit),
+		BeforeID: before, Limit: limit,
 		Agent: q.Get("agent"), Human: q.Get("human"), Class: q.Get("class"), Decision: q.Get("decision"), Kind: q.Get("kind"),
 	})
 	if err != nil {
@@ -346,7 +363,12 @@ func (h *api) approvals(w http.ResponseWriter, r *http.Request, _ store.UISessio
 		fail(w, http.StatusBadRequest, errBadStatus)
 		return
 	}
-	l, err := h.st.ListApprovals(r.Context(), status)
+	limit, ok := listLimit(r, approvalsLimit)
+	if !ok {
+		fail(w, http.StatusBadRequest, errBadQuery)
+		return
+	}
+	l, err := h.st.ListApprovalsLimit(r.Context(), status, limit)
 	if err != nil {
 		h.internal(w, "list approvals", err)
 		return
@@ -521,8 +543,9 @@ func (h *api) replay(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 		fail(w, http.StatusBadRequest, errSince)
 		return
 	}
-	// The body limit already bounds it; this states the policy's own limit
-	// rather than leaving it implied by how JSON escaping happens to fall.
+	// Unreachable today: MaxBytesReader already caps the body at 64 KiB,
+	// and a decoded JSON string is never longer than its encoding. Kept so
+	// the policy's own limit survives a later change to the body limit.
 	if len(req.Policy) > maxPolicyBytes {
 		fail(w, http.StatusBadRequest, errPolicySize)
 		return
@@ -532,17 +555,33 @@ func (h *api) replay(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := h.st.AuditSince(r.Context(), h.auth.Now().Add(-time.Duration(req.SinceHours)*time.Hour), "decision")
+	select {
+	case h.replaySlot <- struct{}{}:
+		defer func() { <-h.replaySlot }()
+	default:
+		fail(w, http.StatusTooManyRequests, errBusy)
+		return
+	}
+	// One row past the cap says whether the window held more than was
+	// evaluated, without counting the whole window.
+	rowCap := replayRowCap
+	rows, err := h.st.AuditSinceLimit(r.Context(), h.auth.Now().Add(-time.Duration(req.SinceHours)*time.Hour), "decision", rowCap+1)
 	if err != nil {
 		h.internal(w, "audit since", err)
 		return
 	}
-	res := replay.Run(r.Context(), rows, p)
-	// Changed keeps the full count; only the listing is capped, so the UI
-	// can say "showing 500 of N".
-	if len(res.Changes) > replayChangeCap {
-		res.Changes = res.Changes[:replayChangeCap]
+	truncated := len(rows) > rowCap
+	if truncated {
+		rows = rows[:rowCap]
 	}
+	// Run lists at most replay.MaxChanges and keeps counting Changed, so
+	// the UI can say "showing 500 of N". It stops when the approver goes
+	// away; there is then nobody to answer.
+	res, err := replay.Run(r.Context(), rows, p)
+	if err != nil {
+		return
+	}
+	res.Truncated = truncated
 	if res.Changes == nil {
 		res.Changes = []replay.Change{}
 	}
@@ -567,15 +606,14 @@ type BypassRow struct {
 
 func (h *api) bypass(w http.ResponseWriter, r *http.Request, _ store.UISession) {
 	since, ok1 := queryInt(r, "since_hours", bypassSince, maxSinceHours)
-	limit, ok2 := queryInt(r, "limit", bypassLimit, 1<<31)
+	// BypassSince passes limit straight to SQL; every controller in the
+	// cluster writes to this table, so listLimit's cap is what bounds it.
+	limit, ok2 := listLimit(r, bypassLimit)
 	if !ok1 || !ok2 {
 		fail(w, http.StatusBadRequest, errBadQuery)
 		return
 	}
-	// BypassSince passes limit straight to SQL; every controller in the
-	// cluster writes to this table, so the cap is enforced here.
-	limit = min(limit, bypassLimitMax)
-	l, err := h.st.BypassSince(r.Context(), h.auth.Now().Add(-time.Duration(since)*time.Hour), int(limit))
+	l, err := h.st.BypassSince(r.Context(), h.auth.Now().Add(-time.Duration(since)*time.Hour), limit)
 	if err != nil {
 		h.internal(w, "bypass since", err)
 		return

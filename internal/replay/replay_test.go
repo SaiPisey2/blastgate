@@ -59,7 +59,7 @@ func loadPolicy(t *testing.T, text string) *policy.Policy {
 }
 
 func TestReplayCountsChanges(t *testing.T) {
-	res := Run(context.Background(), seedDecisions(), loadPolicy(t, allowEverything))
+	res := mustRun(t, context.Background(), seedDecisions(), loadPolicy(t, allowEverything))
 	if res.Evaluated != 2 || res.Changed != 1 || len(res.Changes) != 1 {
 		t.Fatalf("res = %+v", res)
 	}
@@ -83,7 +83,7 @@ func TestReplayPassesUnknownLabelsAsUnknown(t *testing.T) {
 default: allow
 unmeasured: hold
 `)
-	res := Run(context.Background(), seedDecisions(), p)
+	res := mustRun(t, context.Background(), seedDecisions(), p)
 	// r1's labels are known and empty: the rule is false, so it moves from
 	// hold to allow. r2's are unknown: the rule errors and holds. Were r2
 	// replayed with empty labels it too would allow, and not change.
@@ -116,7 +116,7 @@ func TestReplaySkipsUnscoredRows(t *testing.T) {
 		// ActionJSON, ImpactJSON and LabelsJSON deliberately left empty:
 		// this row was never scored.
 	})
-	res := Run(context.Background(), rows, loadPolicy(t, allowEverything))
+	res := mustRun(t, context.Background(), rows, loadPolicy(t, allowEverything))
 	if res.Skipped != 1 {
 		t.Fatalf("skipped = %d, want 1: %+v", res.Skipped, res)
 	}
@@ -127,5 +127,48 @@ func TestReplaySkipsUnscoredRows(t *testing.T) {
 		if c.RequestID == "r3" {
 			t.Errorf("unscored row r3 produced a change: %+v", c)
 		}
+	}
+}
+
+func mustRun(t *testing.T, ctx context.Context, rows []store.AuditRow, p *policy.Policy) Result {
+	t.Helper()
+	res, err := Run(ctx, rows, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// manyHolds is n scored decisions the default policy held, every one of
+// which allowEverything flips.
+func manyHolds(n int) []store.AuditRow {
+	now := time.Now().UTC()
+	rows := make([]store.AuditRow, n)
+	for i := range rows {
+		rows[i] = decisionRow(now, "r", normalize.Action{Verb: "delete", Resource: "pods", Namespace: "demo", Name: "p"},
+			engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"},
+			map[string]string{}, "data-destruction", "hold")
+	}
+	return rows
+}
+
+// A replay that flips more than MaxChanges decisions lists only the first
+// MaxChanges but still counts every one, so memory is bounded and the
+// count stays true.
+func TestReplayListsAtMostMaxChangesButCountsAll(t *testing.T) {
+	res := mustRun(t, context.Background(), manyHolds(MaxChanges+7), loadPolicy(t, allowEverything))
+	if res.Evaluated != MaxChanges+7 || res.Changed != MaxChanges+7 || len(res.Changes) != MaxChanges {
+		t.Errorf("evaluated %d changed %d listed %d", res.Evaluated, res.Changed, len(res.Changes))
+	}
+}
+
+// A cancelled replay stops and says so, rather than returning a partial
+// count that reads as complete.
+func TestReplayStopsWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := Run(ctx, manyHolds(10), loadPolicy(t, allowEverything))
+	if err != context.Canceled || res.Evaluated != 0 {
+		t.Errorf("err %v evaluated %d", err, res.Evaluated)
 	}
 }

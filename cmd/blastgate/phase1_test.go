@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -385,5 +386,33 @@ func TestAuditExportBytesAreStable(t *testing.T) {
 `
 	if out != want {
 		t.Errorf("export bytes changed:\ngot:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// More changes than replay lists: the count stays whole, and the output
+// says the list is only the first of them.
+func TestReplaySaysWhenTheListIsCut(t *testing.T) {
+	dir, env := cliEnv(t)
+	now := time.Now().UTC()
+	withStore(t, dir, func(st *store.Store) {
+		for i := range 502 {
+			r := decisionRow(now.Add(-time.Minute), fmt.Sprintf("r%d", i),
+				normalize.Action{Verb: "delete", Resource: "persistentvolumeclaims", Namespace: "demo", Name: "data"},
+				engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"},
+				map[string]string{}, "data-destruction", "hold")
+			if err := st.AppendAudit(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	code, out, errs := runCLI(env, "replay", "--policy", writePolicy(t, allowEverything))
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "502 decisions re-evaluated; 502 would change\nlisting the first 500 changes\n") {
+		t.Errorf("output head:\n%.300s", out)
+	}
+	if n := strings.Count(out, "data-destruction→everything"); n != 500 {
+		t.Errorf("%d change lines, want 500", n)
 	}
 }

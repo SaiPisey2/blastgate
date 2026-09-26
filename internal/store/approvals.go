@@ -128,6 +128,20 @@ func (s *Store) LatestApproval(ctx context.Context, session, requestDigest strin
 // every status, for the operator-facing "what's pending / what happened"
 // views.
 func (s *Store) ListApprovals(ctx context.Context, status string) ([]Approval, error) {
+	return s.listApprovals(ctx, status, 0)
+}
+
+// ListApprovalsLimit is ListApprovals stopping after the newest limit
+// rows: the admin API serves this list per request, and the table only
+// grows. A limit below 1 returns nothing rather than meaning "no limit".
+func (s *Store) ListApprovalsLimit(ctx context.Context, status string, limit int) ([]Approval, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	return s.listApprovals(ctx, status, limit)
+}
+
+func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]Approval, error) {
 	q := `SELECT ` + approvalCols + ` FROM approvals`
 	var args []any
 	if status != "" {
@@ -135,6 +149,10 @@ func (s *Store) ListApprovals(ctx context.Context, status string) ([]Approval, e
 		args = append(args, status)
 	}
 	q += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,19 +30,46 @@ import (
 type countingStore struct {
 	*store.Store
 	n atomic.Int64
+	// lastLimit is the limit the last list call handed the store, so a
+	// test can see a clamp the result size alone would not show.
+	lastLimit atomic.Int64
+
+	mu sync.Mutex
+	// onAuditSince runs inside AuditSinceLimit before the query, so a
+	// test can hold a replay in flight.
+	onAuditSince func()
+	// onDecide runs once inside DecideApproval before it forwards, so a
+	// test can make another decision win the race.
+	onDecide func(ctx context.Context, id string)
+}
+
+func (c *countingStore) hooks() (func(), func(context.Context, string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.onAuditSince, c.onDecide
+}
+
+func (c *countingStore) setHooks(audit func(), decide func(context.Context, string)) {
+	c.mu.Lock()
+	c.onAuditSince, c.onDecide = audit, decide
+	c.mu.Unlock()
 }
 
 func (c *countingStore) AuditPage(ctx context.Context, f store.AuditFilter) ([]store.AuditRow, error) {
 	c.n.Add(1)
 	return c.Store.AuditPage(ctx, f)
 }
-func (c *countingStore) AuditSince(ctx context.Context, since time.Time, kind string) ([]store.AuditRow, error) {
+func (c *countingStore) AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]store.AuditRow, error) {
 	c.n.Add(1)
-	return c.Store.AuditSince(ctx, since, kind)
+	if hook, _ := c.hooks(); hook != nil {
+		hook()
+	}
+	return c.Store.AuditSinceLimit(ctx, since, kind, limit)
 }
-func (c *countingStore) ListApprovals(ctx context.Context, status string) ([]store.Approval, error) {
+func (c *countingStore) ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error) {
 	c.n.Add(1)
-	return c.Store.ListApprovals(ctx, status)
+	c.lastLimit.Store(int64(limit))
+	return c.Store.ListApprovalsLimit(ctx, status, limit)
 }
 func (c *countingStore) ApprovalByID(ctx context.Context, id string) (store.Approval, error) {
 	c.n.Add(1)
@@ -57,6 +85,7 @@ func (c *countingStore) RevokeSession(ctx context.Context, id string, at time.Ti
 }
 func (c *countingStore) BypassSince(ctx context.Context, since time.Time, limit int) ([]store.BypassRow, error) {
 	c.n.Add(1)
+	c.lastLimit.Store(int64(limit))
 	return c.Store.BypassSince(ctx, since, limit)
 }
 func (c *countingStore) CreateApproval(ctx context.Context, a store.Approval) error {
@@ -69,6 +98,13 @@ func (c *countingStore) LatestApproval(ctx context.Context, sess, digest string)
 }
 func (c *countingStore) DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error {
 	c.n.Add(1)
+	c.mu.Lock()
+	hook := c.onDecide
+	c.onDecide = nil
+	c.mu.Unlock()
+	if hook != nil {
+		hook(ctx, id)
+	}
 	return c.Store.DecideApproval(ctx, id, status, by, nonce, token, decided, expires)
 }
 func (c *countingStore) ConsumeApproval(ctx context.Context, id, nonce string, at time.Time) error {
@@ -299,6 +335,9 @@ func TestFeedPagesAndFilters(t *testing.T) {
 	if code, _ := c.get(t, "/api/feed?limit=-1"); code != 400 {
 		t.Errorf("negative limit: %d", code)
 	}
+	if code, body := c.get(t, "/api/feed?limit=9000000000"); code != 200 || len(decode[[]map[string]any](t, body)) != 7 {
+		t.Errorf("huge limit is clamped, not refused: %d", code)
+	}
 	// An empty result is an empty array, not null: the UI maps over it.
 	if code, body := c.get(t, "/api/feed?agent=nobody"); code != 200 || body != "[]" {
 		t.Errorf("empty feed: %d %s", code, body)
@@ -381,6 +420,21 @@ func TestApprovalListShapeAndStatusFilter(t *testing.T) {
 	}
 	if _, body := c.get(t, "/api/approvals"); len(decode[[]map[string]any](t, body)) != 2 {
 		t.Errorf("unfiltered list: %s", body)
+	}
+	// limit keeps the newest; over 500 is clamped, not refused.
+	if _, body := c.get(t, "/api/approvals?limit=1"); len(decode[[]map[string]any](t, body)) != 1 {
+		t.Errorf("limit=1: %s", body)
+	}
+	if code, body := c.get(t, "/api/approvals?limit=100000"); code != 200 || len(decode[[]map[string]any](t, body)) != 2 || f.cs.lastLimit.Load() != 500 {
+		t.Errorf("limit=100000: %d, store asked for %d: %s", code, f.cs.lastLimit.Load(), body)
+	}
+	if c.get(t, "/api/approvals"); f.cs.lastLimit.Load() != 200 {
+		t.Errorf("default limit: store asked for %d, want 200", f.cs.lastLimit.Load())
+	}
+	for _, q := range []string{"?limit=0", "?limit=-3", "?limit=x", "?limit=99999999999999999999"} {
+		if code, body := c.get(t, "/api/approvals"+q); code != 400 || body != `{"error":"bad query parameter"}` {
+			t.Errorf("%s: %d %s", q, code, body)
+		}
 	}
 	if code, _ := c.get(t, "/api/approvals?status=bogus"); code != 400 {
 		t.Errorf("unknown status: %d", code)
@@ -575,7 +629,10 @@ func TestPolicyReplayReportsChangesAndRejectsBadPolicy(t *testing.T) {
 		t.Fatalf("replay: %d %s", code, body)
 	}
 	res := decode[map[string]any](t, body)
-	if res["evaluated"] != 2.0 || res["changed"] != 1.0 || res["skipped"] != 1.0 {
+	if got := keysOf(res); !slices.Equal(got, sorted("evaluated", "changed", "skipped", "truncated", "changes")) {
+		t.Errorf("result keys %v", got)
+	}
+	if res["evaluated"] != 2.0 || res["changed"] != 1.0 || res["skipped"] != 1.0 || res["truncated"] != false {
 		t.Errorf("counts: %s", body)
 	}
 	ch := res["changes"].([]any)
@@ -710,6 +767,10 @@ func TestBypassListsNewestFirst(t *testing.T) {
 	if l[0]["dry_run"] != true || l[1]["groups"] == nil {
 		t.Errorf("fields: %s", body)
 	}
+	// BypassSince has no clamp of its own: the API's is the only bound.
+	if code, _ := c.get(t, "/api/bypass?limit=1000000"); code != 200 || f.cs.lastLimit.Load() != 500 {
+		t.Errorf("huge bypass limit: %d, store asked for %d", code, f.cs.lastLimit.Load())
+	}
 	for _, q := range []string{"?since_hours=0", "?since_hours=721", "?limit=0", "?limit=x"} {
 		if code, _ := c.get(t, "/api/bypass"+q); code != 400 {
 			t.Errorf("%s: %d", q, code)
@@ -804,5 +865,126 @@ func TestAPIResponsesAreNotCached(t *testing.T) {
 	resp.Body.Close()
 	if resp.Header.Get("Cache-Control") != "no-store" || resp.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("headers: %v", resp.Header)
+	}
+}
+
+func TestPolicyReplayStopsAtTheRowCap(t *testing.T) {
+	f := newAPIFixture(t)
+	old := replayRowCap
+	replayRowCap = 3
+	t.Cleanup(func() { replayRowCap = old })
+	terminal := engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"}
+	seed := func(n int) {
+		for i := range n {
+			r := decisionRow(t0.Add(-time.Duration(10-i)*time.Minute), fmt.Sprintf("r%d", i), "data-destruction", "hold", terminal)
+			if err := f.st.AppendAudit(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	c := f.signIn(t, "carol")
+	replayOnce := func() map[string]any {
+		t.Helper()
+		req, _ := json.Marshal(map[string]any{"policy": allowEverything, "since_hours": 1})
+		code, body := c.post(t, "/api/policy/replay", string(req))
+		if code != 200 {
+			t.Fatalf("replay: %d %s", code, body)
+		}
+		return decode[map[string]any](t, body)
+	}
+	// Exactly the cap: all evaluated, nothing left over, not truncated.
+	seed(3)
+	if res := replayOnce(); res["evaluated"] != 3.0 || res["truncated"] != false {
+		t.Errorf("at the cap: %v", res)
+	}
+	seed(2)
+	res := replayOnce()
+	if res["evaluated"] != 3.0 || res["changed"] != 3.0 || res["truncated"] != true {
+		t.Errorf("past the cap: %v", res)
+	}
+	// The oldest rows are the ones evaluated.
+	if ch := res["changes"].([]any); len(ch) != 3 || ch[0].(map[string]any)["request_id"] != "r0" {
+		t.Errorf("changes %v", ch)
+	}
+}
+
+func TestOnlyOneReplayAtATime(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.signIn(t, "carol")
+	entered, release := make(chan struct{}), make(chan struct{})
+	// Only the first call blocks. A later one that got past a broken
+	// slot must fall through, not queue behind the first, or the test
+	// would deadlock instead of failing.
+	var first atomic.Bool
+	f.cs.setHooks(func() {
+		if first.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}, nil)
+	req, _ := json.Marshal(map[string]any{"policy": allowEverything, "since_hours": 1})
+	firstCode := make(chan int, 1)
+	// Sent by hand: t.Fatal (inside c.post) must not run off the test's
+	// own goroutine.
+	go func() {
+		hr, _ := http.NewRequest("POST", f.srv.URL+"/api/policy/replay", strings.NewReader(string(req)))
+		hr.Header.Set("Content-Type", "application/json")
+		hr.Header.Set("Cookie", SessionCookie+"="+c.cookie)
+		hr.Header.Set(CSRFHeader, c.csrf)
+		resp, err := http.DefaultClient.Do(hr)
+		if err != nil {
+			firstCode <- -1
+			return
+		}
+		resp.Body.Close()
+		firstCode <- resp.StatusCode
+	}()
+	<-entered // the first replay holds the slot and is blocked in the store
+	// The second must be refused at once, not queued behind the first: a
+	// client timeout turns a queued request into a failure, not a hang.
+	hr, _ := http.NewRequest("POST", f.srv.URL+"/api/policy/replay", strings.NewReader(string(req)))
+	hr.Header.Set("Content-Type", "application/json")
+	hr.Header.Set("Cookie", SessionCookie+"="+c.cookie)
+	hr.Header.Set(CSRFHeader, c.csrf)
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(hr)
+	if err != nil {
+		close(release)
+		t.Fatalf("second replay was not refused at once: %v", err)
+	}
+	body := readBody(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != 429 || body != `{"error":"a replay is already running; try again when it finishes"}` {
+		t.Errorf("second replay: %d %s", resp.StatusCode, body)
+	}
+	close(release)
+	if code := <-firstCode; code != 200 {
+		t.Errorf("first replay: %d", code)
+	}
+	// The slot is released: a later replay runs.
+	if code, body := c.post(t, "/api/policy/replay", string(req)); code != 200 {
+		t.Errorf("replay after the first finished: %d %s", code, body)
+	}
+}
+
+// Another approver's decision landing between Approve's pending check and
+// its compare-and-swap is ErrConflict from the store: the same 409 as
+// finding it already decided, and the winner's decision stands.
+func TestConcurrentDecisionIs409(t *testing.T) {
+	f := newAPIFixture(t)
+	f.pending(t, approvalID)
+	c := f.signIn(t, "carol")
+	f.cs.setHooks(nil, func(ctx context.Context, id string) {
+		now := f.clock.Now()
+		if err := f.st.DecideApproval(ctx, id, "denied", "dave", "", "", now, now.Add(time.Hour)); err != nil {
+			t.Errorf("dave's deny: %v", err)
+		}
+	})
+	code, body := c.post(t, "/api/approvals/"+approvalID+"/approve", "")
+	if code != 409 || body != `{"error":"approval is not pending"}` {
+		t.Errorf("losing approve: %d %s", code, body)
+	}
+	row, _ := f.st.ApprovalByID(context.Background(), approvalID)
+	if row.Status != "denied" || row.DecidedBy != "dave" || row.Token != "" {
+		t.Errorf("row after the race: status=%q decided_by=%q token set=%v", row.Status, row.DecidedBy, row.Token != "")
 	}
 }

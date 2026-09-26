@@ -53,10 +53,19 @@ func replayCmd(args []string, getenv func(string) string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	res := replay.Run(ctx, rows, pol)
+	res, err := replay.Run(ctx, rows, pol)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	fmt.Fprintf(stdout, "%d decisions re-evaluated; %d would change\n", res.Evaluated, res.Changed)
 	if res.Skipped > 0 {
 		fmt.Fprintf(stdout, "%d decisions skipped: never scored, nothing to evaluate\n", res.Skipped)
+	}
+	// Run lists at most replay.MaxChanges; without this line a count of
+	// 900 above a list of 500 would read as 400 changes gone missing.
+	if res.Changed > len(res.Changes) {
+		fmt.Fprintf(stdout, "listing the first %d changes\n", len(res.Changes))
 	}
 	for _, c := range res.Changes {
 		target := safe(c.Name)

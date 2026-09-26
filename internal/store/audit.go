@@ -97,6 +97,22 @@ func scanAudit(row interface{ Scan(...any) error }) (AuditRow, error) {
 // replay history in the order it happened, not the order sqlite happened
 // to store it. kind == "" returns every kind.
 func (s *Store) AuditSince(ctx context.Context, since time.Time, kind string) ([]AuditRow, error) {
+	return s.auditSince(ctx, since, kind, 0)
+}
+
+// AuditSinceLimit is AuditSince stopping after limit rows (the oldest
+// ones). A caller serving a request (the admin API's replay) must not
+// load a whole month of audit into memory because one approver asked; it
+// fetches one row past its cap to learn whether there were more. A limit
+// below 1 returns nothing rather than meaning "no limit".
+func (s *Store) AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]AuditRow, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	return s.auditSince(ctx, since, kind, limit)
+}
+
+func (s *Store) auditSince(ctx context.Context, since time.Time, kind string, limit int) ([]AuditRow, error) {
 	q := `SELECT ` + auditSelectCols + ` FROM audit WHERE at >= ?`
 	args := []any{ms(since)}
 	if kind != "" {
@@ -104,6 +120,10 @@ func (s *Store) AuditSince(ctx context.Context, since time.Time, kind string) ([
 		args = append(args, kind)
 	}
 	q += ` ORDER BY at ASC, id ASC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

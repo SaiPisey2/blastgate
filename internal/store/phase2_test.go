@@ -247,3 +247,48 @@ func TestAuditAfterIsOldestFirst(t *testing.T) {
 		t.Errorf("after excludes the row it started from: got %+v, %v", got2, err)
 	}
 }
+
+func TestAuditSinceLimitStopsAtTheOldest(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		r := row("decision")
+		r.At = t0.Add(time.Duration(i) * time.Second)
+		r.RequestID = string(rune('a' + i))
+		if i == 2 {
+			r.Kind = "result"
+		}
+		if err := s.AppendAudit(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.AuditSinceLimit(ctx, t0.Add(time.Second), "decision", 2)
+	if err != nil || len(got) != 2 || got[0].RequestID != "b" || got[1].RequestID != "d" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got, _ := s.AuditSinceLimit(ctx, t0, "", 100); len(got) != 5 {
+		t.Errorf("a limit past the rows returns them all: %d", len(got))
+	}
+	if got, _ := s.AuditSinceLimit(ctx, t0, "", 0); len(got) != 0 {
+		t.Errorf("limit 0 is nothing, not unlimited: %d", len(got))
+	}
+}
+
+func TestListApprovalsLimitKeepsTheNewest(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	for i, id := range []string{"a1", "a2", "a3"} {
+		a := appr(id)
+		a.Created = t0.Add(time.Duration(i) * time.Second)
+		if err := s.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListApprovalsLimit(ctx, "", 2)
+	if err != nil || len(got) != 2 || got[0].ID != "a3" || got[1].ID != "a2" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got, _ := s.ListApprovalsLimit(ctx, "pending", 0); len(got) != 0 {
+		t.Errorf("limit 0 is nothing, not unlimited: %d", len(got))
+	}
+}

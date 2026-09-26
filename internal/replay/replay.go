@@ -34,12 +34,20 @@ type Change struct {
 	DecisionAfter  string    `json:"decision_after"`
 }
 
+// MaxChanges bounds how many Changes a Result lists. Changed still counts
+// every one: a candidate policy that flips a week of decisions must not
+// make one replay hold a week of Change values in memory.
+const MaxChanges = 500
+
 // Result is the outcome of replaying a batch of stored decisions under a
-// candidate policy.
+// candidate policy. Truncated is set by the caller, not by Run: it means
+// the window held more decision rows than the caller fetched and passed
+// in, so Evaluated covers only the first of them.
 type Result struct {
 	Evaluated int      `json:"evaluated"`
 	Changed   int      `json:"changed"`
 	Skipped   int      `json:"skipped"`
+	Truncated bool     `json:"truncated"`
 	Changes   []Change `json:"changes"`
 }
 
@@ -52,9 +60,16 @@ type Result struct {
 // (Skipped) rather than guessed. Labels of JSON null decode to a nil map:
 // unknown, exactly as the gate saw them, so a rule reading them holds here
 // as it did live.
-func Run(ctx context.Context, rows []store.AuditRow, p *policy.Policy) Result {
+//
+// Only the first MaxChanges changes are listed; Changed counts them all.
+// A cancelled ctx stops the loop and returns ctx's error with the partial
+// result, which the caller must not present as complete.
+func Run(ctx context.Context, rows []store.AuditRow, p *policy.Policy) (Result, error) {
 	var res Result
 	for _, r := range rows {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 		var a normalize.Action
 		var imp engine.Impact
 		var labels map[string]string
@@ -67,6 +82,10 @@ func Run(ctx context.Context, rows []store.AuditRow, p *policy.Policy) Result {
 		res.Evaluated++
 		v := p.Evaluate(ctx, a, imp, labels)
 		if string(v.Decision) == r.Decision {
+			continue
+		}
+		res.Changed++
+		if len(res.Changes) >= MaxChanges {
 			continue
 		}
 		resource := r.Resource
@@ -86,6 +105,5 @@ func Run(ctx context.Context, rows []store.AuditRow, p *policy.Policy) Result {
 			DecisionAfter:  string(v.Decision),
 		})
 	}
-	res.Changed = len(res.Changes)
-	return res
+	return res, nil
 }
