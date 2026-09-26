@@ -86,6 +86,25 @@ describe('Feed', () => {
     expect(names).toEqual(['early-live', 'from-page', 'older-page']);
   });
 
+  it('a read recorded before reads had a class still shows as READ, and nothing else does', async () => {
+    // Rows written by an older build: an allowed read's result row had an
+    // empty class. Only that exact combination is shown as READ; any other
+    // empty class stays UNMEASURED in the danger tone (P2-R14).
+    const legacyRead = feedRow({ id: 30, request_id: 'q30', kind: 'result', rule: 'read', decision: 'allow', class: '', measured: false, verb: 'list', name: 'legacy-read' });
+    const heldBlank = feedRow({ id: 31, request_id: 'q31', kind: 'result', rule: 'read', decision: 'hold', class: '', measured: false, name: 'not-a-read' });
+    const decisionBlank = feedRow({ id: 32, request_id: 'q32', kind: 'decision', rule: 'read', decision: 'allow', class: '', measured: false, name: 'decision-blank' });
+    mockFetch({ 'GET /api/feed': { body: [decisionBlank, heldBlank, legacyRead] } });
+    render(<Feed />);
+    const row = (await screen.findByText('legacy-read')).closest('tr')!;
+    expect(row.className).toContain('muted');
+    expect(within(row).getByText('READ').className).toContain('badge-read');
+    for (const name of ['not-a-read', 'decision-blank']) {
+      const other = screen.getByText(name).closest('tr')!;
+      expect(other.className).not.toContain('muted');
+      expect(within(other).getByText('UNMEASURED').className).toContain('badge-danger');
+    }
+  });
+
   it('the live indicator follows the stream', async () => {
     mockFetch({ 'GET /api/feed': { body: [] } });
     render(<Feed />);

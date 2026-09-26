@@ -299,6 +299,35 @@ func TestCompleteAppendsAResultRowForReadsToo(t *testing.T) {
 	}
 }
 
+// A read is not scored, but it is known to be a read: its row says READ,
+// measured, as the engine's own read case would. Left empty, the UI's
+// fail-closed badge painted every allowed get red as UNMEASURED, a READ
+// filter found nothing, and the export recorded "" (P2-R29, I3). The
+// impact and labels stay empty: nothing was assessed to put in them.
+func TestReadRowsAreRecordedAsRead(t *testing.T) {
+	g, fe, _, fa := newGate(engine.Impact{}, nil)
+	v := g.Decide(context.Background(), alice, req("GET", "/api/v1/namespaces/demo/pods"), nil)
+	g.Complete(context.Background(), v, 200, "", time.Millisecond)
+	if fe.calls != 0 || len(fa.rows) != 1 {
+		t.Fatalf("engine calls %d, audit %+v", fe.calls, fa.rows)
+	}
+	r := fa.rows[0]
+	if r.Class != engine.ClassRead || !r.Measured || r.Rule != "read" || r.Decision != "allow" {
+		t.Errorf("read row: class %q measured %v rule %q decision %q", r.Class, r.Measured, r.Rule, r.Decision)
+	}
+	if r.ImpactJSON != nil || r.LabelsJSON != nil {
+		t.Errorf("a read that was never scored carries impact %s labels %s", r.ImpactJSON, r.LabelsJSON)
+	}
+	// Refused before anything is known: still no class, which the UI
+	// shows as UNMEASURED.
+	if u := g.Decide(context.Background(), alice, req("POST", "/version"), nil); u.Forward {
+		t.Fatal("an unparseable request was forwarded")
+	}
+	if last := fa.rows[len(fa.rows)-1]; last.Rule != "unparseable" || last.Class != "" || last.Measured {
+		t.Errorf("unparseable row: rule %q class %q measured %v", last.Rule, last.Class, last.Measured)
+	}
+}
+
 func TestMessagesCarryNoObjectOrSessionData(t *testing.T) {
 	g, _, _, _ := newGate(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1,
 		EndpointsLeft: map[string]int{"svc-name-xyz": 0}}, nil)

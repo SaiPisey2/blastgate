@@ -42,6 +42,16 @@ function mergeNewestFirst(a: FeedRow[], b: FeedRow[]): FeedRow[] {
     .slice(0, MAX_ROWS);
 }
 
+// displayClass is the class a row is shown with. Builds before the fix
+// for reads recorded an allowed read's result row with an empty class,
+// which the fail-closed badge would paint red as UNMEASURED. Only that
+// exact combination is read as READ; every other empty class stays
+// unmeasured (P2-R14).
+function displayClass(r: FeedRow): string {
+  if (r.class === '' && r.kind === 'result' && r.rule === 'read' && r.decision === 'allow') return 'READ';
+  return r.class;
+}
+
 // matches mirrors the server's filters for rows arriving on the stream,
 // which is unfiltered.
 function matches(r: FeedRow, f: Filters): boolean {
@@ -230,7 +240,7 @@ export default function Feed() {
               {rows.map((r) => (
                 // Reads are the bulk of traffic and never need attention,
                 // so they are muted and the writes stand out.
-                <tr key={r.id} className={[r.class === 'READ' ? 'muted' : '', fresh.has(r.id) ? 'fresh' : ''].join(' ').trim()}>
+                <tr key={r.id} className={[displayClass(r) === 'READ' ? 'muted' : '', fresh.has(r.id) ? 'fresh' : ''].join(' ').trim()}>
                   <td data-label="Time" className="time" title={r.at}>
                     {clock(r.at)}
                   </td>
@@ -248,7 +258,7 @@ export default function Feed() {
                   </td>
                   <td data-label="Target">{target(r.namespace, r.name)}</td>
                   <td data-label="Class">
-                    <ClassBadge cls={r.class} />
+                    <ClassBadge cls={displayClass(r)} />
                   </td>
                   <td data-label="Decision">
                     <span>

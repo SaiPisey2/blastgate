@@ -130,6 +130,10 @@ func (g *Gate) Decide(ctx context.Context, s store.Session, r *http.Request, bod
 	v.act = a
 	if a.IsRead() {
 		v.rule, v.decision, v.Forward = "read", string(policy.Allow), true
+		// Not scored, but known: the engine's own read case says the same.
+		// Without it the row's class is "", which the UI must show as
+		// unmeasured (severe), and every allowed get would look alarming.
+		v.imp = engine.Impact{Class: engine.ClassRead, Measured: true, Undo: "none"}
 		return v
 	}
 	asm := g.Engine.Assess(ctx, a, body)
@@ -456,8 +460,12 @@ func (g *Gate) row(v Verdict, kind string) store.AuditRow {
 	if a.Verb != "" {
 		r.ActionJSON, _ = json.Marshal(a)
 	}
-	if v.scored {
+	// Class is set for reads too, which are known without scoring; the
+	// impact and labels only for what was actually assessed.
+	if v.imp.Class != "" {
 		r.Class, r.Measured = v.imp.Class, v.imp.Measured
+	}
+	if v.scored {
 		r.ImpactJSON, _ = json.Marshal(v.imp)
 		// nil marshals to "null" and an empty map to "{}", so replay can
 		// still tell "labels unknown" from "no labels".
