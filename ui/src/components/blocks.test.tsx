@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
 import { act, cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Tag from './Tag';
@@ -60,29 +61,38 @@ describe('Facts', () => {
 });
 
 describe('TypedConfirm', () => {
-  it('reports validity and submits only on the chord with an exact match', async () => {
-    const onValid = vi.fn();
+  // A controlled field needs an owner holding the value, as the panel does.
+  function Owner({ onSubmit }: { onSubmit: () => void }) {
+    const [value, setValue] = useState('');
+    return <TypedConfirm expected="demo/data" value={value} onChange={setValue} onSubmit={onSubmit} />;
+  }
+
+  it('submits only on the chord with an exact match', async () => {
     const onSubmit = vi.fn();
-    render(<TypedConfirm expected="demo/data" onValid={onValid} onSubmit={onSubmit} />);
-    const field = screen.getByLabelText(/to approve, type/i);
+    render(<Owner onSubmit={onSubmit} />);
+    const field = screen.getByLabelText(/to approve, type/i) as HTMLInputElement;
     expect(screen.getByText('⌘/Ctrl+Enter to approve')).toBeTruthy();
     await userEvent.type(field, 'demo/DATA');
     await userEvent.keyboard('{Enter}{Meta>}{Enter}{/Meta}');
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(onValid).toHaveBeenLastCalledWith(false);
     await userEvent.clear(field);
     await userEvent.type(field, ' demo/data');
     await userEvent.keyboard('{Control>}{Enter}{/Control}');
     expect(onSubmit).not.toHaveBeenCalled();
     await userEvent.clear(field);
     await userEvent.type(field, 'demo/data');
-    expect(onValid).toHaveBeenLastCalledWith(true);
+    expect(field.value).toBe('demo/data');
     // A plain Enter never submits, even with the value right.
     await userEvent.keyboard('{Enter}');
     expect(onSubmit).not.toHaveBeenCalled();
     await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
     await userEvent.keyboard('{Control>}{Enter}{/Control}');
     expect(onSubmit).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows exactly the value its owner holds', () => {
+    render(<TypedConfirm expected="demo/data" value="demo/da" onChange={() => {}} onSubmit={() => {}} />);
+    expect((screen.getByLabelText(/to approve, type/i) as HTMLInputElement).value).toBe('demo/da');
   });
 });
 
@@ -124,7 +134,7 @@ describe('LiveStatus', () => {
       act(() => setStreamStatus(status));
       const el = screen.getByText(word).closest('.live-status')!;
       expect(el.className).toContain(`tone-${tone}`);
-      expect(el.querySelector('.live-dot')!.getAttribute('aria-hidden')).toBe('true');
+      expect(el.querySelector('.live-status-dot')!.getAttribute('aria-hidden')).toBe('true');
     }
   });
 

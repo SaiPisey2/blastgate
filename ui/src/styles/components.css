@@ -39,22 +39,22 @@
   color: var(--text-muted);
 }
 
-.live-dot {
+.live-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--line-strong);
 }
 
-.live-status.tone-ok .live-dot {
+.live-status.tone-ok .live-status-dot {
   background: var(--ok-line);
 }
 
-.live-status.tone-caution .live-dot {
+.live-status.tone-caution .live-status-dot {
   background: var(--caution-line);
 }
 
-.live-status.tone-danger .live-dot {
+.live-status.tone-danger .live-status-dot {
   background: var(--danger-line);
 }
 

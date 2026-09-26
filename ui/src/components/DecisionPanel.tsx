@@ -118,14 +118,16 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const reduceMotion = useReducedMotion();
   const qid = useId();
   const reasonId = useId();
+  const typedLabelId = useId();
+  const typedHintId = useId();
+  const detailErrorId = useId();
   const commandId = useId();
   const rootRef = useRef<HTMLElement>(null);
   const denyRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const confirmRef = useRef<HTMLButtonElement>(null);
   const inFlight = useRef(false);
 
-  const [typedOK, setTypedOK] = useState(false);
+  const [typed, setTyped] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -149,18 +151,45 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // Both are computed here and checked again inside decide(), so no path
   // (a click, Enter, a chord, a stale closure) can approve around them.
   const decidable = pending && detail !== undefined && !selfBlocked && result === null;
+
+  // Everything that armed or half-confirmed an approval is thrown away the
+  // moment what it confirmed changes: the ladder level, the target to
+  // type, or whether this request can be decided at all (a detail
+  // refetch clears it for a moment). Done during render, not in an
+  // effect, so no frame ever renders the stale state as ready.
+  // Without this, a detail flap (typed -> confirm -> typed) remounted the
+  // typed field empty while an earlier match still counted, and an armed
+  // confirm step came back armed without waiting ARM_MS again.
+  const typedKey = `${friction.level}\u0000${expected}`;
+  const [seenTypedKey, setSeenTypedKey] = useState(typedKey);
+  if (seenTypedKey !== typedKey) {
+    setSeenTypedKey(typedKey);
+    setTyped('');
+  }
+  const stepKey = `${friction.level}\u0000${decidable}`;
+  const [seenStepKey, setSeenStepKey] = useState(stepKey);
+  if (seenStepKey !== stepKey) {
+    setSeenStepKey(stepKey);
+    setConfirming(false);
+    setArmed(false);
+  }
+
+  // typedOK is derived from the value on screen, never stored: it cannot
+  // disagree with what the field shows.
+  const typedOK = needsTyping && typed === expected;
   const open = decidable && !busy;
   const ready = open && (needsTyping ? typedOK : confirming && armed);
   // Not tied to busy: the step stays put while its request is in flight
   // rather than collapsing and reopening around a failed POST.
   const stepOpen = decidable && confirming && !needsTyping;
 
+  // Arming restarts every time the step opens, whatever closed it.
   useEffect(() => {
     setArmed(false);
-    if (!confirming) return;
+    if (!stepOpen) return;
     const t = setTimeout(() => setArmed(true), ARM_MS);
     return () => clearTimeout(t);
-  }, [confirming]);
+  }, [stepOpen]);
 
   // Default focus: the typed field when typing is required, otherwise
   // Deny, and never Approve. It only takes focus the page is not using
@@ -173,12 +202,10 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     (needsTyping ? inputRef.current : denyRef.current)?.focus();
   }, [needsTyping, pending]);
 
-  // Only the plainest level moves focus onto its armed Confirm. Where the
-  // step carries undo text, focus stays put so Enter is not a reflex away
-  // from yes before that text has been read.
-  useEffect(() => {
-    if (armed && friction.level === 'confirm') confirmRef.current?.focus();
-  }, [armed, friction.level]);
+  // Focus is never moved onto Confirm when it arms. It stays on Approve,
+  // where a held Enter's key-repeat only reopens the step it already
+  // opened; on Confirm the same repeat would approve (spec §6: no
+  // single-key approve).
 
   async function decide(action: 'approve' | 'deny') {
     // inFlight, not only busy: two key events in one tick both see the
@@ -231,11 +258,20 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     { label: 'Undo', value: impact ? undoLabel(impact.undo) : detailError ? 'Unknown' : 'Loading' },
   ];
 
+  // Every reason Approve is disabled is tied to it by aria-describedby,
+  // so a screen reader hears why, not just "dimmed".
   let reason = '';
   if (pending && result === null) {
     if (selfBlocked) reason = SELF_APPROVAL_REASON;
     else if (!detail && !detailError) reason = 'Approve is available once blastgate has loaded what this would change.';
   }
+  const approveDescribedBy = [
+    reason ? reasonId : '',
+    detailError && !detail ? detailErrorId : '',
+    needsTyping && !typedOK ? `${typedLabelId} ${typedHintId}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <article ref={rootRef} className="decision" aria-labelledby={qid} data-level={friction.level}>
@@ -254,7 +290,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
 
       {detailError && !detail && (
         <div className="decision-detail-error" role="alert">
-          <span>Couldn't load what this would change: {detailError}</span>
+          <span id={detailErrorId}>Couldn't load what this would change: {detailError}</span>
           <Button variant="quiet" onClick={onRetry}>
             Retry
           </Button>
@@ -280,7 +316,15 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       ) : (
         <div className="decision-controls">
           {needsTyping && (
-            <TypedConfirm expected={expected} onValid={setTypedOK} onSubmit={() => void decide('approve')} inputRef={inputRef} />
+            <TypedConfirm
+              expected={expected}
+              value={typed}
+              onChange={setTyped}
+              onSubmit={() => void decide('approve')}
+              inputRef={inputRef}
+              labelId={typedLabelId}
+              hintId={typedHintId}
+            />
           )}
           <div className="decision-buttons">
             <Button ref={denyRef} onClick={() => void decide('deny')} disabled={busy}>
@@ -289,7 +333,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
             <Button
               variant={needsTyping ? 'danger' : 'default'}
               disabled={needsTyping ? !ready : !open}
-              aria-describedby={reason ? reasonId : undefined}
+              aria-describedby={approveDescribedBy || undefined}
               aria-expanded={needsTyping ? undefined : stepOpen}
               onClick={() => {
                 if (needsTyping) void decide('approve');
@@ -335,7 +379,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
                 <Button variant="quiet" onClick={cancel} disabled={busy}>
                   Cancel
                 </Button>
-                <Button ref={confirmRef} disabled={!ready} onClick={() => void decide('approve')}>
+                <Button disabled={!ready} onClick={() => void decide('approve')}>
                   Confirm approval
                 </Button>
               </div>

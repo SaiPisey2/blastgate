@@ -1,12 +1,21 @@
-import { useId, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type Ref } from 'react';
+import { useId, type ClipboardEvent, type DragEvent, type KeyboardEvent, type Ref } from 'react';
 
 type Props = {
   expected: string;
-  onValid: (valid: boolean) => void;
+  // Controlled: the owner holds the value, so it can clear it when the
+  // request or its target changes and derive validity from the same
+  // state it renders. A copy kept here could go stale the moment this
+  // field unmounted and came back empty while the owner still said valid.
+  value: string;
+  onChange: (value: string) => void;
   onSubmit: () => void;
   autoFocus?: boolean;
   describedBy?: string;
   inputRef?: Ref<HTMLInputElement>;
+  // labelId/hintId: let the owner point other controls (a disabled
+  // Approve) at the words that explain what is still needed.
+  labelId?: string;
+  hintId?: string;
 };
 
 // block stops text arriving without being typed. Paste is the obvious
@@ -17,10 +26,12 @@ const block = (e: ClipboardEvent | DragEvent) => e.preventDefault();
 // character, before a hard-to-undo approval can go through. The point is
 // reading the name while typing it, so anything that fills the field
 // without typing (paste, drop, autofill, autocorrect) is refused.
-export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, describedBy, inputRef }: Props) {
+export default function TypedConfirm({ expected, value, onChange, onSubmit, autoFocus, describedBy, inputRef, labelId, hintId }: Props) {
   const id = useId();
-  const hintId = useId();
-  const [value, setValue] = useState('');
+  const ownLabelId = useId();
+  const ownHintId = useId();
+  const lid = labelId ?? ownLabelId;
+  const hid = hintId ?? ownHintId;
   // Exact match only: no trim, no case folding. "demo/Data" is not the
   // object being approved, and a near-miss must not pass.
   const valid = value === expected;
@@ -36,7 +47,7 @@ export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, d
 
   return (
     <div className="typed-confirm">
-      <label className="typed-confirm-label" htmlFor={id}>
+      <label id={lid} className="typed-confirm-label" htmlFor={id}>
         To approve, type <span className="mono">{expected}</span>
       </label>
       <input
@@ -45,10 +56,7 @@ export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, d
         className="typed-confirm-input mono"
         type="text"
         value={value}
-        onChange={(e) => {
-          setValue(e.target.value);
-          onValid(e.target.value === expected);
-        }}
+        onChange={(e) => onChange(e.target.value)}
         onKeyDown={onKeyDown}
         onPaste={block}
         onDrop={block}
@@ -57,9 +65,9 @@ export default function TypedConfirm({ expected, onValid, onSubmit, autoFocus, d
         autoCorrect="off"
         autoCapitalize="off"
         spellCheck={false}
-        aria-describedby={describedBy ? `${hintId} ${describedBy}` : hintId}
+        aria-describedby={describedBy ? `${hid} ${describedBy}` : hid}
       />
-      <span id={hintId} className="typed-confirm-hint">
+      <span id={hid} className="typed-confirm-hint">
         ⌘/Ctrl+Enter to approve
       </span>
     </div>

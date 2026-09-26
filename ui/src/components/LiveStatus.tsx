@@ -23,7 +23,7 @@ export default function LiveStatus() {
   const [word, tone] = WORDS[status] ?? WORDS.offline;
   return (
     <span className={`live-status tone-${tone}`} role="status">
-      <span className="live-dot" aria-hidden="true" />
+      <span className="live-status-dot" aria-hidden="true" />
       {word}
     </span>
   );

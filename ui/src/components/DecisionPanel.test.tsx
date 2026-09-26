@@ -7,7 +7,7 @@ import DecisionPanel, { type DecisionPanelProps } from './DecisionPanel';
 import { setCSRF, type ApprovalDetail, type ApprovalSummary } from '../api';
 import { ARM_MS } from '../lib/friction';
 import { mockFetch, type Call } from '../test/fetch';
-import { detail, ID1, impact, summary } from '../test/fixtures';
+import { detail, ID1, ID2, impact, summary } from '../test/fixtures';
 
 afterEach(() => {
   cleanup();
@@ -39,6 +39,7 @@ function routes(approve: { status?: number; body?: unknown } = { body: {} }) {
   return mockFetch({
     [`POST /api/approvals/${ID1}/approve`]: approve,
     [`POST /api/approvals/${ID1}/deny`]: { body: {} },
+    [`POST /api/approvals/${ID2}/approve`]: { body: {} },
   });
 }
 
@@ -493,5 +494,188 @@ describe('DecisionPanel rendering', () => {
     expect(screen.getByRole('heading').textContent).toContain(`${EVIL} wants to`);
     expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).toContain('&lt;img');
+  });
+});
+
+describe('DecisionPanel retargeting and refetch flaps', () => {
+  const base = (over: Partial<DecisionPanelProps> & { summary: ApprovalSummary }): DecisionPanelProps => ({
+    me: 'bob',
+    onRetry: vi.fn(),
+    onDecided: vi.fn(),
+    ...over,
+  });
+
+  it('an id change resets the typed value, even for the same target', async () => {
+    const calls = routes();
+    const s1 = summary();
+    const props = base({ summary: s1, detail: detail(s1, impact()) });
+    const { rerender } = render(<DecisionPanel {...props} />);
+    await userEvent.type(typedField(), 'demo/data');
+    expect(approveButton().disabled).toBe(false);
+    const s2 = summary({ id: ID2 });
+    rerender(<DecisionPanel {...props} summary={s2} detail={detail(s2, impact())} />);
+    expect(typedField().value).toBe('');
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.click(approveButton());
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('an id change closes an armed confirm step', async () => {
+    const calls = routes();
+    const props = base(withDetail(reversible, reversibleImpact));
+    const { rerender } = render(<DecisionPanel {...props} />);
+    await userEvent.click(approveButton());
+    await waitFor(() => expect((screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement).disabled).toBe(false));
+    const s2 = { ...reversible, id: ID2 };
+    rerender(<DecisionPanel {...props} summary={s2} detail={detail(s2, reversibleImpact)} />);
+    expect(screen.queryByRole('button', { name: /confirm approval/i })).toBeNull();
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('a POST in flight reports its own id, even after the panel moved on', async () => {
+    let release!: () => void;
+    const calls = mockFetch({
+      [`POST /api/approvals/${ID1}/approve`]: () => new Promise((r) => (release = () => r({ body: {} }))),
+    });
+    const onDecided = vi.fn();
+    const s1 = summary();
+    const props = base({ summary: s1, detail: detail(s1, impact()), onDecided });
+    const { rerender } = render(<DecisionPanel {...props} />);
+    await userEvent.type(typedField(), 'demo/data');
+    await userEvent.click(approveButton());
+    const s2 = summary({ id: ID2 });
+    rerender(<DecisionPanel {...props} summary={s2} detail={detail(s2, impact())} />);
+    await act(async () => release());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'approved'));
+    expect(onDecided).not.toHaveBeenCalledWith(ID2, expect.anything());
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    expect(approveButton().disabled).toBe(true);
+    expect(typedField().value).toBe('');
+  });
+
+  it('a detail for another id keeps Approve disabled', async () => {
+    const calls = routes();
+    render(<DecisionPanel {...base({ summary: reversible, detail: detail({ ...reversible, id: ID2 }, reversibleImpact) })} />);
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.click(approveButton());
+    expect(screen.queryByRole('button', { name: /confirm/i })).toBeNull();
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('a typed match does not survive a detail flap (typed, confirm, typed)', async () => {
+    const calls = routes();
+    // Measured summary, unmeasured detail: typing comes only from the detail,
+    // so clearing the detail for a refetch drops to a confirm level and back.
+    const unmeasured = () => detail(reversible, { ...reversibleImpact, measured: false });
+    const props = base({ summary: reversible, detail: unmeasured() });
+    const { rerender } = render(<DecisionPanel {...props} />);
+    await userEvent.type(typedField(), 'demo/web');
+    expect(approveButton().disabled).toBe(false);
+    rerender(<DecisionPanel {...props} detail={undefined} />);
+    expect(screen.queryByLabelText(/to approve, type/i)).toBeNull();
+    rerender(<DecisionPanel {...props} detail={unmeasured()} />);
+    expect(typedField().value).toBe('');
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.click(approveButton());
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('a confirm step waits ARM_MS again after a detail flap', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const calls = routes();
+    const props = base(withDetail(reversible, reversibleImpact));
+    const { rerender } = render(<DecisionPanel {...props} />);
+    fireEvent.click(approveButton());
+    act(() => vi.advanceTimersByTime(ARM_MS));
+    expect((screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement).disabled).toBe(false);
+    rerender(<DecisionPanel {...props} detail={undefined} />);
+    act(() => vi.advanceTimersByTime(1000));
+    rerender(<DecisionPanel {...props} detail={detail(reversible, reversibleImpact)} />);
+    // The step closed with the flap; reopening it starts the clock over.
+    expect(screen.queryByRole('button', { name: /confirm approval/i })).toBeNull();
+    fireEvent.click(approveButton());
+    const confirm = screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(ARM_MS - 1));
+    expect(confirm.disabled).toBe(true);
+    fireEvent.click(confirm);
+    act(() => vi.advanceTimersByTime(1));
+    expect(confirm.disabled).toBe(false);
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('focus stays off Confirm when it arms', async () => {
+    routes();
+    renderPanel(withDetail(reversible, reversibleImpact));
+    await userEvent.click(approveButton());
+    const confirm = screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).not.toBe(confirm);
+    expect(document.activeElement).toBe(approveButton());
+  });
+
+  it('a held Enter on Approve does not approve', async () => {
+    const calls = routes();
+    renderPanel(withDetail(reversible, reversibleImpact));
+    approveButton().focus();
+    await userEvent.keyboard('{Enter}');
+    await new Promise((r) => setTimeout(r, ARM_MS + 50));
+    // Key-repeat lands wherever focus is; it must still be on Approve.
+    await userEvent.keyboard('{Enter}{Enter}{Enter}');
+    expect(posts(calls)).toEqual([]);
+  });
+
+  it('a double click at the typed level sends one POST', async () => {
+    const calls = routes();
+    renderPanel(withDetail(summary()));
+    await userEvent.type(typedField(), 'demo/data');
+    const b = approveButton();
+    fireEvent.click(b);
+    fireEvent.click(b);
+    await userEvent.dblClick(b).catch(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+  });
+
+  it('repeated chords in one tick send one POST', async () => {
+    const calls = routes();
+    renderPanel(withDetail(summary()));
+    const f = typedField();
+    await userEvent.type(f, 'demo/data');
+    fireEvent.keyDown(f, { key: 'Enter', ctrlKey: true });
+    fireEvent.keyDown(f, { key: 'Enter', ctrlKey: true });
+    fireEvent.keyDown(f, { key: 'Enter', metaKey: true });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+  });
+});
+
+describe('DecisionPanel disabled reasons', () => {
+  const describedText = (el: HTMLElement) =>
+    (el.getAttribute('aria-describedby') ?? '')
+      .split(' ')
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' | ');
+
+  it('at the typed level Approve points at what to type', async () => {
+    renderPanel(withDetail(summary()));
+    const text = describedText(approveButton());
+    expect(text).toContain('To approve, type demo/data');
+    expect(text).toContain('⌘/Ctrl+Enter to approve');
+    await userEvent.type(typedField(), 'demo/data');
+    expect(describedText(approveButton())).not.toContain('To approve, type');
+  });
+
+  it('after a detail error Approve points at the error', () => {
+    renderPanel({ summary: reversible, detailError: 'store unavailable' });
+    expect(describedText(approveButton())).toContain('store unavailable');
+  });
+
+  it('while the detail loads Approve says so', () => {
+    renderPanel({ summary: reversible });
+    expect(describedText(approveButton())).toMatch(/once blastgate has loaded/);
   });
 });
