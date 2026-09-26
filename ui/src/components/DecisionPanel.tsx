@@ -122,6 +122,9 @@ export default function DecisionPanel(props: DecisionPanelProps) {
 }
 
 function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone, body }: DecisionPanelProps) {
+  // One check for both places the body changes: the facts row and the
+  // command toggle.
+  const hasBody = body !== undefined;
   const now = useNow();
   // Height is not a transform, so MotionConfig's reducedMotion leaves it
   // animating; asking the OS for less motion gets an instant step here.
@@ -222,7 +225,8 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     const a = document.activeElement;
     if (!(a instanceof HTMLElement) || !a.closest('.confirm-step-wrap') || !rootRef.current?.contains(a)) return;
     const target = needsTyping ? inputRef.current : approveRef.current && !approveRef.current.disabled ? approveRef.current : rootRef.current;
-    target?.focus();
+    // The target sits right above the closing step, already in view.
+    target?.focus({ preventScroll: true });
   }, [stepOpen, needsTyping]);
 
   // Arming restarts every time the step opens, whatever closed it.
@@ -241,7 +245,11 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     if (!pending) return;
     const active = document.activeElement;
     if (active && active !== document.body && !rootRef.current?.contains(active)) return;
-    (needsTyping ? inputRef.current : denyRef.current)?.focus();
+    // preventScroll: at phone width the field or Deny sits below the fold,
+    // and scrolling to it on arrival pushed the question up under the
+    // sticky header. The page opens at the top, question first; Tab or a
+    // keystroke still reaches the focused control.
+    (needsTyping ? inputRef.current : denyRef.current)?.focus({ preventScroll: true });
   }, [needsTyping, pending]);
 
   // Focus is never moved onto Confirm when it arms. It stays on Approve,
@@ -346,7 +354,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         {ident && <span className="mono">{ident}</span>}
       </h2>
       <p className="decision-why">{friction.why}</p>
-      {body ?? <Facts items={facts} />}
+      {hasBody ? body : <Facts items={facts} />}
 
       {detailError && !detail && (
         <div className="decision-detail-error" role="alert">
@@ -374,7 +382,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
           {result === 'gone' ? GONE_TEXT : DONE_TEXT[result]}
         </p>
       ) : (
-        <div className="decision-controls">
+        <div className={needsTyping ? 'decision-controls has-typed' : 'decision-controls'}>
           {needsTyping && (
             <TypedConfirm
               expected={expected}
@@ -427,7 +435,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       </AnimatePresence>
 
       <div className="decision-links">
-        {detail && body === undefined && (
+        {detail && !hasBody && (
           <Button variant="quiet" aria-expanded={showCommand} aria-controls={commandId} onClick={() => setShowCommand((v) => !v)}>
             Show the command
           </Button>
@@ -438,7 +446,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
           </a>
         )}
       </div>
-      {detail && body === undefined && showCommand && (
+      {detail && !hasBody && showCommand && (
         <pre id={commandId} className="decision-command mono">
           {actionText(detail.action) || '(no action recorded)'}
         </pre>

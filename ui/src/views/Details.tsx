@@ -99,14 +99,14 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
 
   if (missing) {
     return (
-      <div className="page details">
+      <div className="page page-wide details">
         <EmptyState title="There is no such request." sub={<a href="#/waiting">Go to Waiting</a>} />
       </div>
     );
   }
 
   return (
-    <div className="page details">
+    <div className="page page-wide details">
       <p className="details-back">
         <a href="#/waiting">Back to Waiting</a>
       </p>
@@ -157,7 +157,15 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
                         </li>
                       ))}
                     </ul>
-                  ) : null}
+                  ) : (
+                    // No stored impact: nothing to count, and never zeros.
+                    <p className="details-unknown">
+                      <span className="details-unknown-glyph" aria-hidden="true">
+                        {GLYPH.caution}
+                      </span>
+                      Impact unknown: blastgate recorded nothing about what this would change.
+                    </p>
+                  )}
                   {/* The command itself, in view (spec 4.2): what the agent
                       will run is the one thing an approver should never have
                       to open something to read. */}

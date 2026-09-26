@@ -12,6 +12,9 @@ const EVIL = '<img src=x onerror=alert(1)>';
 const rowEls = () => Array.from(document.querySelectorAll<HTMLElement>('.outside-row'));
 const since = (url: string) => new URL(url, 'http://x').searchParams.get('since_hours');
 
+// whole matches a sentence split across a text node and its mono name.
+const whole = (text: string) => (_: string, el: Element | null) => !!el && el.parentElement?.classList.contains('outside-what') === true && el.textContent === text;
+
 describe('Outside', () => {
   it('lists outside changes newest first, in plain words', async () => {
     // Served oldest first on purpose: the view orders newest first itself.
@@ -27,7 +30,9 @@ describe('Outside', () => {
     render(<Outside />);
 
     expect(screen.getByText('These writes reached the cluster without going through blastgate.')).toBeTruthy();
-    await screen.findByText('Run a command in db-0');
+    await screen.findByText(whole('Run a command in db-0'));
+    // The name inside the sentence is set in mono, as in Activity.
+    expect(screen.getByText('db-0', { selector: '.outside-ident' }).className).toContain('mono');
     const rows = rowEls();
     expect(rows.map((r) => r.querySelector('.outside-target')!.textContent)).toEqual(['team-a/db-0', 'team-a/web', 'team-a/old-job']);
 
@@ -38,7 +43,7 @@ describe('Outside', () => {
     expect(within(top).getByText('team-a/db-0').className).toContain('mono');
     expect(top.querySelector('time')!.getAttribute('datetime')).toBe('2026-09-26T10:00:00Z');
 
-    expect(within(rows[1]).getByText('Delete the deployment web')).toBeTruthy();
+    expect(within(rows[1]).getByText(whole('Delete the deployment web'))).toBeTruthy();
     expect(within(rows[1]).queryByText('Dry run')).toBeNull();
     expect(within(rows[1]).getByText('system:serviceaccount:team-a:deployer')).toBeTruthy();
     expect(within(rows[1]).getByText('system:serviceaccounts, system:serviceaccounts:team-a')).toBeTruthy();
@@ -50,7 +55,7 @@ describe('Outside', () => {
   it('the range selector changes since_hours', async () => {
     const calls = mockFetch({ 'GET /api/bypass': { body: [bypassRow()] } });
     render(<Outside />);
-    await screen.findByText('Delete the deployment web');
+    await screen.findByText(whole('Delete the deployment web'));
     // The banner on Activity counts the last 24 hours; its link lands on
     // the same count.
     expect(since(calls[0].url)).toBe('24');

@@ -325,6 +325,25 @@
   max-width: 1280px;
 }
 
+/* One title treatment on every screen: the page's name, and one plain
+   line under it where the page needs one. */
+.page-head {
+  margin: 0 0 var(--s-6);
+}
+
+.page-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.page-lede {
+  margin: var(--s-1) 0 0;
+  color: var(--text-muted);
+}
+
 .boot {
   min-height: 100vh;
 }
@@ -674,15 +693,25 @@
 }
 
 .decision-links .button-quiet {
+  min-height: var(--s-9);
   padding: 0;
+  font-size: var(--fs-15);
 }
 
+/* The link wears the quiet button's look exactly: two ways to see more,
+   one style, underlined on hover or focus only. */
 .decision-link {
   display: inline-flex;
   align-items: center;
   min-height: var(--s-9);
   color: var(--link);
   font-weight: 500;
+  text-decoration: none;
+}
+
+.decision-link:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .decision-link:hover {
@@ -724,27 +753,6 @@
 /* === Activity: feed rows === */
 
 /* === Agents === */
-
-.agents-page {
-  max-width: 960px;
-  margin: 0 auto;
-}
-
-.agents-head {
-  margin: 0 0 var(--s-6);
-}
-
-.agents-head h1 {
-  margin: 0 0 var(--s-2);
-  font-size: var(--fs-22);
-  font-weight: 600;
-  color: var(--text);
-}
-
-.agents-lede {
-  margin: 0;
-  color: var(--text-muted);
-}
 
 .agents-banner-error {
   margin: 0 0 var(--s-4);
@@ -827,27 +835,6 @@
 }
 
 /* === Policy === */
-
-.policy-page {
-  max-width: 1100px;
-  margin: 0 auto;
-}
-
-.policy-head {
-  margin: 0 0 var(--s-6);
-}
-
-.policy-head h1 {
-  margin: 0 0 var(--s-2);
-  font-size: var(--fs-22);
-  font-weight: 600;
-  color: var(--text);
-}
-
-.policy-lede {
-  margin: 0;
-  color: var(--text-muted);
-}
 
 /* The loaded policy opens in 180ms, native disclosure timing (spec §7);
    the marker itself is drawn, not the browser's own triangle, so the
@@ -1173,18 +1160,8 @@
 
 /* === Waiting (Task 6) === */
 
-/* Wider than the old 880px page: a list and a decision side by side. */
-.page.waiting,
-.page.details {
-  max-width: 1200px;
-}
-
 .waiting-title {
-  margin: 0 0 var(--s-4);
-  font-size: var(--fs-15);
-  font-weight: 500;
-  letter-spacing: 0;
-  color: var(--text-muted);
+  margin-bottom: var(--s-6);
 }
 
 .waiting-note {
@@ -1275,6 +1252,10 @@
 
 .waiting-dot {
   flex: none;
+  /* A fixed column: the three glyphs differ in width, and the sentences
+     beside them must start on one line. */
+  width: var(--s-4);
+  text-align: center;
   font-size: 0.7em;
 }
 
@@ -1633,26 +1614,6 @@
 
 /* === Activity and outside changes (Task 7) === */
 
-.activity-head,
-.outside-head {
-  margin-bottom: var(--s-6);
-}
-
-.activity-head h1,
-.outside-head h1 {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--fs-22);
-  font-weight: 600;
-  line-height: 1.25;
-}
-
-.activity-lede,
-.outside-lede {
-  margin: var(--s-1) 0 0;
-  color: var(--text-muted);
-}
-
 /* One banner for every change made around blastgate. Amber, not red:
    it asks for a review, it does not say something broke. Secondary text
    is tinted from the banner's own hue rather than grey. */
@@ -1807,11 +1768,20 @@
 
 /* The slot keeps the pill's height whether or not the pill is showing,
    so the pill appearing never pushes the list down under a reader. */
+/* The pill floats over the top edge of the list instead of reserving a
+   row: no empty band under the chips while nothing is new, and no shift
+   of the list when the pill appears or goes. */
 .activity-pill-slot {
+  position: relative;
+  z-index: 2;
   display: flex;
   justify-content: center;
-  min-height: var(--s-8);
-  margin-bottom: var(--s-3);
+  height: 0;
+}
+
+.activity-pill-slot > * {
+  position: absolute;
+  top: var(--s-2);
 }
 
 .activity-list {
@@ -2022,4 +1992,143 @@ a.activity-sentence:hover {
 
 a.activity-sentence {
   display: inline-block;
+}
+
+/* The typed field's row: label above, the input and the two buttons on
+   one line so the buttons line up with the box itself, and the hint
+   under the input rather than pushing the buttons down. The field's
+   wrapper steps aside (display: contents) so its three parts join this
+   grid. */
+.decision-controls.has-typed {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--s-3);
+  row-gap: var(--s-2);
+}
+
+.decision-controls.has-typed .typed-confirm {
+  display: contents;
+}
+
+.decision-controls.has-typed .typed-confirm-label {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.decision-controls.has-typed .typed-confirm-input {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.decision-controls.has-typed .decision-buttons {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.decision-controls.has-typed .typed-confirm-hint {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}
+
+.decision-controls.has-typed .decision-reason {
+  grid-column: 1 / -1;
+  grid-row: 4;
+}
+
+@media (max-width: 480px) {
+  .decision-controls.has-typed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .decision-controls.has-typed .decision-buttons {
+    grid-column: 1;
+    grid-row: 4;
+    margin-top: var(--s-2);
+  }
+
+  .decision-controls.has-typed .decision-reason {
+    grid-row: 5;
+  }
+}
+
+/* Activity: a row's sentence is a link only when it is held, and reads as
+   text until hovered or focused, like every other row. */
+a.activity-sentence {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.activity-sentence:hover,
+a.activity-sentence:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* "Waiting for approval" is the longest outcome word: it stays on one
+   line and the sentence column gives way. */
+.activity-outcome {
+  white-space: nowrap;
+}
+
+/* Details with no stored impact. */
+.details-unknown {
+  margin: var(--s-6) 0;
+  color: var(--caution-fg);
+}
+
+.details-unknown-glyph {
+  margin-right: var(--s-2);
+  font-size: 0.75em;
+}
+
+/* Agents at phone width: each session stacks as agent, on behalf of and
+   status, with Stop (or its confirm) under them, instead of four narrow
+   columns breaking names mid-word. */
+@media (max-width: 480px) {
+  .agents-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .agents-table,
+  .agents-table tbody,
+  .agents-table tr,
+  .agents-table td {
+    display: block;
+  }
+
+  .agents-table tr {
+    padding: var(--s-3) 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .agents-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .agents-table td {
+    padding: 0;
+    border-bottom: none;
+  }
+
+  .agents-table td:first-child {
+    font-weight: 500;
+  }
+
+  .agents-table td[data-label="On behalf of"]::before {
+    content: "for ";
+    color: var(--text-muted);
+  }
+
+  .agents-row-actions {
+    min-width: 0;
+  }
+
+  .agents-row-actions:not(:empty) {
+    margin-top: var(--s-2);
+  }
 }

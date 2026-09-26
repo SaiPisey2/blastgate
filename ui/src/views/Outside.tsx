@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { get, type BypassRow } from '../api';
 import EmptyState from '../components/EmptyState';
+import Sentence from '../components/Sentence';
 import { describe, targetOf } from '../lib/describe';
 import { clock } from '../lib/format';
 
@@ -52,10 +53,10 @@ export default function Outside() {
       <p className="outside-back">
         <a href="#/activity">Back to Activity</a>
       </p>
-      <div className="outside-head">
+      <div className="page-head outside-head">
         <div>
-          <h1>Changes outside blastgate</h1>
-          <p className="outside-lede">These writes reached the cluster without going through blastgate.</p>
+          <h1 className="page-title">Changes outside blastgate</h1>
+          <p className="page-lede outside-lede">These writes reached the cluster without going through blastgate.</p>
         </div>
         <label className="outside-range">
           <span>Period</span>
@@ -90,7 +91,7 @@ export default function Outside() {
       {rows !== null && rows.length > 0 && (
         <ul className="outside-list" aria-label="Changes outside blastgate">
           {rows.map((r, i) => {
-            const what = describe({ verb: r.verb, resource: r.resource, subresource: r.subresource, namespace: r.namespace, name: r.name }).sentence;
+            const what = describe({ verb: r.verb, resource: r.resource, subresource: r.subresource, namespace: r.namespace, name: r.name });
             const target = targetOf(r);
             const groups = r.groups ?? [];
             return (
@@ -103,7 +104,9 @@ export default function Outside() {
                   {groups.length > 0 && <span className="mono outside-groups">{groups.join(', ')}</span>}
                 </div>
                 <div className="outside-what">
-                  <span>{what}</span>
+                  <span>
+                    <Sentence sentence={what.sentence} target={what.target} name={r.name} identClass="outside-ident" />
+                  </span>
                   {target && <span className="mono outside-target">{target}</span>}
                 </div>
                 <div className="outside-flags">{r.dry_run && <span className="outside-dry">Dry run</span>}</div>

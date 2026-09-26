@@ -82,9 +82,16 @@ export function minRawId(entries: Entry[]): number | undefined {
 // outcome unknown" (outcomeAborted/outcomeUnknown, internal/proxy/proxy.go).
 // Either one, or any other non-empty outcome a future build adds, reads as
 // Interrupted rather than Allowed.
-export function outcomeOf(e: Entry): 'Allowed' | 'Waiting' | 'Denied' | 'In flight' | 'Failed' | 'Interrupted' {
+export type Outcome = 'Allowed' | 'Waiting for approval' | 'Held' | 'Denied' | 'In flight' | 'Failed' | 'Interrupted';
+
+// A hold keeps decision "hold" on both of its rows (gate.row: the
+// policy's decision, not what happened). Without a result row the
+// request is still waiting for an approver; with one, the gate has
+// answered the agent (approved, refused or expired) and the approval's
+// own page says which (ruling D-R22).
+export function outcomeOf(e: Entry): Outcome {
+  if (e.row.decision === 'hold') return e.done ? 'Held' : 'Waiting for approval';
   if (!e.done) return 'In flight';
-  if (e.row.decision === 'hold') return 'Waiting';
   if (e.row.decision === 'deny') return 'Denied';
   if (e.row.status >= 500) return 'Failed';
   if (e.row.outcome !== '') return 'Interrupted';

@@ -24,21 +24,25 @@ export function duration(seconds: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-const timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-const dayFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pad2 = (n: number) => String(n).padStart(2, '0');
 
+// clock is a fixed 24-hour HH:MM:SS in the viewer's time zone, with
+// "Sep 25" in front when it is not today. Built by hand, like hhmm: a
+// locale format changes width and order between browsers ("12:05:09 AM",
+// "24:05:09", "25 Sept"), and a time column must line up.
 export function clock(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   const today = new Date().toDateString() === d.toDateString();
-  return today ? timeFmt.format(d) : `${dayFmt.format(d)} ${timeFmt.format(d)}`;
+  return today ? time : `${MONTHS[d.getMonth()]} ${d.getDate()} ${time}`;
 }
 
 // hhmm is a fixed 24-hour HH:MM, built by hand: a locale's own format
 // can come back as "12:05 AM" or, with hour12 off, "24:05" at midnight.
 export function hhmm(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 export function plural(n: number, word: string, many = word + 's'): string {

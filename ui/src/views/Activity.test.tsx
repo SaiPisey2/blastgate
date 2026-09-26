@@ -66,7 +66,7 @@ describe('Activity', () => {
     expect(within(readRow as HTMLElement).getByText('Allowed')).toBeTruthy();
     const heldRow = rowOf('data');
     expect(heldRow.className).not.toContain('activity-row-read');
-    expect(within(heldRow).getByText('Waiting')).toBeTruthy();
+    expect(within(heldRow).getByText('Held')).toBeTruthy();
 
     // "Load older" pages with before=<lowest raw id seen>.
     await userEvent.click(screen.getByRole('button', { name: 'Load older' }));
@@ -141,18 +141,18 @@ describe('Activity', () => {
     await screen.findByText('before-it');
     const decision = feedRow({ id: 60, request_id: 'q1', kind: 'decision', verb: 'create', resource: 'pods', subresource: 'exec', name: 'db-0', class: 'TERMINAL', measured: false, decision: 'hold', rule: 'exec-with-sql', status: 0, outcome: '' });
     act(() => emit('audit', decision));
-    // Written when the decision is made; the request has not ended yet.
-    expect(within(rowOf('db-0')).getByText('In flight')).toBeTruthy();
+    // Written when the hold is made; no approver has answered yet.
+    expect(within(rowOf('db-0')).getByText('Waiting for approval')).toBeTruthy();
     // Another request lands while the exec is still open.
     act(() => emit('audit', ok({ id: 61, name: 'mid' })));
     act(() => emit('audit', { ...decision, id: 63, kind: 'result', status: 403, outcome: 'held' }));
-    await waitFor(() => expect(screen.queryByText('In flight')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Waiting for approval')).toBeNull());
     expect(screen.getAllByText('db-0')).toHaveLength(1);
-    expect(within(rowOf('db-0')).getByText('Waiting')).toBeTruthy();
+    expect(within(rowOf('db-0')).getByText('Held')).toBeTruthy();
     // A resumed stream can send the decision again: it changes nothing.
     act(() => emit('audit', decision));
     expect(screen.getAllByText('db-0')).toHaveLength(1);
-    expect(within(rowOf('db-0')).getByText('Waiting')).toBeTruthy();
+    expect(within(rowOf('db-0')).getByText('Held')).toBeTruthy();
     // Requests are placed by their first row: the exec was decided (60)
     // before "mid" (61), though its result (63) came after.
     act(() => emit('audit', ok({ id: 64, name: 'newer' })));
@@ -289,6 +289,7 @@ describe('Activity', () => {
           feedRow({ id: 3, kind: 'result', decision: 'hold', status: 403, outcome: 'held', name: 'waiting-one' }),
           feedRow({ id: 2, kind: 'result', decision: 'deny', status: 403, outcome: 'denied', name: 'denied-one' }),
           feedRow({ id: 1, kind: 'decision', decision: 'allow', status: 0, outcome: '', name: 'flight-one' }),
+          feedRow({ id: 0, kind: 'decision', decision: 'hold', status: 0, outcome: '', name: 'asking-one' }),
         ],
       },
     });
@@ -296,12 +297,15 @@ describe('Activity', () => {
     await screen.findByText('allowed-one');
     const chip = (name: string) => screen.getByRole('button', { name });
     expect(chip('All').getAttribute('aria-pressed')).toBe('true');
-    expect(names()).toEqual(['allowed-one', 'waiting-one', 'denied-one', 'flight-one']);
+    expect(names()).toEqual(['allowed-one', 'waiting-one', 'denied-one', 'flight-one', 'asking-one']);
+    expect(within(rowOf('asking-one')).getByText('Waiting for approval')).toBeTruthy();
+    expect(within(rowOf('waiting-one')).getByText('Held')).toBeTruthy();
 
-    await userEvent.click(chip('Waiting'));
-    expect(chip('Waiting').getAttribute('aria-pressed')).toBe('true');
+    // Held covers a hold at either stage: answered, or still asking.
+    await userEvent.click(chip('Held'));
+    expect(chip('Held').getAttribute('aria-pressed')).toBe('true');
     expect(chip('All').getAttribute('aria-pressed')).toBe('false');
-    expect(names()).toEqual(['waiting-one']);
+    expect(names()).toEqual(['waiting-one', 'asking-one']);
 
     await userEvent.click(chip('Denied'));
     expect(names()).toEqual(['denied-one']);
@@ -317,7 +321,7 @@ describe('Activity', () => {
 
     // Back to All, everything is there, the live rows included.
     await userEvent.click(chip('All'));
-    expect(names()).toHaveLength(6);
+    expect(names()).toHaveLength(7);
   });
 
   it('new rows wait behind a pill while you read', async () => {
@@ -512,19 +516,20 @@ describe('Activity', () => {
     mockFetch({
       'GET /api/bypass': { body: [] },
       'GET /api/feed': {
-        body: [feedRow({ id: 9, kind: 'result', decision: 'hold', status: 403, outcome: 'held', name: 'held-top' }), feedRow({ id: 5, request_id: 'qh', kind: 'decision', decision: 'hold', status: 0, outcome: '', name: 'soon-held' })],
+        body: [ok({ id: 9, name: 'allowed-top' }), feedRow({ id: 5, request_id: 'qa', kind: 'decision', decision: 'allow', status: 0, outcome: '', name: 'soon-allowed' })],
       },
     });
     render(<Activity />);
-    await screen.findByText('soon-held');
-    await userEvent.click(screen.getByRole('button', { name: 'Waiting' }));
-    expect(names()).toEqual(['held-top']);
+    await screen.findByText('soon-allowed');
+    await userEvent.click(screen.getByRole('button', { name: 'Allowed' }));
+    expect(names()).toEqual(['allowed-top']);
     fireEvent.pointerEnter(log());
-    act(() => emit('audit', feedRow({ id: 12, request_id: 'qh', kind: 'result', decision: 'hold', status: 403, outcome: 'held', name: 'soon-held' })));
-    expect(names()).toEqual(['held-top']);
+    // The in-flight request finishes: it would now show under Allowed.
+    act(() => emit('audit', ok({ id: 12, request_id: 'qa', name: 'soon-allowed' })));
+    expect(names()).toEqual(['allowed-top']);
     expect(screen.getByRole('button', { name: /new/ }).textContent).toBe('↑ 1 new');
     await userEvent.click(screen.getByRole('button', { name: /new/ }));
-    expect(names()).toEqual(['held-top', 'soon-held']);
+    expect(names()).toEqual(['allowed-top', 'soon-allowed']);
   });
 
   it('when the cap trims rows that load older reached, it offers them again', async () => {

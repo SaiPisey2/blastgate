@@ -165,6 +165,9 @@ func TestBuiltUIHasNothingTheCSPBlocks(t *testing.T) {
 // fails if their marker, or a file named for them, ever reaches dist/.
 const demoMarker = "blastgate-demo-fixture"
 
+// demoQuery are the minified forms of reading the ?demo parameter.
+var demoQuery = []string{`get("demo")`, `get('demo')`, "get(`demo`)", `has("demo")`, `has('demo')`, "has(`demo`)"}
+
 func TestBuiltUIHasNoDemoFixtures(t *testing.T) {
 	src, err := os.ReadFile("src/demo/fixtures.ts")
 	if err != nil {
@@ -191,6 +194,13 @@ func TestBuiltUIHasNoDemoFixtures(t *testing.T) {
 		}
 		if strings.Contains(string(b), demoMarker) {
 			t.Errorf("%s: demo fixtures shipped in the build", p)
+		}
+		// The ?demo switch itself: a build that still reads it has kept
+		// the DEV-only branch, even if the fixtures chunk was dropped.
+		for _, q := range demoQuery {
+			if strings.Contains(string(b), q) {
+				t.Errorf("%s: the ?demo switch shipped in the build (%s)", p, q)
+			}
 		}
 		return nil
 	})

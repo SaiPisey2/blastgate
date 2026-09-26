@@ -91,10 +91,10 @@ export default function Policy() {
   const overLimit = bytes > MAX_POLICY_BYTES;
 
   return (
-    <div className="policy-page">
-      <header className="policy-head">
-        <h1>Policy</h1>
-        <p className="policy-lede">Try a change on the past: see which decisions would have gone the other way. Nothing is applied from here.</p>
+    <div className="page page-wide policy-page">
+      <header className="page-head policy-head">
+        <h1 className="page-title">Policy</h1>
+        <p className="page-lede policy-lede">Try a change on the past: see which decisions would have gone the other way. Nothing is applied from here.</p>
       </header>
 
       {loadError && (

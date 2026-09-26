@@ -271,3 +271,14 @@ describe('Details, design pass', () => {
     expect(within(card).queryByRole('button', { name: 'Show the command' })).toBeNull();
   });
 });
+
+describe('Details, fix round 1', () => {
+  it('a detail with no stored impact says the impact is unknown, never zeros', async () => {
+    const d = { ...detail(del, impact()), impact: undefined as unknown as ApprovalDetail['impact'] };
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: d } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    expect(within(card).getByText(/^Impact unknown:/)).toBeTruthy();
+    expect(within(card).queryByRole('list', { name: /in numbers/i })).toBeNull();
+  });
+});

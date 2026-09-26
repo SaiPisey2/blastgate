@@ -90,6 +90,18 @@
   --r-tag: 6px;
   --r-ctl: 8px;
   --r-panel: 12px;
+
+  /* The sticky header's height, for scroll-padding: anything the page
+     scrolls to (a focused question, a tree item) lands below it, not
+     under it (WCAG 2.4.11). Measured from the rendered header: one row
+     on wide screens, brand and controls over a row of tabs below 880px. */
+  --header-h: 61px;
+}
+
+@media (max-width: 880px) {
+  :root {
+    --header-h: 101px;
+  }
 }
 
 /* Dark is the default: when the system says dark, or says nothing.

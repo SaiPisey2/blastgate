@@ -36,7 +36,15 @@ describe('clock', () => {
   });
 
   it('formats a valid date as a 24h clock reading', () => {
-    expect(clock(new Date().toISOString())).toMatch(/^\d{1,2}:\d{2}:\d{2}$/);
+    expect(clock(new Date().toISOString())).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('is a fixed HH:MM:SS today, midnight included, and "Mon D HH:MM:SS" on other days', () => {
+    const today = new Date();
+    today.setHours(0, 5, 9, 0);
+    expect(clock(today.toISOString())).toBe('00:05:09');
+    const other = new Date(2020, 8, 5, 23, 4, 7);
+    expect(clock(other.toISOString())).toBe('Sep 5 23:04:07');
   });
 });
 

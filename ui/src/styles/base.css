@@ -83,6 +83,8 @@ body {
    Safari, which ignores scrollbar-color. */
 html {
   scrollbar-color: var(--line-strong) var(--bg);
+  /* Scrolled-to targets stop clear of the sticky header. */
+  scroll-padding-top: calc(var(--header-h) + var(--s-4));
 }
 
 ::-webkit-scrollbar {

@@ -25,10 +25,12 @@ function start() {
 // cluster behind it (?demo). import.meta.env.DEV is false in a build, so
 // this branch and the module it imports are dropped from dist/; the Go
 // embed guard fails if the fixtures' marker ever ships.
-const demo = new URLSearchParams(window.location.search).get('demo');
-if (import.meta.env.DEV && demo !== null) {
+// The query is read inside the DEV branch, so a build carries no trace
+// of it either.
+if (import.meta.env.DEV && new URLSearchParams(window.location.search).has('demo')) {
+  const mode = new URLSearchParams(window.location.search).get('demo') ?? '';
   void import('./demo/fixtures').then((m) => {
-    m.install(demo);
+    m.install(mode);
     start();
   });
 } else {

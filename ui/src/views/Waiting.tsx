@@ -252,8 +252,8 @@ export default function Waiting({ me = '' }: { me?: string }) {
   ) : null;
 
   return (
-    <div className="page waiting">
-      <h1 ref={titleRef} id={titleId} className={wide ? 'waiting-title' : 'waiting-title visually-hidden'} tabIndex={-1}>
+    <div className="page page-wide waiting">
+      <h1 ref={titleRef} id={titleId} className={wide ? 'page-title waiting-title' : 'page-title waiting-title visually-hidden'} tabIndex={-1}>
         Waiting for you
       </h1>
 

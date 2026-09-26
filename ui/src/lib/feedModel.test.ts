@@ -109,8 +109,13 @@ describe('outcomeOf', () => {
     expect(outcomeOf(entry({ status: 0, outcome: '' }, false))).toBe('In flight');
   });
 
-  it('Waiting when the decision is hold', () => {
-    expect(outcomeOf(entry({ decision: 'hold', status: 0, outcome: '' }, true))).toBe('Waiting');
+  it('Waiting for approval when a hold has no result row yet (D-R22)', () => {
+    expect(outcomeOf(entry({ kind: 'decision', decision: 'hold', status: 0, outcome: '' }, false))).toBe('Waiting for approval');
+  });
+
+  it('Held once a hold has its result row, whatever the status (D-R22)', () => {
+    expect(outcomeOf(entry({ kind: 'result', decision: 'hold', status: 200, outcome: '' }, true))).toBe('Held');
+    expect(outcomeOf(entry({ kind: 'result', decision: 'hold', status: 403, outcome: 'held' }, true))).toBe('Held');
   });
 
   it('Denied when the decision is deny', () => {

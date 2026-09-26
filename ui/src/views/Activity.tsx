@@ -8,7 +8,7 @@ import { announce } from '../components/Shell';
 import Sentence from '../components/Sentence';
 import { useListKeys } from '../hooks/useListKeys';
 import { describe } from '../lib/describe';
-import { displayClass, fold, keyOf, MAX_ROWS, minRawId, outcomeOf, type Entry } from '../lib/feedModel';
+import { displayClass, fold, keyOf, MAX_ROWS, minRawId, outcomeOf, type Entry, type Outcome } from '../lib/feedModel';
 import { clock, plural } from '../lib/format';
 import type { Tone } from '../lib/friction';
 import { DUR } from '../motion';
@@ -19,16 +19,16 @@ const PAGE = 50;
 type Filters = { agent: string; human: string };
 const EMPTY: Filters = { agent: '', human: '' };
 
-type Outcome = ReturnType<typeof outcomeOf>;
-type Chip = 'All' | 'Waiting' | 'Denied' | 'Allowed';
-const CHIPS: Chip[] = ['All', 'Waiting', 'Denied', 'Allowed'];
+type Chip = 'All' | 'Held' | 'Denied' | 'Allowed';
+const CHIPS: Chip[] = ['All', 'Held', 'Denied', 'Allowed'];
 
 // Neutral is not a Tag tone: an allowed or running request needs no
 // attention, so it gets no colour and no glyph, only its word.
 const TONES: Record<Outcome, Tone | 'neutral'> = {
   Allowed: 'neutral',
   'In flight': 'neutral',
-  Waiting: 'caution',
+  'Waiting for approval': 'caution',
+  Held: 'caution',
   Interrupted: 'caution',
   Denied: 'danger',
   Failed: 'danger',
@@ -50,8 +50,11 @@ function matches(r: FeedRow, f: Filters): boolean {
   return (!f.agent.trim() || r.agent === f.agent.trim()) && (!f.human.trim() || r.human === f.human.trim());
 }
 
+// Held covers a hold at either stage: still waiting, or answered.
 function shows(e: Entry, chip: Chip): boolean {
-  return chip === 'All' || outcomeOf(e) === chip;
+  if (chip === 'All') return true;
+  const o = outcomeOf(e);
+  return chip === 'Held' ? o === 'Held' || o === 'Waiting for approval' : o === chip;
 }
 
 // countNew: requests the pill would add, as the reader would see them.
@@ -409,9 +412,9 @@ export default function Activity() {
 
   return (
     <div className="page page-wide activity">
-      <div className="activity-head">
-        <h1>Activity</h1>
-        <p className="activity-lede">Every request an agent sent through blastgate, newest first.</p>
+      <div className="page-head activity-head">
+        <h1 className="page-title">Activity</h1>
+        <p className="page-lede activity-lede">Every request an agent sent through blastgate, newest first.</p>
       </div>
 
       <OutsideBanner />

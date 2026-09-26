@@ -847,3 +847,25 @@ describe('DecisionPanel carried from review', () => {
     expect(screen.getByRole('status').textContent).toBe('This request expired.');
   });
 });
+
+describe('DecisionPanel default focus never scrolls the page (I1)', () => {
+  const baseCSS = readFileSync('src/styles/base.css', 'utf8');
+  const tokensCSS = readFileSync('src/styles/tokens.css', 'utf8');
+
+  for (const [label, s] of [
+    ['Deny, at the confirm levels', reversible],
+    ['the typed field, at the typed level', summary()],
+  ] as const) {
+    it(`focuses ${label} with preventScroll`, () => {
+      const spy = vi.spyOn(HTMLElement.prototype, 'focus');
+      renderPanel(withDetail(s, s === reversible ? reversibleImpact : impact()));
+      expect(spy).toHaveBeenCalled();
+      for (const call of spy.mock.calls) expect(call[0]).toEqual({ preventScroll: true });
+    });
+  }
+
+  it('anything the page does scroll to stops below the sticky header', () => {
+    expect(tokensCSS).toMatch(/--header-h:\s*\d+px/);
+    expect(baseCSS).toMatch(/html\s*\{[^}]*scroll-padding-top:\s*calc\(var\(--header-h\)/);
+  });
+});

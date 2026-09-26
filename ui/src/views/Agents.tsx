@@ -44,10 +44,10 @@ export default function Agents() {
   }, [load]);
 
   return (
-    <div className="agents-page">
-      <header className="agents-head">
-        <h1>Agents</h1>
-        <p className="agents-lede">Who can act right now. Stop any of them.</p>
+    <div className="page page-wide agents-page">
+      <header className="page-head agents-head">
+        <h1 className="page-title">Agents</h1>
+        <p className="page-lede agents-lede">Who can act right now. Stop any of them.</p>
       </header>
 
       {error && (
