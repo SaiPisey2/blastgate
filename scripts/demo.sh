@@ -4,8 +4,8 @@
 # delete that destroys a volume's data, a scale to zero of a prod
 # Service's only backend, an exec running SQL) and one write made around
 # blastgate with the admin kubeconfig, which the observe webhook records.
-# It then keeps serving so the queue, feed, policy replay and bypass list
-# can be looked at in the web UI. Ctrl-C stops blastgate and removes the
+# It then keeps serving so the Waiting, Activity, Policy and Changes
+# outside blastgate pages can be looked at in the web UI. Ctrl-C stops blastgate and removes the
 # webhook registration.
 #
 #   make fixture-up && make build && scripts/demo.sh
@@ -132,7 +132,7 @@ held scale deployment web -n demo --replicas=0
 step "the agent runs SQL in the database pod: held"
 held exec -n demo deploy/db -- psql -c 'drop table orders'
 
-step "someone writes with the admin kubeconfig, around blastgate: recorded as a bypass"
+step "someone writes with the admin kubeconfig, around blastgate: recorded as a change outside blastgate"
 admin create configmap hotfix -n demo --from-literal=reason=manual
 
 cat <<EOF
@@ -140,7 +140,8 @@ cat <<EOF
 Open https://$BLASTGATE_ADMIN_LISTEN and sign in with the token in
   $work/bob.token
 The certificate is signed by blastgate's own CA, $work/data/tls/ca.crt.
-The queue holds the three requests; the Bypass page lists the configmap.
+Waiting holds the three requests; Activity's banner opens Changes outside
+blastgate, which lists the configmap.
 Ctrl-C stops blastgate, removes the webhook registration and deletes $work.
 EOF
 wait "$serve_pid"
