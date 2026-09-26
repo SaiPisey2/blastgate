@@ -92,9 +92,15 @@
   --r-panel: 12px;
 }
 
-/* Dark is the default: when the system says dark, or says nothing. */
+/* Dark is the default: when the system says dark, or says nothing.
+
+   The manual choices are written as :root[data-theme=...] (0,2,0), not
+   a bare [data-theme=...] (0,1,0): the old styles.css sets the same
+   custom properties on :root and loads later, so at equal specificity it
+   would win and a manual Light on a dark system would paint old dark
+   text on these light surfaces. */
 :root,
-[data-theme="dark"] {
+:root[data-theme="dark"] {
   color-scheme: dark;
   --bg: oklch(0.17 0.008 255);
   --surface: oklch(0.205 0.009 255);
@@ -150,7 +156,7 @@
   }
 }
 
-[data-theme="light"] {
+:root[data-theme="light"] {
   color-scheme: light;
   --bg: oklch(0.975 0.003 255);
   --surface: oklch(1 0 0);

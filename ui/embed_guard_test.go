@@ -22,6 +22,10 @@ import (
 var distForbidden = []string{
 	`.cssText=`,
 	`.cssText =`,
+	`.cssText+=`,
+	`["cssText"]`,
+	`['cssText']`,
+	"[`cssText`]",
 	`setAttribute("style"`,
 	`setAttribute('style'`,
 	// The minifier rewrites string literals to template literals, so the
@@ -31,6 +35,14 @@ var distForbidden = []string{
 	`data:application/font`,
 	`data:application/x-font`,
 }
+
+// distCSSTextRe and distHTMLStyleRe catch spacing and operator variants a literal list
+// misses: cssText += s, and an inline style attribute in the HTML with
+// either quote.
+var (
+	distCSSTextRe   = regexp.MustCompile(`cssText\s*\+?=`)
+	distHTMLStyleRe = regexp.MustCompile(`\bstyle\s*=\s*['"]`)
+)
 
 // sourceForbidden are checked in our own sources instead of dist/,
 // because the bundle keeps two of them even when nothing calls them.
@@ -45,16 +57,35 @@ var distForbidden = []string{
 var sourceForbidden = []string{
 	`popLayout`,
 	`AnimateView`,
-	`nonce=`,
+	`startViewTransition`,
+	`ViewTransition`,
 	`.cssText`,
 	`createElement('style')`,
 	`createElement("style")`,
 	"createElement(`style`)",
+	// React 19 hoists a JSX <style> into a real style element.
+	`<style`,
 	`setAttribute('style'`,
 	`setAttribute("style"`,
+	"setAttribute(`style`",
 	`dangerouslySetInnerHTML`,
 	`innerHTML`,
+	`outerHTML`,
+	`insertAdjacentHTML`,
+	`document.write`,
+	`createContextualFragment`,
+	`DOMParser`,
 }
+
+// motion.ts is the only file allowed to reach Motion directly or to name
+// nonce (it does so to remove the prop from MotionConfig's type). A view
+// importing motion/react would bypass the allow-list, and a nonce passed
+// through a JSX spread would bypass the narrowed type.
+var (
+	motionImportRe = regexp.MustCompile(`from\s*['"]motion|import\(\s*['"]motion|framer-motion`)
+	nonceRe        = regexp.MustCompile(`\bnonce\b`)
+	blockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+)
 
 func TestBuiltUIHasNothingTheCSPBlocks(t *testing.T) {
 	root := FS()
@@ -78,8 +109,15 @@ func TestBuiltUIHasNothingTheCSPBlocks(t *testing.T) {
 				hits = append(hits, p+": "+bad)
 			}
 		}
-		if ext == ".html" && strings.Contains(s, `style="`) {
-			hits = append(hits, p+`: style="`)
+		if ext != ".css" {
+			for _, m := range distCSSTextRe.FindAllString(s, -1) {
+				hits = append(hits, p+": "+m)
+			}
+		}
+		if ext == ".html" {
+			for _, m := range distHTMLStyleRe.FindAllString(s, -1) {
+				hits = append(hits, p+": "+m)
+			}
 		}
 		if ext == ".css" {
 			cssText[p] = s
@@ -138,27 +176,44 @@ func TestSourcesAskForNothingTheCSPBlocks(t *testing.T) {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		ext := filepath.Ext(p)
-		if ext != ".ts" && ext != ".tsx" {
+		switch filepath.Ext(p) {
+		case ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs":
+		default:
 			return nil
 		}
-		// Tests may name a forbidden string to assert it never renders.
-		if strings.HasSuffix(p, ".test.ts") || strings.HasSuffix(p, ".test.tsx") {
-			return nil
-		}
+		// Tests may name a forbidden string to assert it never renders;
+		// they are still held to the Motion allow-list below.
+		isTest := strings.Contains(filepath.Base(p), ".test.")
+		isMotion := filepath.ToSlash(p) == "src/motion.ts"
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		for i, line := range strings.Split(string(b), "\n") {
-			// Comment lines may name a banned API to explain the ban
-			// (motion.ts does); only code is checked.
-			if l := strings.TrimSpace(line); strings.HasPrefix(l, "//") || strings.HasPrefix(l, "/*") || strings.HasPrefix(l, "*") {
+		// Comments may name a banned API to explain the ban (motion.ts
+		// does). Block comments are blanked, keeping their newlines so
+		// line numbers hold, and whole // lines are skipped; code before
+		// or after a comment on the same line is still checked, so
+		// "/* x */ el.innerHTML = s" fails.
+		src := blockCommentRe.ReplaceAllStringFunc(string(b), func(c string) string {
+			return strings.Repeat("\n", strings.Count(c, "\n"))
+		})
+		for i, line := range strings.Split(src, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
 				continue
 			}
-			for _, bad := range sourceForbidden {
-				if strings.Contains(line, bad) {
-					t.Errorf("%s:%d: %s", p, i+1, bad)
+			if !isTest {
+				for _, bad := range sourceForbidden {
+					if strings.Contains(line, bad) {
+						t.Errorf("%s:%d: %s", p, i+1, bad)
+					}
+				}
+			}
+			if !isMotion {
+				if m := motionImportRe.FindString(line); m != "" {
+					t.Errorf("%s:%d: %s (import Motion from ./motion only)", p, i+1, m)
+				}
+				if nonceRe.MatchString(line) {
+					t.Errorf("%s:%d: nonce (the CSP has none; only motion.ts may name it)", p, i+1)
 				}
 			}
 		}
