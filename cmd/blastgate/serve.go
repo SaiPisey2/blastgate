@@ -160,7 +160,7 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		servers = append(servers, &listener{setting: "BLASTGATE_WEBHOOK_LISTEN", addr: cfg.WebhookListen, srv: &http.Server{
 			// A pointer: the handler holds the in-flight semaphore, and a
 			// copy per request would bound nothing.
-			Handler:           &webhook.Handler{Rec: bypassRecorder(st), Ignore: cfg.BypassIgnore, Log: log},
+			Handler:           &webhook.Handler{Rec: bypassRecorder(st), Ignore: cfg.BypassIgnore, IncludeNoise: cfg.BypassIncludeNoise, Log: log},
 			ReadHeaderTimeout: webhookReadHeaderTimeout,
 			ReadTimeout:       webhookReadTimeout,
 			WriteTimeout:      webhookWriteTimeout,

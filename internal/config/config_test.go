@@ -328,3 +328,27 @@ func TestBypassIgnoreOfOnlySeparatorsIsRefused(t *testing.T) {
 		t.Error("an ignore list with no prefixes was accepted")
 	}
 }
+
+// BLASTGATE_BYPASS_INCLUDE_NOISE=1 records Lease and Event writes, which
+// the webhook skips by default. Anything but "", "0" or "1" is refused:
+// "true" or "yes" silently meaning off would leave an operator believing
+// they turned it on.
+func TestBypassIncludeNoise(t *testing.T) {
+	if c, err := Load(env(base())); err != nil || c.BypassIncludeNoise {
+		t.Errorf("default: include noise %v, err %v", c.BypassIncludeNoise, err)
+	}
+	for v, want := range map[string]bool{"1": true, "0": false} {
+		m := base()
+		m["BLASTGATE_BYPASS_INCLUDE_NOISE"] = v
+		if c, err := Load(env(m)); err != nil || c.BypassIncludeNoise != want {
+			t.Errorf("%q: include noise %v, err %v", v, c.BypassIncludeNoise, err)
+		}
+	}
+	for _, v := range []string{"true", "yes", " 1", "2"} {
+		m := base()
+		m["BLASTGATE_BYPASS_INCLUDE_NOISE"] = v
+		if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "BLASTGATE_BYPASS_INCLUDE_NOISE") {
+			t.Errorf("%q: err = %v, want a refusal naming the variable", v, err)
+		}
+	}
+}

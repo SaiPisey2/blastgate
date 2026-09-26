@@ -114,6 +114,7 @@ own writes.
 | `BLASTGATE_WEBHOOK_LISTEN` | unset: off | the observe webhook (see [Writes that go around blastgate](#writes-that-go-around-blastgate)) |
 | `BLASTGATE_WEBHOOK_CLIENT_CA` | unset | a PEM file of CAs; when set, the webhook requires a client certificate signed by one of them. Refused without `BLASTGATE_WEBHOOK_LISTEN` |
 | `BLASTGATE_BYPASS_IGNORE` | `system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver` | username prefixes the webhook never records; a value replaces the default list, it does not add to it |
+| `BLASTGATE_BYPASS_INCLUDE_NOISE` | unset | `1` makes the webhook record Lease and Event writes too, which it skips by default; anything but `0` or `1` is refused |
 | `BLASTGATE_ALLOW_REMOTE` | unset | `1` lets any of the three listeners bind a non-loopback address; without it `serve` refuses to start |
 | `BLASTGATE_TLS_HOSTS` | `127.0.0.1,localhost` | the names and addresses the serving certificate covers, for all three listeners |
 
@@ -430,6 +431,23 @@ ReplicaSets, the garbage collector and kubelets do not drown the records that ma
 | `system:serviceaccount:kube-system:` | **every** service account in kube-system, the controllers among them |
 | `system:apiserver` | the API server itself |
 
+Controllers outside kube-system are recorded: cert-manager, ingress-nginx, Argo CD and
+operators run as service accounts in their own namespaces, and to the webhook they look
+exactly like an agent holding a token. Add the ones you trust to the list. A value
+replaces the default, so repeat it:
+
+```sh
+export BLASTGATE_BYPASS_IGNORE=system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver,system:serviceaccount:cert-manager:
+```
+
+**Lease and Event writes are skipped.** Those controllers renew a Lease
+(`coordination.k8s.io/leases`) every few seconds and write Events (core `events` and
+`events.k8s.io/events`) all day, which would be tens of thousands of rows a day and a
+Bypass page showing nothing else. They are not recorded, whoever makes them. Set
+`BLASTGATE_BYPASS_INCLUDE_NOISE=1` to record them too. The skip matches those exact
+groups and resources, so a custom resource that happens to be called `leases` is
+recorded.
+
 The records are in the Bypass page and `GET /api/bypass`, and the table is append-only.
 
 ![Bypass alerts: a configmap created with the admin kubeconfig, around blastgate](assets/ui-bypass.png)
@@ -468,6 +486,10 @@ Know its limits:
   `BLASTGATE_WEBHOOK_CLIENT_CA`.
 - A review over 8 MiB, or one arriving while 32 are already in flight, is let through
   unrecorded and logged.
+- **The table is never pruned.** It is append-only (triggers refuse UPDATE and DELETE)
+  and blastgate has no retention for it yet, so it grows by one row per recorded write
+  for as long as the webhook runs. Keep noisy service accounts in the ignore list and
+  leave the Lease and Event skip on.
 
 ## Who can issue sessions
 

@@ -251,6 +251,36 @@ func TestServeStartsTheWebhook(t *testing.T) {
 	}
 }
 
+// leaseReview is a controller's Lease renewal, the webhook's usual noise.
+func leaseReview(user, uid string) string {
+	return `{"apiVersion":"admission.k8s.io/v1","kind":"AdmissionReview","request":{"uid":"` + uid +
+		`","kind":{"group":"coordination.k8s.io","version":"v1","kind":"Lease"},"resource":{"group":"coordination.k8s.io","version":"v1","resource":"leases"},` +
+		`"name":"cert-manager-controller","namespace":"cert-manager","operation":"UPDATE","userInfo":{"username":"` + user + `"}}}`
+}
+
+// TestServeSkipsLeaseNoiseUnlessAsked: serve hands the webhook the
+// setting; without it a Lease renewal is not recorded, with it it is.
+func TestServeSkipsLeaseNoiseUnlessAsked(t *testing.T) {
+	for _, include := range []string{"", "1"} {
+		env, a := listenerEnv(t, true, map[string]string{"BLASTGATE_BYPASS_INCLUDE_NOISE": include})
+		startServe(t, env)
+		waitListening(t, a["webhook"])
+		c := caClient(t, a["data"])
+		for _, body := range []string{leaseReview("lease-holder", "uid-lease"), review("mallory", "uid-cm")} {
+			if out, err := postReview(t, c, a["webhook"], body); err != nil || !strings.Contains(out, `"allowed":true`) {
+				t.Fatalf("include=%q: %s %v", include, out, err)
+			}
+		}
+		want := []string{"mallory"}
+		if include == "1" {
+			want = []string{"lease-holder", "mallory"}
+		}
+		if got := bypassUsers(t, a["data"]); !slices.Equal(got, want) {
+			t.Errorf("include=%q: bypass rows for %v, want %v", include, got, want)
+		}
+	}
+}
+
 // clientPKI writes a CA to a PEM file and returns it with a client
 // certificate that CA signed.
 func clientPKI(t *testing.T) (caPath string, client tls.Certificate) {

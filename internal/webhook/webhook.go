@@ -72,6 +72,26 @@ const recordTimeout = 2 * time.Second
 // holding a token, and is recorded.
 var DefaultIgnore = []string{"system:node:", "system:kube-", "system:serviceaccount:kube-system:", "system:apiserver"}
 
+// Noise is Lease and Event writes: controllers outside kube-system
+// (cert-manager, ingress-nginx, argo, operators) renew a Lease every few
+// seconds and write Events all day, under service accounts DefaultIgnore
+// rightly does not hide. Recorded, they are tens of thousands of rows a
+// day in an append-only table nothing prunes, and the bypass page shows
+// only them. They are skipped unless Handler.IncludeNoise is set. Keyed
+// by group and resource, exactly: another API group's "leases" is not
+// Kubernetes' and is recorded.
+var noise = map[metav1.GroupResource]bool{
+	{Group: "coordination.k8s.io", Resource: "leases"}: true,
+	{Group: "", Resource: "events"}:                    true,
+	{Group: "events.k8s.io", Resource: "events"}:       true,
+}
+
+// IsNoise reports whether a write to group/resource is Lease or Event
+// traffic.
+func IsNoise(group, resource string) bool {
+	return noise[metav1.GroupResource{Group: group, Resource: resource}]
+}
+
 // Recorder is the part of the store the webhook writes to.
 type Recorder interface {
 	AppendBypass(ctx context.Context, b store.BypassRow) error
@@ -82,8 +102,10 @@ type Recorder interface {
 type Handler struct {
 	Rec    Recorder
 	Ignore []string
-	Log    *slog.Logger
-	Now    func() time.Time
+	// IncludeNoise records Lease and Event writes too (see IsNoise).
+	IncludeNoise bool
+	Log          *slog.Logger
+	Now          func() time.Time
 
 	once sync.Once
 	sem  chan struct{}
@@ -183,6 +205,9 @@ func (h *Handler) bypassed(req *admissionv1.AdmissionRequest) bool {
 	switch req.Operation {
 	case admissionv1.Create, admissionv1.Update, admissionv1.Delete, admissionv1.Connect:
 	default:
+		return false
+	}
+	if !h.IncludeNoise && IsNoise(req.Resource.Group, req.Resource.Resource) {
 		return false
 	}
 	return !ViaBlastgate(req.UserInfo.Extra) && !Ignored(req.UserInfo.Username, h.Ignore)

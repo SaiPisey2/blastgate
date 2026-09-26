@@ -342,3 +342,64 @@ func TestAMalformedRequestWithAUIDIsStillAllowed(t *testing.T) {
 		t.Errorf("undecodable review not logged with its uid: %q", l)
 	}
 }
+
+// reviewOf is review for another operation and resource.
+func reviewOf(uid, user string, op admissionv1.Operation, group, resource string) []byte {
+	var ar admissionv1.AdmissionReview
+	if err := json.Unmarshal(review(uid, user, nil), &ar); err != nil {
+		panic(err)
+	}
+	ar.Request.Operation = op
+	ar.Request.Resource = metav1.GroupVersionResource{Group: group, Version: "v1", Resource: resource}
+	b, _ := json.Marshal(ar)
+	return b
+}
+
+// TestLeaseAndEventNoiseIsSkipped: controllers outside kube-system
+// (cert-manager, ingress-nginx, operators) renew a Lease every few seconds
+// and write Events all day. Recorded, they are tens of thousands of rows
+// a day in a table that is never pruned, and the bypass page shows
+// nothing else. They are skipped unless IncludeNoise asks for them
+// (P2-R29, I6). The match is exact: another group's "leases" is recorded.
+func TestLeaseAndEventNoiseIsSkipped(t *testing.T) {
+	const sa = "system:serviceaccount:cert-manager:cert-manager"
+	noise := [][]byte{
+		reviewOf("u-lease", sa, admissionv1.Update, "coordination.k8s.io", "leases"),
+		reviewOf("u-lease-new", sa, admissionv1.Create, "coordination.k8s.io", "leases"),
+		reviewOf("u-event", sa, admissionv1.Create, "", "events"),
+		reviewOf("u-event2", sa, admissionv1.Update, "events.k8s.io", "events"),
+	}
+	signal := [][]byte{
+		reviewOf("u-cm", sa, admissionv1.Create, "", "configmaps"),
+		reviewOf("u-other-leases", sa, admissionv1.Update, "example.com", "leases"),
+		reviewOf("u-other-events", sa, admissionv1.Create, "example.com", "events"),
+	}
+	uids := func(rows []store.BypassRow) string {
+		var s []string
+		for _, r := range rows {
+			s = append(s, r.UID)
+		}
+		return strings.Join(s, ",")
+	}
+
+	rec := &fakeRec{}
+	h := newHandler(rec)
+	for _, b := range append(append([][]byte{}, noise...), signal...) {
+		if w := post(t, h, b); w.Code != 200 || !strings.Contains(w.Body.String(), `"allowed":true`) {
+			t.Fatalf("not allowed: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if got := uids(rec.got()); got != "u-cm,u-other-leases,u-other-events" {
+		t.Errorf("recorded %s, want only the non-noise writes", got)
+	}
+
+	rec = &fakeRec{}
+	h = newHandler(rec)
+	h.IncludeNoise = true
+	for _, b := range noise {
+		post(t, h, b)
+	}
+	if got := uids(rec.got()); got != "u-lease,u-lease-new,u-event,u-event2" {
+		t.Errorf("with IncludeNoise recorded %s, want every lease and event write", got)
+	}
+}

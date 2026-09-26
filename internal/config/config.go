@@ -41,6 +41,9 @@ type Config struct {
 	// BypassIgnore are the username prefixes whose writes the webhook
 	// never records: Kubernetes' own components.
 	BypassIgnore []string
+	// BypassIncludeNoise makes the webhook record Lease and Event writes,
+	// which it skips by default (BLASTGATE_BYPASS_INCLUDE_NOISE=1).
+	BypassIncludeNoise bool
 }
 
 const (
@@ -152,6 +155,15 @@ func loadListeners(c *Config, getenv func(string) string) error {
 		if c.BypassIgnore = splitList(v); len(c.BypassIgnore) == 0 {
 			return fmt.Errorf("BLASTGATE_BYPASS_IGNORE %q names no username prefixes", v)
 		}
+	}
+	// Only 0 or 1: "true" or "yes" quietly meaning off would leave the
+	// operator believing the Lease and Event writes were being recorded.
+	switch v := getenv("BLASTGATE_BYPASS_INCLUDE_NOISE"); v {
+	case "", "0":
+	case "1":
+		c.BypassIncludeNoise = true
+	default:
+		return fmt.Errorf("BLASTGATE_BYPASS_INCLUDE_NOISE %q must be 1 (record Lease and Event writes) or 0", v)
 	}
 	return nil
 }
