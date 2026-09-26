@@ -384,13 +384,16 @@ func TestLogsCarryNoTokenAndNoQuery(t *testing.T) {
 	px, logs := harness(t, func(w http.ResponseWriter, r *http.Request) {})
 	res := get(t, px.URL+"/api/v1/namespaces/demo/pods/web/exec?command=psql&command=-c&command=SECRET-PASSWORD", "bg_good", nil)
 	res.Body.Close()
+	// The request line is written after the response has gone out, so the
+	// client can get here first: wait for it rather than read at once.
+	all := waitFor(t, logs, `"msg":"request"`)
 	for _, leak := range []string{"SECRET-PASSWORD", "bg_good", "sa-token", "command="} {
-		if strings.Contains(logs.String(), leak) {
-			t.Errorf("log contains %q:\n%s", leak, logs.String())
+		if strings.Contains(all, leak) {
+			t.Errorf("log contains %q:\n%s", leak, all)
 		}
 	}
-	if !strings.Contains(logs.String(), `"human":"alice"`) || !strings.Contains(logs.String(), "/exec") {
-		t.Errorf("log lacks who and what:\n%s", logs.String())
+	if !strings.Contains(all, `"human":"alice"`) || !strings.Contains(all, "/exec") {
+		t.Errorf("log lacks who and what:\n%s", all)
 	}
 }
 
@@ -660,7 +663,7 @@ func TestRefusedVerdictIsWrittenAsAStatusAndNotForwarded(t *testing.T) {
 	if c, _ := d.waitCompleted(t, 1); len(c) != 1 || c[0] != 403 {
 		t.Errorf("completed = %v, want [403]", c)
 	}
-	l := line(logs.String(), `"msg":"refused"`)
+	l := line(waitFor(t, logs, `"msg":"refused"`), `"msg":"refused"`)
 	for _, want := range []string{`"session":"sess-1"`, `"human":"alice"`, `"agent":"coding-agent"`, `"method":"DELETE"`, `"path":"/api/v1/namespaces/demo/pods/web"`, `"code":403`, `"ticket":"abc"`} {
 		if !strings.Contains(l, want) {
 			t.Errorf("refused line lacks %s:\n%s", want, logs.String())
