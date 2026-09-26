@@ -39,8 +39,9 @@ func NewServer(a *Auth, d Deps, uiFS fs.FS) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		// On every /api answer whatever its status, not only the ones
 		// reply writes: a cached 401 or error page is as stale as a
-		// cached queue. /api itself redirects to /api/.
-		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		// cached queue. /api itself redirects to /api/, and so do
+		// //api/me and /./api/me, whose redirects are /api answers too.
+		if isAPIPath(r.URL.Path) {
 			h.Set("Cache-Control", "no-store")
 		}
 		// No Access-Control-* header is ever set: the UI is same-origin,
@@ -61,6 +62,14 @@ func static(uiFS fs.FS) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// The mux matches on the escaped path, so /api%2fme is not an
+		// /api route and lands here, decoded to /api/me. It is not a UI
+		// route either: answering it with index.html would hand a script
+		// probing the API the app, cached, where it expected a refusal.
+		if isAPIPath(r.URL.Path) {
+			fail(w, http.StatusNotFound, errNotFound)
+			return
+		}
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 		if name == "" {
 			name = "index.html"
@@ -78,9 +87,21 @@ func static(uiFS fs.FS) http.Handler {
 	})
 }
 
+// isAPIPath reports a path under /api, as written or once cleaned: the
+// decoded /api/../index.html is an /api path as sent, and //api/me is one
+// once cleaned. Either way it gets the /api treatment, never the UI's.
+func isAPIPath(p string) bool {
+	for _, q := range []string{p, path.Clean("/" + p)} {
+		if q == "/api" || strings.HasPrefix(q, "/api/") {
+			return true
+		}
+	}
+	return false
+}
+
 // serveFile serves name from fsys if it is a regular file, and reports
 // whether it did. ServeContent picks the type from the extension and
-// answers Range and HEAD itself.
+// answers HEAD itself.
 func serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) bool {
 	if !fs.ValidPath(name) {
 		return false
@@ -106,6 +127,11 @@ func serveFile(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) 
 		// upgrade would point at files this binary no longer has.
 		w.Header().Set("Cache-Control", "no-cache")
 	}
+	// Ranges are not offered: the files are small, and ServeContent's
+	// 416 for a bad range strips Cache-Control, so index.html would go out
+	// cacheable. Without the header every request is a plain 200.
+	r.Header.Del("Range")
+	r.Header.Del("If-Range")
 	// The modification time is left zero: embedded files have none, and a
 	// fake one would make Last-Modified lie.
 	http.ServeContent(w, r, name, time.Time{}, rs)

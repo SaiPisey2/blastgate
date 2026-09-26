@@ -59,7 +59,7 @@ func openStreamFrom(t *testing.T, c *client, lastEventID string) (*http.Response
 	if lastEventID != "" {
 		req.Header.Set("Last-Event-ID", lastEventID)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.f.httpClient().Do(req)
 	timer.Stop()
 	if err != nil {
 		cancel()

@@ -133,12 +133,21 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		ReadHeaderTimeout: adminReadHeaderTimeout,
 		ReadTimeout:       adminReadTimeout,
 		// /api/stream outlives this: it sets its own deadline before each
-		// write, which replaces the server's.
+		// write, which replaces the server's, and clears it after.
 		WriteTimeout: adminWriteTimeout,
 		IdleTimeout:  adminIdleTimeout,
 		TLSConfig:    tlsConfig(),
 		ErrorLog:     errorLog,
 	}
+	// Every admin request's context descends from adminCtx, cancelled the
+	// moment Shutdown begins. An open /api/stream never goes idle, so
+	// Shutdown would otherwise wait out its whole 5s for each browser tab
+	// and then warn; cancelled, the streams end at once and the browsers
+	// reconnect to whatever serve comes next.
+	adminCtx, cancelAdmin := context.WithCancel(context.Background())
+	defer cancelAdmin()
+	adminSrv.BaseContext = func(net.Listener) context.Context { return adminCtx }
+	adminSrv.RegisterOnShutdown(cancelAdmin)
 	servers := []*listener{
 		{setting: "BLASTGATE_LISTEN", addr: cfg.Listen, srv: proxySrv},
 		{setting: "BLASTGATE_ADMIN_LISTEN", addr: cfg.AdminListen, srv: adminSrv},

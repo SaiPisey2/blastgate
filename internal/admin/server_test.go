@@ -160,6 +160,14 @@ func TestSPAFallback(t *testing.T) {
 	if resp, _ := send(t, f, "GET", "/approvals", nil); resp.Header.Get("Cache-Control") != "no-cache" {
 		t.Errorf("index.html Cache-Control = %q, want no-cache", resp.Header.Get("Cache-Control"))
 	}
+	// A range the file cannot satisfy would be a 416 that strips
+	// Cache-Control; ranges are ignored, so it is the whole file.
+	for _, rg := range []string{"bytes=9999-", "bytes=0-3"} {
+		resp, body := send(t, f, "GET", "/", map[string]string{"Range": rg})
+		if resp.StatusCode != 200 || body != testIndex || resp.Header.Get("Cache-Control") != "no-cache" {
+			t.Errorf("Range %s: %d Cache-Control %q body %q", rg, resp.StatusCode, resp.Header.Get("Cache-Control"), body)
+		}
+	}
 	if resp, body := send(t, f, "HEAD", "/", nil); resp.StatusCode != 200 || body != "" {
 		t.Errorf("HEAD /: %d %q", resp.StatusCode, body)
 	}
@@ -181,11 +189,23 @@ func TestAPIIsNoStore(t *testing.T) {
 		{"POST", "/api/logout", cookie, 403},
 		{"POST", "/api/login", nil, 401},
 		{"GET", "/api", nil, http.StatusTemporaryRedirect},
+		// The mux routes on the escaped path, so these reach the static
+		// handler; decoded they are /api paths and must not get the app.
+		{"GET", "/api%2fme", cookie, 404},
+		{"GET", "/api%2F..%2Findex.html", nil, 404},
+		{"GET", "/api%2fme", map[string]string{"Range": "bytes=9999-"}, 404},
+		// Paths the mux cleans and redirects: the redirect is an /api answer.
+		{"GET", "//api/me", nil, http.StatusTemporaryRedirect},
+		{"GET", "/./api/me", nil, http.StatusTemporaryRedirect},
+		{"GET", "/x/../api/me", nil, http.StatusTemporaryRedirect},
 	} {
-		resp, _ := send(t, f, tc.method, tc.path, tc.hdr)
+		resp, body := send(t, f, tc.method, tc.path, tc.hdr)
 		if resp.StatusCode != tc.code || resp.Header.Get("Cache-Control") != "no-store" {
 			t.Errorf("%s %s: %d Cache-Control %q, want %d no-store", tc.method, tc.path, resp.StatusCode,
 				resp.Header.Get("Cache-Control"), tc.code)
+		}
+		if strings.Contains(body, "<script") {
+			t.Errorf("%s %s: answered with the app", tc.method, tc.path)
 		}
 	}
 	// Static files are not /api: the bundle may be cached.
@@ -226,5 +246,101 @@ func TestStreamThroughNewServer(t *testing.T) {
 			t.Errorf("event %q %s, want the new audit row", ev.name, ev.data)
 		}
 		break
+	}
+}
+
+// fastWrite sets the stream's per-write deadline for one test.
+func fastWrite(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := streamWriteTimeout
+	streamWriteTimeout = d
+	t.Cleanup(func() { streamWriteTimeout = old })
+}
+
+// newTLSServerFixture serves NewServer over TLS as serve does: HTTP/2
+// when h2 is set (browsers negotiate it on the admin listener), and with
+// the listener-wide read and write timeouts the admin server has, scaled
+// down.
+func newTLSServerFixture(t *testing.T, h2 bool, timeout time.Duration) *apiFixture {
+	t.Helper()
+	f := newAPIFixture(t)
+	srv := httptest.NewUnstartedServer(NewServer(f.auth, Deps{Store: f.st, Approvals: f.svc, PolicySource: "embedded default",
+		PolicyText: []byte(testPolicyText), Log: slog.New(slog.DiscardHandler)}, testUI))
+	srv.EnableHTTP2 = h2
+	srv.Config.ReadTimeout, srv.Config.WriteTimeout = timeout, timeout
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	f.srv, f.hc = srv, srv.Client()
+	return f
+}
+
+// holdIdle reads an idle stream for d and returns how many heartbeats
+// came, failing if the stream ended (a reset or a closed connection)
+// before d was up.
+func holdIdle(t *testing.T, ch <-chan sseEvent, d time.Duration) int {
+	t.Helper()
+	pings := 0
+	deadline := time.After(d)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("the idle stream ended after %d heartbeats", pings)
+			}
+			if ev.name == ":" {
+				pings++
+			}
+		case <-deadline:
+			return pings
+		}
+	}
+}
+
+// Over HTTP/2 a write deadline is a timer on the whole stream: left set
+// after a write, it fires while the stream sits idle and resets it. The
+// write timeout here is far shorter than the heartbeat, so a deadline
+// that outlived its write would kill the stream before the first ping.
+func TestIdleStreamSurvivesOverHTTP2(t *testing.T) {
+	fastStream(t, 20*time.Millisecond, 150*time.Millisecond)
+	fastWrite(t, 30*time.Millisecond)
+	f := newTLSServerFixture(t, true, 100*time.Millisecond)
+	c := f.signIn(t, "bob")
+	resp, ch := openStream(t, c)
+	if resp.StatusCode != 200 || resp.ProtoMajor != 2 {
+		t.Fatalf("stream %d over HTTP/%d, want 200 over HTTP/2", resp.StatusCode, resp.ProtoMajor)
+	}
+	if ev := next(t, ch, 2*time.Second); ev.name != "hello" {
+		t.Fatalf("first event %q", ev.name)
+	}
+	if pings := holdIdle(t, ch, 1200*time.Millisecond); pings < 4 {
+		t.Errorf("%d heartbeats in 1.2s at one per 150ms", pings)
+	}
+}
+
+// The same over HTTP/1.1, where the listener's ReadTimeout is a deadline
+// on the connection that a long-lived response outlives.
+func TestIdleStreamSurvivesOverHTTP1(t *testing.T) {
+	fastStream(t, 20*time.Millisecond, 150*time.Millisecond)
+	fastWrite(t, 30*time.Millisecond)
+	f := newTLSServerFixture(t, false, 100*time.Millisecond)
+	c := f.signIn(t, "bob")
+	resp, ch := openStream(t, c)
+	if resp.StatusCode != 200 || resp.ProtoMajor != 1 {
+		t.Fatalf("stream %d over HTTP/%d, want 200 over HTTP/1.1", resp.StatusCode, resp.ProtoMajor)
+	}
+	if ev := next(t, ch, 2*time.Second); ev.name != "hello" {
+		t.Fatalf("first event %q", ev.name)
+	}
+	if pings := holdIdle(t, ch, 1200*time.Millisecond); pings < 4 {
+		t.Errorf("%d heartbeats in 1.2s at one per 150ms", pings)
+	}
+}
+
+// The shipped defaults keep a heartbeat inside every write timeout, so
+// even a deadline that somehow outlived its write is renewed before it
+// could fire on an idle stream.
+func TestHeartbeatIsShorterThanTheWriteTimeout(t *testing.T) {
+	if streamHeartbeat >= streamWriteTimeout {
+		t.Errorf("heartbeat %v, write timeout %v: the heartbeat must come first", streamHeartbeat, streamWriteTimeout)
 	}
 }

@@ -139,6 +139,16 @@ type apiFixture struct {
 	svc    *approval.Service
 	api    *api
 	srv    *httptest.Server
+	// hc, when set, is the client signIn and openStream use: a TLS or
+	// HTTP/2 server needs a client that trusts it.
+	hc *http.Client
+}
+
+func (f *apiFixture) httpClient() *http.Client {
+	if f.hc != nil {
+		return f.hc
+	}
+	return http.DefaultClient
 }
 
 const testPolicyText = "default: hold\nunmeasured: hold\n"
@@ -183,7 +193,7 @@ func (f *apiFixture) signIn(t *testing.T, name string) *client {
 	b, _ := json.Marshal(map[string]string{"token": tok})
 	req, _ := http.NewRequest("POST", f.srv.URL+"/api/login", strings.NewReader(string(b)))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := f.httpClient().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

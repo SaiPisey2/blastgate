@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -388,5 +389,76 @@ func TestWarnUncovered(t *testing.T) {
 		if got := strings.Contains(b.String(), "does not cover"); got != warn {
 			t.Errorf("%s: warned %v, want %v: %s", addr, got, warn, b.String())
 		}
+	}
+}
+
+// An open /api/stream must not hold shutdown for its whole budget: the
+// stream is cancelled when shutdown begins, over either protocol a
+// browser may use.
+func TestServeShutdownEndsOpenStreams(t *testing.T) {
+	for _, h2 := range []bool{true, false} {
+		name := "http1.1"
+		if h2 {
+			name = "http2"
+		}
+		t.Run(name, func(t *testing.T) {
+			env, a := listenerEnv(t, false, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan int, 1)
+			logs := &syncBuf{}
+			go func() { done <- serveCmd(ctx, env, logs) }()
+			waitListening(t, a["admin"])
+			tok := approverNewToken(t, env, "bob")
+			c := caClient(t, a["data"])
+			c.Transport.(*http.Transport).ForceAttemptHTTP2 = h2
+			c.Timeout = 0
+			b, _ := json.Marshal(map[string]string{"token": tok})
+			resp, err := c.Post("https://"+a["admin"]+"/api/login", "application/json", bytes.NewReader(b))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			req, _ := http.NewRequest("GET", "https://"+a["admin"]+"/api/stream", nil)
+			req.AddCookie(resp.Cookies()[0])
+			sr, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sr.Body.Close()
+			if want := map[bool]int{true: 2, false: 1}[h2]; sr.StatusCode != 200 || sr.ProtoMajor != want {
+				t.Fatalf("stream %d over HTTP/%d, want 200 over HTTP/%d", sr.StatusCode, sr.ProtoMajor, want)
+			}
+			// id: 0, then event: hello.
+			br := bufio.NewReader(sr.Body)
+			var head string
+			for i := 0; i < 2; i++ {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					t.Fatal(err)
+				}
+				head += line
+			}
+			if !strings.Contains(head, "event: hello") {
+				t.Fatalf("stream began %q, want hello", head)
+			}
+
+			began := time.Now()
+			cancel()
+			select {
+			case code := <-done:
+				if took := time.Since(began); took > 2*time.Second {
+					t.Errorf("shutdown took %v with a stream open; the budget is 5s and a stream must not use it", took)
+				}
+				if code != 0 {
+					t.Errorf("exit %d", code)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("serve did not shut down")
+			}
+			if strings.Contains(logs.String(), `"msg":"shutdown"`) {
+				t.Errorf("shutdown warned:\n%s", logs.String())
+			}
+		})
 	}
 }

@@ -29,10 +29,13 @@ var (
 	// streamWriteTimeout bounds each write. A browser that stops reading
 	// (a frozen tab, a dead laptop on a half-open connection) fills the
 	// socket buffers and then blocks the write forever; the deadline turns
-	// that into an error that ends the stream and frees its slot. Set per
-	// write, it also keeps a listener-wide WriteTimeout from cutting a
-	// healthy stream off mid-life.
-	streamWriteTimeout = 10 * time.Second
+	// that into an error that ends the stream and frees its slot. Set
+	// before each write and cleared after it, it also keeps a
+	// listener-wide WriteTimeout from cutting a healthy stream off
+	// mid-life. It is longer than the heartbeat, so even a deadline left
+	// behind is renewed by the next ping before it can fire on an idle
+	// stream (TestHeartbeatIsShorterThanTheWriteTimeout).
+	streamWriteTimeout = 20 * time.Second
 	// streamBatch is one AuditAfter page; streamCatchUp bounds how many
 	// rows one poll sends, looping over pages, so a burst is drained
 	// without waiting a second per page but one poll cannot run unbounded
@@ -97,13 +100,27 @@ type sse struct {
 func (s *sse) write(b []byte) error {
 	// A writer without deadlines (a wrapper that does not Unwrap) only
 	// loses the protection against a client that never reads.
-	if err := s.rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+	if err := s.setDeadline(time.Now().Add(streamWriteTimeout)); err != nil {
 		return err
 	}
 	if _, err := s.w.Write(b); err != nil {
 		return err
 	}
-	return s.rc.Flush()
+	if err := s.rc.Flush(); err != nil {
+		return err
+	}
+	// The deadline covers the write and nothing after it. Over HTTP/2 it
+	// is a timer on the whole stream that fires whether or not anything is
+	// being written: left set, it resets an idle stream with
+	// INTERNAL_ERROR one write timeout after the last event.
+	return s.setDeadline(time.Time{})
+}
+
+func (s *sse) setDeadline(t time.Time) error {
+	if err := s.rc.SetWriteDeadline(t); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
 }
 
 // event sends one named event, with an id line when id is not "". json.Marshal never emits a raw newline (it
