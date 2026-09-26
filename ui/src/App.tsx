@@ -5,8 +5,8 @@ import Shell from './components/Shell';
 import EmptyState from './components/EmptyState';
 import SignIn from './views/SignIn';
 import Feed from './views/Feed';
-import Queue from './views/Queue';
-import Approval from './views/Approval';
+import Waiting from './views/Waiting';
+import Details from './views/Details';
 import Agents from './views/Agents';
 import PolicyView from './views/PolicyView';
 import Bypass from './views/Bypass';
@@ -58,7 +58,7 @@ export default function App() {
 
   return (
     <Shell route={route} pending={pending} me={me} onSignOut={() => void logout().catch(() => {})}>
-      <Screen route={route} />
+      <Screen route={route} me={me.name} />
     </Shell>
   );
 }
@@ -66,13 +66,13 @@ export default function App() {
 // Screen maps a route to its view. Until the new screens land, each new
 // route mounts the old view that does the same job, so nothing an
 // approver can reach today goes missing in between.
-function Screen({ route }: { route: Route }) {
+function Screen({ route, me }: { route: Route; me: string }) {
   switch (route.name) {
     case 'waiting':
     // login: signed in but still on #/login for the moment before the
     // effect above sends the approver back to where they were.
     case 'login':
-      return <Queue />;
+      return <Waiting me={me} />;
     case 'activity':
       return <Feed />;
     case 'outside':
@@ -82,7 +82,7 @@ function Screen({ route }: { route: Route }) {
     case 'policy':
       return <PolicyView />;
     case 'approval':
-      return <Approval id={route.id} />;
+      return <Details id={route.id} me={me} />;
     case 'notfound':
       return (
         <div className="page">

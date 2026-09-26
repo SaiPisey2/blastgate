@@ -1121,3 +1121,431 @@
   width: 100%;
   min-height: var(--s-11);
 }
+
+/* === Waiting (Task 6) === */
+
+/* Wider than the old 880px page: a list and a decision side by side. */
+.page.waiting,
+.page.details {
+  max-width: 1200px;
+}
+
+.waiting-title {
+  margin: 0 0 var(--s-4);
+  font-size: var(--fs-15);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
+
+.waiting-note {
+  margin: 0 0 var(--s-4);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.waiting-error,
+.details-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-6);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-ctl);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  overflow-wrap: anywhere;
+}
+
+.waiting-loading,
+.details-loading {
+  color: var(--text-muted);
+}
+
+/* Names run to 253 characters with no spaces: break them anywhere
+   rather than push the page sideways at 360px. */
+.waiting-wrap {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.waiting-one {
+  max-width: 720px;
+  margin: 0 auto;
+  padding-top: var(--s-6);
+}
+
+.waiting-split {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+}
+
+.waiting-list {
+  margin: 0;
+  padding: var(--s-2) 0;
+  list-style: none;
+  border-right: 1px solid var(--line);
+}
+
+/* The list holds focus and names the chosen row with
+   aria-activedescendant, so the ring goes inside its edge. */
+.waiting-list:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.waiting-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  min-width: 0;
+  padding: var(--s-3) var(--s-5);
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+
+.waiting-row:hover {
+  background: var(--surface);
+}
+
+.waiting-row.is-selected {
+  background: var(--raised);
+}
+
+.waiting-dot {
+  flex: none;
+  font-size: 0.7em;
+}
+
+.waiting-dot.tone-danger {
+  color: var(--danger-fg);
+}
+
+.waiting-dot.tone-caution {
+  color: var(--caution-fg);
+}
+
+.waiting-dot.tone-ok {
+  color: var(--ok-fg);
+}
+
+.waiting-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waiting-sentence {
+  color: var(--text);
+}
+
+.waiting-meta {
+  margin-top: 2px;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.waiting-panel {
+  min-width: 0;
+  padding: var(--s-10) var(--s-10) var(--s-12);
+}
+
+/* === Details (Task 6) === */
+
+.details-back {
+  margin: 0 0 var(--s-6);
+  font-size: var(--fs-13);
+}
+
+.details-back a {
+  color: var(--link);
+  text-underline-offset: 3px;
+}
+
+/* Two columns from 900px; below that the tree follows the decision. */
+.details-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-10);
+}
+
+@media (min-width: 900px) {
+  .details-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .details-main {
+    padding-right: var(--s-9);
+    border-right: 1px solid var(--line);
+  }
+
+  .details-affected {
+    padding-left: var(--s-9);
+  }
+}
+
+.details-main,
+.details-affected {
+  min-width: 0;
+}
+
+.big-numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--s-3);
+  margin: var(--s-8) 0 var(--s-6);
+  padding: 0;
+  list-style: none;
+}
+
+.big-number {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+}
+
+.big-number-value {
+  font-size: var(--fs-22);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.big-number-label {
+  flex-basis: 100%;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.big-number-glyph {
+  font-size: 0.75em;
+}
+
+.big-number.tone-danger .big-number-value,
+.big-number.tone-danger .big-number-glyph {
+  color: var(--danger-fg);
+}
+
+.details-tech {
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-4);
+}
+
+.details-tech > summary {
+  min-height: 24px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.details-tech > summary:hover {
+  color: var(--text);
+}
+
+.details-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s-1) var(--s-4);
+  margin: var(--s-4) 0;
+  font-size: var(--fs-13);
+}
+
+.details-facts dt {
+  color: var(--text-muted);
+}
+
+.details-facts dd {
+  margin: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.details-action {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-13);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.details-affected-title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--fs-15);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* === Impact tree (Task 6) === */
+
+.itree-wrap {
+  min-width: 0;
+}
+
+.itree-alert {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-ctl);
+  background: var(--danger-bg);
+}
+
+.itree-alert h3 {
+  margin: 0 0 var(--s-1);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--danger-fg);
+}
+
+.itree-alert ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text);
+  font-size: var(--fs-13);
+}
+
+.itree-none {
+  color: var(--text-muted);
+}
+
+.itree,
+.itree-group,
+.itree-why {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.itree {
+  font-size: var(--fs-15);
+}
+
+/* Height animates between 0 and auto; anything taller than the running
+   height must not paint over the rows below. */
+.itree-group {
+  overflow: hidden;
+  padding-left: var(--s-5);
+}
+
+.itree-item:focus {
+  outline: none;
+}
+
+.itree-item:focus-visible > .itree-row {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.itree-row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  min-width: 0;
+  min-height: 24px;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-tag);
+}
+
+.itree-branch {
+  cursor: pointer;
+}
+
+.itree-branch:hover {
+  background: var(--surface);
+}
+
+/* A chevron drawn from two borders: no icon font, and no glyph that
+   falls outside the vendored Plex subset. */
+.itree-caret {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--s-1);
+  border-right: 1.5px solid var(--text-muted);
+  border-bottom: 1.5px solid var(--text-muted);
+  transform: translateY(-2px) rotate(-45deg);
+  transition: transform 120ms ease-out;
+}
+
+.itree-caret.is-open {
+  transform: translateY(-4px) rotate(45deg);
+}
+
+.itree-caret.is-leaf {
+  border-color: transparent;
+}
+
+.itree-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-2);
+  min-width: 0;
+  flex: 1;
+}
+
+.itree-ns {
+  color: var(--text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.itree-kind {
+  color: var(--text-muted);
+}
+
+.itree-name {
+  color: var(--text);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.itree-marker {
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.itree-marker.tone-danger {
+  color: var(--danger-fg);
+  font-weight: 500;
+}
+
+.itree-marker.tone-caution {
+  color: var(--caution-fg);
+}
+
+.itree-count {
+  margin-left: auto;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.itree-why {
+  padding: 0 var(--s-2) var(--s-1) calc(var(--s-2) + 8px + var(--s-1) + var(--s-2));
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-row,
+  .itree-caret {
+    transition: none;
+  }
+}
