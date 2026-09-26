@@ -1,0 +1,107 @@
+/* Element defaults for the console. Tokens live in tokens.css.
+
+   Fonts are IBM Plex, vendored as woff2 (Latin subset) from IBM's
+   official release under the SIL Open Font License 1.1; the licence ships
+   beside them in the build as assets/OFL.txt. They are served as files
+   from 'self' because the CSP has no font-src exception and a data: font
+   would be blocked. font-display: swap keeps text readable while a face
+   is still loading instead of leaving the page blank. */
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-Regular-Latin1.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-Medium-Latin1.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-SemiBold-Latin1.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/IBMPlexMono-Regular-Latin1.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexMono-Medium-Latin1.woff2') format('woff2');
+}
+
+body {
+  font: var(--fs-15)/1.5 var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  /* Counts, ages and replica numbers line up in columns instead of
+     jittering as they update. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Identifiers are read character by character: ligatures could merge
+   "->" or "!=" in a CEL expression into one glyph, and Plex Mono's
+   alternate zero (the "zero" feature, present in the shipped subset)
+   keeps 0 apart from O in a pod or namespace name. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  font-feature-settings: 'zero';
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--focus);
+  color: var(--bg);
+}
+
+/* Firefox and current Chromium read these; the -webkit- rules below cover
+   Safari, which ignores scrollbar-color. */
+html {
+  scrollbar-color: var(--line-strong) var(--bg);
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 3px solid var(--bg);
+  border-radius: var(--r-ctl);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
