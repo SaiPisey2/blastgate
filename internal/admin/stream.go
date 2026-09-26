@@ -1,9 +1,10 @@
 package admin
 
 // This file is GET /api/stream: Server-Sent Events that keep the approver
-// UI live. hello names the newest audit id at connect (everything up to
-// it the feed fetched itself); after it come audit (one FeedRow per new
-// row), approvals ({count, ids} of the pending queue, when it changes),
+// UI live. hello names the audit id the stream starts after: the newest
+// at connect (everything up to it the feed fetched itself), or the
+// browser's Last-Event-ID when it reconnects. After it come audit (one
+// FeedRow per new row, its row id as the event id), approvals ({count, ids} of the pending queue, when it changes),
 // a ": ping" comment as a heartbeat, and expired when the session ends.
 
 import (
@@ -11,7 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -103,20 +106,46 @@ func (s *sse) write(b []byte) error {
 	return s.rc.Flush()
 }
 
-// event sends one named event. json.Marshal never emits a raw newline (it
+// event sends one named event, with an id line when id is not "". json.Marshal never emits a raw newline (it
 // escapes them in strings and compacts embedded RawMessage), so the data
 // is always one line: a stored action holding "\nevent: expired" cannot
 // split into a second, forged event.
-func (s *sse) event(name string, v any) error {
+func (s *sse) event(name, id string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	msg := make([]byte, 0, len(b)+len(name)+16)
+	msg := make([]byte, 0, len(b)+len(name)+len(id)+24)
+	// Events without an id (approvals, expired) leave the browser's last
+	// event id as it was, so it always names an audit position.
+	if id != "" {
+		msg = append(msg, "id: "+id+"\n"...)
+	}
 	msg = append(msg, "event: "+name+"\ndata: "...)
 	msg = append(msg, b...)
 	msg = append(msg, "\n\n"...)
 	return s.write(msg)
+}
+
+// lastEventIDPattern is plain base-10 digits: strconv alone would also
+// take a sign ("+5", "-0"), which no event this stream sent ever carried.
+var lastEventIDPattern = regexp.MustCompile(`^[0-9]{1,19}$`)
+
+// resumeCursor reads a Last-Event-ID header. Only an id this table could
+// have handed out counts: 0 through the current newest id. Anything else
+// (garbage, a negative, an id from the future or from another database)
+// is ignored and the stream starts from now, as a fresh connect does; a
+// far-future cursor would otherwise silence the feed until the table
+// caught up to it.
+func resumeCursor(h string, newest int64) (int64, bool) {
+	if !lastEventIDPattern.MatchString(h) {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(h, 10, 64)
+	if err != nil || n < 0 || n > newest {
+		return 0, false
+	}
+	return n, true
 }
 
 type pendingEvent struct {
@@ -153,6 +182,12 @@ func (h *api) stream(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 	if len(newest) > 0 {
 		lastID = newest[0].ID
 	}
+	// A reconnecting EventSource sends the id of the last event it got.
+	// Resuming there keeps the rows written while it was away (P2-R24);
+	// the per-poll cap still bounds how fast a far-back cursor catches up.
+	if n, ok := resumeCursor(r.Header.Get("Last-Event-ID"), lastID); ok {
+		lastID = n
+	}
 	poll, beat := streamPoll, streamHeartbeat
 
 	hdr := w.Header()
@@ -163,7 +198,11 @@ func (h *api) stream(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 	hdr.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	s := &sse{w: w, rc: http.NewResponseController(w)}
-	if s.event("hello", map[string]int64{"last_id": lastID}) != nil {
+	// hello reports the cursor the stream starts from, and carries it as
+	// the event id: a browser that reconnects before any audit row
+	// arrives then still sends a Last-Event-ID, and nothing written in
+	// between is lost.
+	if s.event("hello", strconv.FormatInt(lastID, 10), map[string]int64{"last_id": lastID}) != nil {
 		return
 	}
 
@@ -217,7 +256,7 @@ func (st *streamState) poll(ctx context.Context) bool {
 	if errors.Is(err, store.ErrNotFound) || (err == nil && !h.auth.live(u)) {
 		// data is required: EventSource drops an event with no data
 		// line without dispatching it, and the UI would never sign out.
-		st.s.event("expired", struct{}{})
+		st.s.event("expired", "", struct{}{})
 		return false
 	}
 	if err != nil {
@@ -234,7 +273,7 @@ func (st *streamState) poll(ctx context.Context) bool {
 	}
 	slices.Sort(ids)
 	if !st.sent || !slices.Equal(ids, st.pending) {
-		if st.s.event("approvals", pendingEvent{Count: len(ids), IDs: ids}) != nil {
+		if st.s.event("approvals", "", pendingEvent{Count: len(ids), IDs: ids}) != nil {
 			return false
 		}
 		st.pending, st.sent = ids, true
@@ -247,7 +286,7 @@ func (st *streamState) poll(ctx context.Context) bool {
 			return st.failed(ctx, "stream audit", err)
 		}
 		for _, row := range rows {
-			if st.s.event("audit", ToFeedRow(row)) != nil {
+			if st.s.event("audit", strconv.FormatInt(row.ID, 10), ToFeedRow(row)) != nil {
 				return false
 			}
 			st.lastID = row.ID

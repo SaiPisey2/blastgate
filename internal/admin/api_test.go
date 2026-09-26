@@ -131,25 +131,27 @@ func (c *countingStore) SetApprovalStatus(ctx context.Context, id, from, to stri
 }
 
 type apiFixture struct {
-	st    *store.Store
-	cs    *countingStore
-	clock *clock
-	auth  *Auth
-	svc   *approval.Service
-	api   *api
-	srv   *httptest.Server
+	st     *store.Store
+	dbPath string
+	cs     *countingStore
+	clock  *clock
+	auth   *Auth
+	svc    *approval.Service
+	api    *api
+	srv    *httptest.Server
 }
 
 const testPolicyText = "default: hold\nunmeasured: hold\n"
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "blastgate.db"))
+	path := filepath.Join(t.TempDir(), "blastgate.db")
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	f := &apiFixture{st: st, cs: &countingStore{Store: st}, clock: &clock{t: t0}}
+	f := &apiFixture{st: st, dbPath: path, cs: &countingStore{Store: st}, clock: &clock{t: t0}}
 	log := slog.New(slog.DiscardHandler)
 	f.auth = NewAuth(st, log)
 	f.auth.Now = f.clock.Now

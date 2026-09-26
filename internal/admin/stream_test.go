@@ -3,6 +3,7 @@ package admin
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -21,6 +22,7 @@ import (
 // as data. dataLines counts the data: lines, so a test can see that a
 // JSON payload never spilled onto a second line.
 type sseEvent struct {
+	id        string
 	name      string
 	data      string
 	dataLines int
@@ -41,12 +43,22 @@ func fastStream(t *testing.T, poll, beat time.Duration) {
 // ends the stream. Closing the response body is the browser leaving.
 func openStream(t *testing.T, c *client) (*http.Response, <-chan sseEvent) {
 	t.Helper()
+	return openStreamFrom(t, c, "")
+}
+
+// openStreamFrom is openStream sending lastEventID as Last-Event-ID, as a
+// browser's EventSource does when it reconnects ("" sends none).
+func openStreamFrom(t *testing.T, c *client, lastEventID string) (*http.Response, <-chan sseEvent) {
+	t.Helper()
 	// A stream whose headers never arrive (nothing flushed) must fail the
 	// test, not hang it: Do waits for headers with no timeout of its own.
 	ctx, cancel := context.WithCancel(context.Background())
 	timer := time.AfterFunc(3*time.Second, cancel)
 	req, _ := http.NewRequestWithContext(ctx, "GET", c.f.srv.URL+"/api/stream", nil)
 	req.Header.Set("Cookie", SessionCookie+"="+c.cookie)
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	timer.Stop()
 	if err != nil {
@@ -76,6 +88,8 @@ func openStream(t *testing.T, c *client) (*http.Response, <-chan sseEvent) {
 				ev, data = sseEvent{}, nil
 			case strings.HasPrefix(line, ":"):
 				ch <- sseEvent{name: ":", data: strings.TrimSpace(line[1:])}
+			case strings.HasPrefix(line, "id: "):
+				ev.id = line[len("id: "):]
 			case strings.HasPrefix(line, "event: "):
 				ev.name = line[len("event: "):]
 			case strings.HasPrefix(line, "data: "):
@@ -338,8 +352,16 @@ func TestStreamEndsWhenSessionRevoked(t *testing.T) {
 				t.Fatalf("logout: %d %s", code, body)
 			}
 		},
-		"approver revoked": func(t *testing.T, f *apiFixture, c *client) {
-			if err := f.st.RevokeApprover(context.Background(), "ap-"+c.name, f.clock.Now()); err != nil {
+		// Only the approver row: RevokeApprover would also revoke the
+		// session and so never reach the ApproverRevoked check. This is
+		// the state a login racing RevokeApprover's sweep leaves behind.
+		"approver revoked, session not": func(t *testing.T, f *apiFixture, c *client) {
+			db, err := sql.Open("sqlite", "file:"+f.dbPath+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec(`UPDATE approvers SET revoked_at = ? WHERE id = ?`, f.clock.Now().UnixMilli(), "ap-"+c.name); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -399,7 +421,9 @@ func sessionFor(t *testing.T, f *apiFixture, name string) *client {
 }
 
 func TestStreamLimits(t *testing.T) {
-	fastStream(t, 20*time.Millisecond, time.Hour)
+	// No polling: 32 streams polling every few milliseconds starve the
+	// server on one CPU under -race, and slots do not depend on polls.
+	fastStream(t, time.Hour, time.Hour)
 	f := newAPIFixture(t)
 	want429 := `{"error":"too many live streams"} application/json`
 
@@ -455,7 +479,9 @@ func TestStreamLimits(t *testing.T) {
 }
 
 func TestStreamSlotsFreeWhenTheClientLeaves(t *testing.T) {
-	fastStream(t, 20*time.Millisecond, time.Hour)
+	// No polling: 32 streams polling every few milliseconds starve the
+	// server on one CPU under -race, and slots do not depend on polls.
+	fastStream(t, time.Hour, time.Hour)
 	f := newAPIFixture(t)
 	a := f.signIn(t, "a")
 	for round := range 3 {
@@ -513,4 +539,80 @@ func TestStreamDropsAClientThatNeverReads(t *testing.T) {
 		}
 	}
 	f.waitSlots(t, 5*time.Second)
+}
+
+// auditIDs reads audit events until none arrives for a while, returning
+// their request ids and checking each carries id: equal to its row id.
+func auditIDs(t *testing.T, ch <-chan sseEvent, quiet time.Duration) []string {
+	t.Helper()
+	var got []string
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return got
+			}
+			if ev.name != "audit" {
+				continue
+			}
+			row := decode[map[string]any](t, ev.data)
+			if ev.id != fmt.Sprint(int64(row["id"].(float64))) {
+				t.Errorf("event id %q, row id %v", ev.id, row["id"])
+			}
+			got = append(got, row["request_id"].(string))
+		case <-time.After(quiet):
+			return got
+		}
+	}
+}
+
+// A browser that reconnects sends the id of the last event it saw; the
+// stream resumes after it, so rows written while it was away are not lost
+// (P2-R24). Anything that is not an id the table could have produced
+// falls back to "from now", as a fresh connect does.
+func TestStreamResumesFromLastEventID(t *testing.T) {
+	fastStream(t, 10*time.Millisecond, time.Hour)
+	f := newAPIFixture(t)
+	c := f.signIn(t, "carol")
+	for i := range 3 {
+		appendRow(t, f, fmt.Sprintf("old-%d", i))
+	}
+	rows, _ := f.st.AuditPage(context.Background(), store.AuditFilter{Limit: 3})
+	maxID, firstID := rows[0].ID, rows[2].ID
+
+	// Resume after the first row: the other two are replayed, in order,
+	// and hello reports the cursor the stream resumes from.
+	// Each stream is closed before the next, and its slot awaited: one
+	// session may hold only four.
+	resp, ch := openStreamFrom(t, c, fmt.Sprint(firstID))
+	hello := next(t, ch, 3*time.Second)
+	if hello.name != "hello" || hello.id != fmt.Sprint(firstID) || decode[map[string]int64](t, hello.data)["last_id"] != firstID {
+		t.Errorf("hello on resume: %+v, want last_id %d", hello, firstID)
+	}
+	if got := auditIDs(t, ch, 150*time.Millisecond); strings.Join(got, ",") != "old-1,old-2" {
+		t.Errorf("resume replayed %v, want old-1,old-2", got)
+	}
+	resp.Body.Close()
+	f.waitSlots(t, 3*time.Second)
+
+	// 0 is a valid cursor: everything is replayed.
+	resp, ch = openStreamFrom(t, c, "0")
+	if got := auditIDs(t, ch, 150*time.Millisecond); strings.Join(got, ",") != "old-0,old-1,old-2" {
+		t.Errorf("resume from 0 replayed %v", got)
+	}
+	resp.Body.Close()
+	f.waitSlots(t, 3*time.Second)
+
+	for _, bad := range []string{"abc", "-1", fmt.Sprint(maxID + 1), "+1", "1e3", "1 2", "0x1", "99999999999999999999"} {
+		resp, ch := openStreamFrom(t, c, bad)
+		hello := next(t, ch, 3*time.Second)
+		if hello.id != fmt.Sprint(maxID) || decode[map[string]int64](t, hello.data)["last_id"] != maxID {
+			t.Errorf("Last-Event-ID %q: hello %s, want last_id %d", bad, hello.data, maxID)
+		}
+		if got := auditIDs(t, ch, 60*time.Millisecond); len(got) != 0 {
+			t.Errorf("Last-Event-ID %q replayed %v", bad, got)
+		}
+		resp.Body.Close()
+		f.waitSlots(t, 3*time.Second)
+	}
 }
