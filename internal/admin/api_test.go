@@ -874,12 +874,16 @@ func TestPolicyReplayStopsAtTheRowCap(t *testing.T) {
 	replayRowCap = 3
 	t.Cleanup(func() { replayRowCap = old })
 	terminal := engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"}
+	// Each row is a minute newer than the one before and carries its own
+	// request id, so which rows were evaluated is visible in the changes.
+	next := 0
 	seed := func(n int) {
-		for i := range n {
-			r := decisionRow(t0.Add(-time.Duration(10-i)*time.Minute), fmt.Sprintf("r%d", i), "data-destruction", "hold", terminal)
+		for range n {
+			r := decisionRow(t0.Add(-time.Duration(10-next)*time.Minute), fmt.Sprintf("r%d", next), "data-destruction", "hold", terminal)
 			if err := f.st.AppendAudit(context.Background(), r); err != nil {
 				t.Fatal(err)
 			}
+			next++
 		}
 	}
 	c := f.signIn(t, "carol")
@@ -902,9 +906,15 @@ func TestPolicyReplayStopsAtTheRowCap(t *testing.T) {
 	if res["evaluated"] != 3.0 || res["changed"] != 3.0 || res["truncated"] != true {
 		t.Errorf("past the cap: %v", res)
 	}
-	// The oldest rows are the ones evaluated.
-	if ch := res["changes"].([]any); len(ch) != 3 || ch[0].(map[string]any)["request_id"] != "r0" {
-		t.Errorf("changes %v", ch)
+	// The newest rows are the ones evaluated (P2-R21), in the order they
+	// happened: an approver checking a policy change cares about what
+	// the gateway is seeing now, not what it saw a month ago.
+	var ids []string
+	for _, c := range res["changes"].([]any) {
+		ids = append(ids, c.(map[string]any)["request_id"].(string))
+	}
+	if strings.Join(ids, ",") != "r2,r3,r4" {
+		t.Errorf("evaluated %v, want the newest three r2,r3,r4 oldest first", ids)
 	}
 }
 

@@ -137,7 +137,7 @@ describe('Policy', () => {
     expect(await screen.findByText(/no request would have been decided differently/i)).toBeTruthy();
   });
 
-  it('a truncated replay says it covered only the first decisions', async () => {
+  it('a truncated replay says it covered only the most recent decisions', async () => {
     mockFetch({
       'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
       'POST /api/policy/replay': { body: { ...RESULT, evaluated: 100000, truncated: true } },
@@ -147,7 +147,7 @@ describe('Policy', () => {
     await waitFor(() => expect(candidate.value).toBe(LOADED));
     await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
     const result = await screen.findByRole('region', { name: 'Replay result' });
-    expect(within(result).getByText('Only the first 100000 decisions in this window were replayed.')).toBeTruthy();
+    expect(within(result).getByText('Only the most recent 100000 decisions in this window were replayed.')).toBeTruthy();
   });
 
   it('a replay refused because another is running shows the error as text', async () => {

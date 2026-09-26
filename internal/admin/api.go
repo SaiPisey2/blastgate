@@ -563,7 +563,9 @@ func (h *api) replay(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 		return
 	}
 	// One row past the cap says whether the window held more than was
-	// evaluated, without counting the whole window.
+	// evaluated, without counting the whole window. The rows are the
+	// window's newest, oldest first, so the extra one is the oldest and
+	// is dropped from the front (P2-R21).
 	rowCap := replayRowCap
 	rows, err := h.st.AuditSinceLimit(r.Context(), h.auth.Now().Add(-time.Duration(req.SinceHours)*time.Hour), "decision", rowCap+1)
 	if err != nil {
@@ -572,7 +574,7 @@ func (h *api) replay(w http.ResponseWriter, r *http.Request, _ store.UISession) 
 	}
 	truncated := len(rows) > rowCap
 	if truncated {
-		rows = rows[:rowCap]
+		rows = rows[len(rows)-rowCap:]
 	}
 	// Run lists at most replay.MaxChanges and keeps counting Changed, so
 	// the UI can say "showing 500 of N". It stops when the approver goes

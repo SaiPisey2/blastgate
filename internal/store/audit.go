@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -100,11 +101,14 @@ func (s *Store) AuditSince(ctx context.Context, since time.Time, kind string) ([
 	return s.auditSince(ctx, since, kind, 0)
 }
 
-// AuditSinceLimit is AuditSince stopping after limit rows (the oldest
-// ones). A caller serving a request (the admin API's replay) must not
-// load a whole month of audit into memory because one approver asked; it
-// fetches one row past its cap to learn whether there were more. A limit
-// below 1 returns nothing rather than meaning "no limit".
+// AuditSinceLimit is AuditSince keeping only the newest limit rows of the
+// window, still returned oldest first. A caller serving a request (the
+// admin API's replay) must not load a whole month of audit into memory
+// because one approver asked; it fetches one row past its cap to learn
+// whether there were more, and that extra row is the oldest one, at
+// index 0. The newest rows, not the oldest, because a window too big to
+// evaluate whole should answer for what the gateway sees now (P2-R21).
+// A limit below 1 returns nothing rather than meaning "no limit".
 func (s *Store) AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]AuditRow, error) {
 	if limit < 1 {
 		return nil, nil
@@ -119,10 +123,13 @@ func (s *Store) auditSince(ctx context.Context, since time.Time, kind string, li
 		q += ` AND kind = ?`
 		args = append(args, kind)
 	}
-	q += ` ORDER BY at ASC, id ASC`
+	// A bounded read walks back from the newest row, so LIMIT cuts the
+	// oldest end of the window; it is put back in order below.
 	if limit > 0 {
-		q += ` LIMIT ?`
+		q += ` ORDER BY at DESC, id DESC LIMIT ?`
 		args = append(args, limit)
+	} else {
+		q += ` ORDER BY at ASC, id ASC`
 	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -137,5 +144,11 @@ func (s *Store) auditSince(ctx context.Context, since time.Time, kind string, li
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 {
+		slices.Reverse(out)
+	}
+	return out, nil
 }

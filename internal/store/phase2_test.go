@@ -248,7 +248,7 @@ func TestAuditAfterIsOldestFirst(t *testing.T) {
 	}
 }
 
-func TestAuditSinceLimitStopsAtTheOldest(t *testing.T) {
+func TestAuditSinceLimitKeepsTheNewest(t *testing.T) {
 	s, _ := open(t)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
@@ -262,8 +262,10 @@ func TestAuditSinceLimitStopsAtTheOldest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Decisions at or after t0+1s are b, d and e; the newest two are d
+	// and e, returned oldest first.
 	got, err := s.AuditSinceLimit(ctx, t0.Add(time.Second), "decision", 2)
-	if err != nil || len(got) != 2 || got[0].RequestID != "b" || got[1].RequestID != "d" {
+	if err != nil || len(got) != 2 || got[0].RequestID != "d" || got[1].RequestID != "e" {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	if got, _ := s.AuditSinceLimit(ctx, t0, "", 100); len(got) != 5 {

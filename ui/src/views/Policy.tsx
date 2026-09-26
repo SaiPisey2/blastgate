@@ -187,7 +187,7 @@ function Result({ r }: { r: ReplayResult }) {
           <dd>{r.skipped}</dd>
         </div>
       </dl>
-      {r.truncated && <p className="note">Only the first {r.evaluated} decisions in this window were replayed.</p>}
+      {r.truncated && <p className="note">Only the most recent {r.evaluated} decisions in this window were replayed.</p>}
       {r.skipped > 0 && <p className="dim small">Skipped requests had no stored action or impact to replay against.</p>}
       {changes.length < r.changed && (
         <p className="dim small">

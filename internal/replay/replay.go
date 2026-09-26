@@ -42,7 +42,7 @@ const MaxChanges = 500
 // Result is the outcome of replaying a batch of stored decisions under a
 // candidate policy. Truncated is set by the caller, not by Run: it means
 // the window held more decision rows than the caller fetched and passed
-// in, so Evaluated covers only the first of them.
+// in, so Evaluated covers only the most recent of them (P2-R21).
 type Result struct {
 	Evaluated int      `json:"evaluated"`
 	Changed   int      `json:"changed"`
