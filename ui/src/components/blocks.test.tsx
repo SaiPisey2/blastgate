@@ -138,6 +138,28 @@ describe('LiveStatus', () => {
     }
   });
 
+  // M6: the visible word is not a live region. Only a move into Offline
+  // or Too many tabs is said; the stream's own reconnects stay quiet.
+  it('says only a move into Offline or Too many tabs', () => {
+    act(() => setStreamStatus('connecting'));
+    const { container } = render(<LiveStatus />);
+    const region = () => screen.getByRole('status');
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(region().textContent).toBe('');
+    // The visible word itself is not inside the region.
+    expect(region().contains(screen.getByText('Connecting'))).toBe(false);
+    act(() => setStreamStatus('live'));
+    expect(region().textContent).toBe('');
+    act(() => setStreamStatus('reconnecting'));
+    expect(region().textContent).toBe('');
+    act(() => setStreamStatus('offline'));
+    expect(region().textContent).toBe('Offline: this page is not getting updates.');
+    act(() => setStreamStatus('live'));
+    expect(region().textContent).toBe('');
+    act(() => setStreamStatus('limited'));
+    expect(region().textContent).toBe('Too many tabs: this page is not getting updates.');
+  });
+
   it('starts from the current status, and stops listening when unmounted', () => {
     act(() => setStreamStatus('live'));
     const { unmount } = render(<LiveStatus />);

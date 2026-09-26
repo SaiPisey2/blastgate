@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import DecisionPanel, { type DecisionPanelProps } from './DecisionPanel';
+import DecisionPanel, { undoLabel, undoStep, type DecisionPanelProps } from './DecisionPanel';
 import { setCSRF, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
 import { ARM_MS } from '../lib/friction';
 import { mockFetch, type Call } from '../test/fetch';
@@ -350,7 +350,7 @@ describe('DecisionPanel guards', () => {
     rerender(<DecisionPanel {...props} detail={detail(reversible, reversibleImpact)} />);
     expect(approveButton().disabled).toBe(false);
     expect(screen.getByText('1 object')).toBeTruthy();
-    expect(screen.getByText('Snapshot kept')).toBeTruthy();
+    expect(screen.getByText('Objects saved (manifests only)')).toBeTruthy();
   });
 
   it('a failed detail shows the error with retry', async () => {
@@ -436,7 +436,7 @@ describe('DecisionPanel rendering', () => {
 
   it('undo reads plainly for every value', () => {
     for (const [undo, text] of [
-      ['objects', 'Snapshot kept'],
+      ['objects', 'Objects saved (manifests only)'],
       ['none', 'None'],
       ['', 'Unknown'],
       ['recreate from git', 'recreate from git'],
@@ -448,6 +448,44 @@ describe('DecisionPanel rendering', () => {
     }
   });
 
+  // I1: blastgate keeps manifests, never volume contents. Beside "1 volume
+  // destroyed", "Snapshot kept" read as "the data is backed up".
+  it('undo never suggests data is kept: manifests only, and data lost when a volume goes', () => {
+    renderPanel(withDetail(summary(), impact({ undo: 'objects', dataDestroyed: 1 })));
+    const facts = screen.getByRole('list', { name: /facts/i });
+    const undo = within(facts).getByText('Undo').closest('li')!;
+    expect(undo.querySelector('.fact-value')!.textContent).toBe('Objects saved, data lost');
+    expect(screen.queryByText(/snapshot/i)).toBeNull();
+    cleanup();
+    renderPanel(withDetail(reversible, reversibleImpact));
+    const facts2 = screen.getByRole('list', { name: /facts/i });
+    expect(within(facts2).getByText('Undo').closest('li')!.querySelector('.fact-value')!.textContent).toBe('Objects saved (manifests only)');
+  });
+
+  it('undoLabel and undoStep read every value', () => {
+    expect(undoLabel('objects', 2)).toBe('Objects saved, data lost');
+    expect(undoLabel('objects', 0)).toBe('Objects saved (manifests only)');
+    expect(undoLabel('objects')).toBe('Objects saved (manifests only)');
+    expect(undoLabel('none', 3)).toBe('None');
+    expect(undoLabel('', 0)).toBe('Unknown');
+    expect(undoLabel(undefined)).toBe('Unknown');
+    expect(undoLabel('scale web back to 3')).toBe('scale web back to 3');
+    expect(undoStep('objects')).toBe('restore the saved objects');
+    expect(undoStep('scale web back to 3')).toBe('scale web back to 3');
+    expect(undoStep('none')).toBe('None');
+    expect(undoStep('')).toBe('Unknown');
+  });
+
+  it('a compensable confirm step says how to undo: restore the saved objects', async () => {
+    const s = summary({ class: 'COMPENSABLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web', summary: 'COMPENSABLE, 1 object' });
+    const i = impact({ class: 'COMPENSABLE', dataDestroyed: 0, undo: 'objects', effects: [{ kind: 'changed', object: 'apps/Deployment/demo/web' }] });
+    routes();
+    renderPanel(withDetail(s, i));
+    await userEvent.click(approveButton());
+    const step = screen.getByRole('group', { name: /confirm/i });
+    expect(step.querySelector('.confirm-step-undo')!.textContent).toBe('To undo it later: restore the saved objects');
+  });
+
   it('the question is 28 in the one-at-a-time layout', () => {
     renderPanel({ ...withDetail(summary()), position: { index: 2, total: 5 } });
     expect(screen.getByRole('heading').className).toContain('decision-q-lg');
@@ -457,10 +495,11 @@ describe('DecisionPanel rendering', () => {
   });
 
   it('show the command expands the action text; show details links to the route', async () => {
-    const s = summary({ verb: 'create', resource: 'pods/exec', namespace: 'team-a', name: 'db-0', class: 'TERMINAL', data_destroyed: 0 });
+    // A measured request keeps its command behind the toggle.
+    const s = summary({ verb: 'patch', resource: 'deployments', namespace: 'team-a', name: 'web', class: 'TERMINAL', data_destroyed: 0 });
     const d: ApprovalDetail = {
       ...detail(s, impact({ effects: [], dataDestroyed: 0 })),
-      action: { verb: 'create', path: '/api/v1/namespaces/team-a/pods/db-0/exec', query: { command: ['psql', '-c', "drop table users; -- it's gone"] } },
+      action: { verb: 'patch', path: '/apis/apps/v1/namespaces/team-a/deployments/web', query: { command: ['psql', '-c', "drop table users; -- it's gone"] } },
     };
     renderPanel({ summary: s, detail: d });
     const toggle = screen.getByRole('button', { name: /show the command/i });
@@ -472,6 +511,51 @@ describe('DecisionPanel rendering', () => {
     expect(block.textContent).toContain(`$ psql -c 'drop table users; -- it'\\''s gone'`);
     const link = screen.getByRole('link', { name: /show details/i });
     expect(link.getAttribute('href')).toBe(`#/approvals/${ID1}`);
+  });
+
+  // I2 (ruling D-R24): for an unmeasured or exec-like hold the command is
+  // the impact, so it is in view above the buttons, never behind a toggle.
+  const execS = summary({ verb: 'create', resource: 'pods/exec', namespace: 'demo', name: 'db-0', class: 'TERMINAL', measured: false, data_destroyed: 0 });
+  const execD = (i: Partial<Impact> = {}): ApprovalDetail => ({
+    ...detail(execS, impact({ measured: false, effects: [], dataDestroyed: 0, ...i })),
+    action: { verb: 'create', path: '/api/v1/namespaces/demo/pods/db-0/exec', query: { command: ['psql', '-c', 'drop table orders'] } },
+  });
+
+  it('an unmeasured exec shows its command expanded, above the buttons, with no toggle', () => {
+    renderPanel({ summary: execS, detail: execD() });
+    const cmd = screen.getByLabelText('Command');
+    expect(cmd.textContent).toContain(`$ psql -c 'drop table orders'`);
+    expect(cmd.className).toContain('mono');
+    expect(cmd.compareDocumentPosition(denyButton()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /show the command/i })).toBeNull();
+  });
+
+  for (const sub of ['exec', 'attach', 'portforward', 'proxy', 'ephemeralcontainers']) {
+    it(`a measured ${sub} request still shows its command expanded`, () => {
+      const s = summary({ verb: 'create', resource: `pods/${sub}`, class: 'REVERSIBLE', measured: true, data_destroyed: 0 });
+      renderPanel({ summary: s, detail: { ...detail(s, reversibleImpact), action: { verb: 'create', path: `/x/${sub}` } } });
+      expect(screen.getByLabelText('Command')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /show the command/i })).toBeNull();
+    });
+  }
+
+  it('an unmeasured non-exec hold shows its command expanded too', () => {
+    const s = summary({ verb: 'delete', resource: 'deployments', name: 'web', class: 'TERMINAL', measured: false, data_destroyed: 0 });
+    renderPanel({ summary: s, detail: detail(s, impact({ measured: false, effects: [], dataDestroyed: 0 })) });
+    expect(screen.getByLabelText('Command')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /show the command/i })).toBeNull();
+  });
+
+  it('SQL detected: the question says a database command and What it affects says Runs SQL', () => {
+    renderPanel({ summary: execS, detail: execD({ sqlDetected: true }) });
+    expect(screen.getByRole('heading').textContent).toBe('coding-agent wants to run a database command in demo/db-0');
+    expect(within(screen.getByRole('heading')).getByText('demo/db-0').className).toContain('mono');
+    const facts = screen.getByRole('list', { name: /facts/i });
+    expect(within(facts).getByText('What it affects').closest('li')!.querySelector('.fact-value')!.textContent).toMatch(/(^|[^\w])Unknown · Runs SQL$/);
+    cleanup();
+    renderPanel({ summary: execS, detail: execD({ sqlDetected: false }) });
+    expect(screen.getByRole('heading').textContent).toBe('coding-agent wants to run a command in demo/db-0');
+    expect(screen.queryByText(/Runs SQL/)).toBeNull();
   });
 
   it('a standalone panel has no link to itself', () => {

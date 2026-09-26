@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { get, subscribe, type ApprovalDetail, type ApprovalSummary } from '../api';
 import DecisionPanel, { GONE_TEXT, type Outcome } from '../components/DecisionPanel';
 import EmptyState from '../components/EmptyState';
+import Sentence from '../components/Sentence';
 import { announce } from '../components/Shell';
 import { GLYPH } from '../components/Tag';
 import Button from '../components/Button';
@@ -99,6 +100,10 @@ export default function Waiting({ me = '' }: { me?: string }) {
   const live = useRef<ApprovalSummary[]>([]);
   const wideRef = useRef(wide);
   wideRef.current = wide;
+  // selectedRef: the request on screen as last rendered, read by load()
+  // to notice when a reload takes it away.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   const commit = useCallback((rows: ApprovalSummary[]) => {
     live.current = rows;
@@ -129,6 +134,11 @@ export default function Waiting({ me = '' }: { me?: string }) {
       firstLoad.current = false;
       commit(rows);
       setError('');
+      // Narrow: the request on screen left the list (decided elsewhere,
+      // or expired), and the next one takes its place. Said, so the
+      // approver does not read the new request as the one they had.
+      const shown = selectedRef.current;
+      if (shown && !wideRef.current && !decided.current.has(shown) && !rows.some((r) => r.id === shown)) setNote(NOTES.gone);
       setSelected((prev) => {
         if (prev && rows.some((r) => r.id === prev)) return prev;
         // Wide keeps a vanished choice on screen, marked gone.
@@ -280,6 +290,7 @@ export default function Waiting({ me = '' }: { me?: string }) {
       {items !== null && rows.length === 0 && (
         <EmptyState
           title="Nothing is waiting for you."
+          quiet={note !== ''}
           sub={
             lastDecision
               ? `Last decision at ${hhmm(lastDecision)}. Held requests appear here the moment an agent makes one.`
@@ -327,6 +338,7 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
   const present = useIsPresent();
   const impact = detail && detail.id === s.id ? detail.impact : undefined;
   const f = frictionOf(s, impact);
+  const d = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name });
   return (
     <m.li
       id={id}
@@ -343,7 +355,10 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
         {GLYPH[f.tone]}
       </span>
       <span className="waiting-row-text">
-        <span className="waiting-sentence waiting-wrap">{sentenceOf(s)}</span>
+        {/* The identifier in mono, as in the panel and every other list. */}
+        <span className="waiting-sentence waiting-wrap">
+          <Sentence sentence={d.sentence} target={d.target} name={s.name} identClass="waiting-ident" />
+        </span>
         <span className="visually-hidden">{`, ${f.tag}, `}</span>
         <span className="waiting-meta waiting-wrap">
           {s.human || 'Unknown'} · {ageOf(s, now)}

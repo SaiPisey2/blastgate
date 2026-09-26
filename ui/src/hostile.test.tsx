@@ -77,14 +77,14 @@ describe('hostile text', () => {
     // The row: the literal sentence and "who · when".
     expect(row.textContent).toContain(EVIL);
     const panel = screen.getByRole('article');
-    // Wait for the detail: its undo text is hostile too.
-    await within(panel).findByRole('button', { name: 'Show the command' });
+    // Wait for the detail: its undo text is hostile too. A hostile class
+    // is an unknown impact, so the command is already in view (D-R24).
+    const cmd = await within(panel).findByLabelText('Command');
     const undo = within(panel).getByText('Undo').closest('li')!;
     expect(undo.querySelector('.fact-value')!.textContent).toBe(EVIL);
     // The typed target is namespace/name: still literal text.
     expect(panel.textContent).toContain(`${EVIL}/${EVIL}`);
-    await userEvent.click(within(panel).getByRole('button', { name: 'Show the command' }));
-    expect(panel.querySelector('pre')!.textContent).toContain(EVIL);
+    expect(cmd.textContent).toContain(EVIL);
     clean(container);
   });
 

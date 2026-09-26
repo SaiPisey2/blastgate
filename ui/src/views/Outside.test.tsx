@@ -88,3 +88,19 @@ describe('Outside', () => {
     expect(container.innerHTML).toContain('&lt;img');
   });
 });
+
+describe('Outside, Esc (final review M2)', () => {
+  it('Esc goes back to Activity, but not from the period select', async () => {
+    mockFetch({ 'GET /api/bypass': { body: [bypassRow()] } });
+    window.location.hash = '#/outside';
+    render(<Outside />);
+    await waitFor(() => expect(rowEls().length).toBe(1));
+    const select = screen.getByRole('combobox');
+    select.focus();
+    await userEvent.keyboard('{Escape}');
+    expect(window.location.hash).toBe('#/outside');
+    (document.activeElement as HTMLElement).blur();
+    await userEvent.keyboard('{Escape}');
+    expect(window.location.hash).toBe('#/activity');
+  });
+});

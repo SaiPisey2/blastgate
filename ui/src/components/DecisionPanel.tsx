@@ -28,7 +28,13 @@ export type DecisionPanelProps = {
   // (spec 4.2), so what approving would do is read before the buttons,
   // and says it once rather than as facts and again as numbers. A body
   // carries the command itself, so the panel drops "Show the command".
+  // Without a body, an unmeasured or exec-like request shows the command
+  // in view too; only a measured request keeps it behind the toggle.
   body?: ReactNode;
+  // headingFirst: the first default focus goes to the question, not Deny.
+  // The details page is reached by Enter on an Activity row; with Deny
+  // focused on arrival, that Enter held down key-repeats into a deny.
+  headingFirst?: boolean;
 };
 
 export const SELF_APPROVAL_REASON = "You can't approve a request made on your behalf";
@@ -62,11 +68,15 @@ function decidedText(status: string, by: string, at: string): string {
   return t + '.';
 }
 
-export function undoLabel(undo: unknown): string {
+// undoLabel says what blastgate keeps to undo with. It keeps object
+// manifests only, never volume contents: "Snapshot kept" beside "1 volume
+// destroyed" read as "the data is backed up", which it is not. So the
+// words say manifests, and say outright when data goes regardless.
+export function undoLabel(undo: unknown, dataDestroyed: unknown = 0): string {
   const u = typeof undo === 'string' ? undo : '';
   switch (u) {
     case 'objects':
-      return 'Snapshot kept';
+      return typeof dataDestroyed === 'number' && dataDestroyed > 0 ? 'Objects saved, data lost' : 'Objects saved (manifests only)';
     case 'none':
       return 'None';
     case '':
@@ -74,6 +84,29 @@ export function undoLabel(undo: unknown): string {
   }
   return u;
 }
+
+// undoStep is the confirm step's "To undo it later: ..." line. It has to
+// say how, not only what was kept: "To undo it later: Snapshot kept"
+// told the approver nothing they could do. A server sentence (a
+// follow-up the engine worked out) is shown as it came.
+export function undoStep(undo: unknown): string {
+  return undo === 'objects' ? 'restore the saved objects' : undoLabel(undo);
+}
+
+// EXEC_LIKE: subresources whose impact blastgate never measures because
+// the command itself is the impact. The admin API joins the subresource
+// into resource ("pods/exec"); plain indexOf, never a pattern.
+const EXEC_LIKE = new Set(['exec', 'attach', 'portforward', 'proxy', 'ephemeralcontainers']);
+
+export function isExecLike(resource: string): boolean {
+  const i = resource.indexOf('/');
+  return i !== -1 && EXEC_LIKE.has(resource.slice(i + 1));
+}
+
+// RUN_A_COMMAND is describe()'s exec opening. With SQL detected it reads
+// "run a database command in ...", as the approved mockup does, so the
+// question itself says what kind of command this is.
+const RUN_A_COMMAND = 'Run a command in ';
 
 // affects is the count summary for "What it affects". Only reached for a
 // measured impact: an unmeasured one reads Unknown, never a count, since
@@ -121,7 +154,7 @@ export default function DecisionPanel(props: DecisionPanelProps) {
   return <Panel key={props.summary.id} {...props} />;
 }
 
-function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone, body }: DecisionPanelProps) {
+function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone, body, headingFirst }: DecisionPanelProps) {
   // One check for both places the body changes: the facts row and the
   // command toggle.
   const hasBody = body !== undefined;
@@ -139,6 +172,8 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const denyRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const firstFocus = useRef(headingFirst === true);
   const inFlight = useRef(false);
 
   const [typed, setTyped] = useState('');
@@ -157,7 +192,20 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const needsTyping = friction.level === 'typed';
   const expected = typedTarget(s);
   const described = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name });
-  const { words, ident } = questionParts(described.sentence, described.target, s.name);
+  // sqlDetected is exactly true, never merely truthy: a wrong-typed value
+  // must not change the question's words.
+  const runsSQL = impact?.sqlDetected === true;
+  const sentence =
+    runsSQL && described.sentence.startsWith(RUN_A_COMMAND)
+      ? `Run a database command in ${described.sentence.slice(RUN_A_COMMAND.length)}`
+      : described.sentence;
+  const { words, ident } = questionParts(sentence, described.target, s.name);
+  // commandShown: for an unmeasured hold, or an exec-like request, the
+  // command is the impact. It sits in view above the controls, as on the
+  // details page, never behind "Show the command": an approver must not
+  // be able to approve `psql -c 'drop table orders'` without having it
+  // in front of them (ruling D-R24, over spec 4.1 item 7).
+  const commandShown = friction.unknownImpact || isExecLike(s.resource);
   const pending = s.status === 'pending';
   const selfBlocked = !canSelfApprove(me, s.human);
 
@@ -186,7 +234,9 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // Keyed on the strings the panel renders, not on hand-picked fields: a
   // field left out here (services emptied, budgets broken) once let a
   // changed fact slip past an armed step.
-  const impactKey = impact ? [affects(impact), undoLabel(impact.undo), impact.measured].join('\u0000') : '';
+  const impactKey = impact
+    ? [affects(impact), undoLabel(impact.undo, impact.dataDestroyed), undoStep(impact.undo), impact.measured, runsSQL].join('\u0000')
+    : '';
   const stepKey = `${friction.level}\u0000${decidable}\u0000${impactKey}`;
   const [seenStepKey, setSeenStepKey] = useState(stepKey);
   if (seenStepKey !== stepKey) {
@@ -249,6 +299,11 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     // and scrolling to it on arrival pushed the question up under the
     // sticky header. The page opens at the top, question first; Tab or a
     // keystroke still reaches the focused control.
+    if (firstFocus.current) {
+      firstFocus.current = false;
+      headingRef.current?.focus({ preventScroll: true });
+      return;
+    }
     (needsTyping ? inputRef.current : denyRef.current)?.focus({ preventScroll: true });
   }, [needsTyping, pending]);
 
@@ -314,11 +369,11 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       ),
     },
     friction.unknownImpact
-      ? { label: 'What it affects', value: 'Unknown', tone: 'caution' }
+      ? { label: 'What it affects', value: runsSQL ? 'Unknown · Runs SQL' : 'Unknown', tone: 'caution' }
       : impact
-        ? { label: 'What it affects', value: affects(impact), tone: impact.dataDestroyed > 0 ? 'danger' : undefined }
+        ? { label: 'What it affects', value: runsSQL ? `${affects(impact)} · Runs SQL` : affects(impact), tone: impact.dataDestroyed > 0 ? 'danger' : undefined }
         : { label: 'What it affects', value: s.summary || 'Unknown' },
-    { label: 'Undo', value: impact ? undoLabel(impact.undo) : detailError ? 'Unknown' : 'Loading' },
+    { label: 'Undo', value: impact ? undoLabel(impact.undo, impact.dataDestroyed) : detailError ? 'Unknown' : 'Loading' },
   ];
 
   // Every reason Approve is disabled is tied to it by aria-describedby,
@@ -349,12 +404,17 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       {/* tabIndex -1: after a decision, or on Enter from the list, focus
           lands here so the next thing read is the question. Not a tab
           stop, since it is not a control. */}
-      <h2 id={qid} className={position ? 'decision-q decision-q-lg' : 'decision-q'} tabIndex={-1}>
+      <h2 ref={headingRef} id={qid} className={position ? 'decision-q decision-q-lg' : 'decision-q'} tabIndex={-1}>
         {s.agent || 'An agent'} wants to {words}
         {ident && <span className="mono">{ident}</span>}
       </h2>
       <p className="decision-why">{friction.why}</p>
       {hasBody ? body : <Facts items={facts} />}
+      {detail && !hasBody && commandShown && (
+        <pre className="decision-command decision-command-shown mono" aria-label="Command">
+          {actionText(detail.action) || '(no action recorded)'}
+        </pre>
+      )}
 
       {detailError && !detail && (
         <div className="decision-detail-error" role="alert">
@@ -424,7 +484,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         {stepOpen && (
           <ConfirmStep
             key="confirm"
-            undo={friction.level === 'confirm-undo' && impact ? undoLabel(impact.undo) : undefined}
+            undo={friction.level === 'confirm-undo' && impact ? undoStep(impact.undo) : undefined}
             ready={ready}
             busy={busy}
             instant={reduceMotion === true}
@@ -435,7 +495,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
       </AnimatePresence>
 
       <div className="decision-links">
-        {detail && !hasBody && (
+        {detail && !hasBody && !commandShown && (
           <Button variant="quiet" aria-expanded={showCommand} aria-controls={commandId} onClick={() => setShowCommand((v) => !v)}>
             Show the command
           </Button>
@@ -446,7 +506,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
           </a>
         )}
       </div>
-      {detail && !hasBody && showCommand && (
+      {detail && !hasBody && !commandShown && showCommand && (
         <pre id={commandId} className="decision-command mono">
           {actionText(detail.action) || '(no action recorded)'}
         </pre>
@@ -487,7 +547,12 @@ function ConfirmStep({ undo, ready, busy, instant, onCancel, onConfirm }: Confir
         role="group"
         aria-label="Confirm approval"
         onKeyDown={(e) => {
-          if (present && e.key === 'Escape') onCancel();
+          // preventDefault claims the key: Esc here cancels the step and
+          // must not also take the details page back to Waiting.
+          if (present && e.key === 'Escape') {
+            e.preventDefault();
+            onCancel();
+          }
         }}
       >
         <p>Approve this? The agent will be let through.</p>

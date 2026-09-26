@@ -127,14 +127,17 @@ describe('Policy', () => {
 
     expect(within(result).getByText('3 of 412')).toBeTruthy();
     expect(within(result).getByText('decisions would change')).toBeTruthy();
+    // The count is a status, so a screen reader hears the replay finish.
+    expect(within(result).getByRole('status').textContent).toBe('3 of 412 decisions would change');
+    expect(within(result).queryByText(/Waited for approval/)).toBeNull();
 
     const first = changeNamed(result, 'Delete the pod web-7d9f8c-abcde');
-    expect(within(first).getByText('Allowed → Waited for approval')).toBeTruthy();
+    expect(within(first).getByText('Allowed → Held')).toBeTruthy();
     // The identifier inside the sentence is set in mono, as everywhere else.
     expect(within(first).getByText('web-7d9f8c-abcde').className).toContain('mono');
 
     const second = changeNamed(result, 'Run a command in db-0');
-    expect(within(second).getByText('Waited for approval → Denied')).toBeTruthy();
+    expect(within(second).getByText('Held → Denied')).toBeTruthy();
 
     const third = changeNamed(result, 'Change the service api');
     expect(within(third).getByText('weird → Allowed')).toBeTruthy();

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import App from './App';
 import { mockFetch } from './test/fetch';
 import { emit } from './api';
@@ -87,4 +87,35 @@ describe('App', () => {
     }
     expect(screen.queryByText(/not built yet/i)).toBeNull();
   });
+});
+
+// M8: the self-approval guard depends on App handing /api/me's name down
+// to both Waiting and Details. A view test passes `me` by hand, so only
+// an App-level test catches that wiring being dropped.
+describe('App self-approval wiring', () => {
+  const REASON = "You can't approve a request made on your behalf";
+  const mine = summary({ human: 'alice', class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+
+  function routes() {
+    mockFetch({
+      'GET /api/me': { body: { name: 'alice', csrf: 'c' } },
+      'GET /api/approvals?status=pending': { body: [mine] },
+      [`GET /api/approvals/${ID1}`]: { body: detail(mine, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) },
+    });
+  }
+
+  for (const [where, hash] of [
+    ['Waiting', '#/waiting'],
+    ['Details', `#/approvals/${ID1}`],
+  ] as const) {
+    it(`a request made on the approver's behalf cannot be approved on ${where}`, async () => {
+      window.location.hash = hash;
+      routes();
+      render(<App />);
+      const card = await screen.findByRole('article');
+      expect(await within(card).findByText(REASON)).toBeTruthy();
+      const approve = within(card).getByRole('button', { name: /^approve$/i }) as HTMLButtonElement;
+      await waitFor(() => expect(approve.disabled).toBe(true));
+    });
+  }
 });

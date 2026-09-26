@@ -143,3 +143,83 @@ describe('Agents', () => {
     expect(container.querySelector('img')).toBeNull();
   });
 });
+
+describe('Agents, focus (final review M1)', () => {
+  it('Stop moves focus to Cancel; Cancel returns it to Stop; a stop lands it on the status', async () => {
+    let stopped = false;
+    // Two live rows, so a stopped row moves below the other when it
+    // reloads (live rows sort first) and focus has to follow it.
+    mockFetch({
+      'GET /api/sessions': () => ({
+        body: [
+          session({ created: '2026-09-26T09:00:00Z', expires: new Date(Date.now() + 3_600_000).toISOString(), state: stopped ? 'revoked' : 'active' }),
+          session({ id: SID2, agent: 'review-agent', created: '2026-09-26T08:00:00Z', expires: new Date(Date.now() + 3_600_000).toISOString() }),
+        ],
+      }),
+      [`POST /api/sessions/${SID1}/revoke`]: () => {
+        stopped = true;
+        return { body: {} };
+      },
+    });
+    render(<Agents />);
+    const rowOf = () => screen.getByText('coding-agent').closest('tr')!;
+    await screen.findByText('coding-agent');
+
+    await userEvent.click(within(rowOf()).getByRole('button', { name: /^stop$/i }));
+    expect(document.activeElement).toBe(within(rowOf()).getByRole('button', { name: /cancel/i }));
+
+    await userEvent.click(within(rowOf()).getByRole('button', { name: /cancel/i }));
+    expect(document.activeElement).toBe(within(rowOf()).getByRole('button', { name: /^stop$/i }));
+
+    await userEvent.click(within(rowOf()).getByRole('button', { name: /^stop$/i }));
+    const confirm = within(rowOf()).getByRole('button', { name: /^stop$/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await userEvent.click(confirm);
+    await waitFor(() => expect(within(rowOf()).getByText('Stopped')).toBeTruthy());
+    const status = within(rowOf()).getByText('Stopped');
+    await waitFor(() => expect(document.activeElement).toBe(status));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  // The two halves of "a stop lands focus on the status", held apart by
+  // gating the reload: at once (before the reload), and again once the
+  // reload moves the row, since a browser blurs a focused row it moves.
+  it('a stop focuses the status at once, and again after the reload moves the row', async () => {
+    let stopped = false;
+    let gets = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    mockFetch({
+      'GET /api/sessions': async () => {
+        if (gets++ > 0) await gate;
+        return {
+          body: [
+            session({ created: '2026-09-26T09:00:00Z', expires: new Date(Date.now() + 3_600_000).toISOString(), state: stopped ? 'revoked' : 'active' }),
+            session({ id: SID2, agent: 'review-agent', created: '2026-09-26T08:00:00Z', expires: new Date(Date.now() + 3_600_000).toISOString() }),
+          ],
+        };
+      },
+      [`POST /api/sessions/${SID1}/revoke`]: () => {
+        stopped = true;
+        return { body: {} };
+      },
+    });
+    render(<Agents />);
+    const rowOf = () => screen.getByText('coding-agent').closest('tr')!;
+    const statusCell = () => rowOf().querySelector('td[data-label="Status"]') as HTMLElement;
+    await screen.findByText('coding-agent');
+    await userEvent.click(within(rowOf()).getByRole('button', { name: /^stop$/i }));
+    const confirm = within(rowOf()).getByRole('button', { name: /^stop$/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await userEvent.click(confirm);
+    // Before the reload answers: already on the status, not <body>.
+    await waitFor(() => expect(document.activeElement).toBe(statusCell()));
+    expect(within(rowOf()).queryByText('Stopped')).toBeNull();
+    // What a browser does to a focused row that React moves.
+    statusCell().blur();
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => release());
+    await waitFor(() => expect(within(rowOf()).getByText('Stopped')).toBeTruthy());
+    await waitFor(() => expect(document.activeElement).toBe(statusCell()));
+  });
+});

@@ -93,8 +93,10 @@
 
   /* The sticky header's height, for scroll-padding: anything the page
      scrolls to (a focused question, a tree item) lands below it, not
-     under it (WCAG 2.4.11). Measured from the rendered header: one row
-     on wide screens, brand and controls over a row of tabs below 880px. */
+     under it (WCAG 2.4.11). .shell-header is set to exactly this, and
+     nothing in it wraps, so it holds at any zoom or name length: one
+     row on wide screens; below 880px, brand and controls (56px) over a
+     44px row of tabs, plus the 1px hairline. */
   --header-h: 61px;
 }
 

@@ -57,7 +57,7 @@ describe('Shell', () => {
     expect(tabs.map((a) => a.textContent)).toEqual(['Waiting', 'Activity', 'Agents', 'Policy']);
     expect(tabs.map((a) => a.getAttribute('href'))).toEqual(['#/waiting', '#/activity', '#/agents', '#/policy']);
     // The live status, the theme toggle, who is signed in, and Sign out.
-    expect(within(header).getByRole('status').textContent).toMatch(/Connecting|Live|Reconnecting|Offline|Too many tabs/);
+    expect(header.querySelector('.live-status')!.textContent).toMatch(/Connecting|Live|Reconnecting|Offline|Too many tabs/);
     expect(within(header).getByRole('button', { name: /^Theme:/ })).toBeTruthy();
     expect(within(header).getByText('bob')).toBeTruthy();
     expect(within(header).getByRole('button', { name: 'Sign out' })).toBeTruthy();
@@ -112,13 +112,14 @@ describe('Shell', () => {
     }
   });
 
-  it('tabs wrap on narrow screens', () => {
+  it('tabs never wrap: they scroll inside the header row if they must', () => {
     shell({ name: 'waiting' });
     const nav = screen.getByRole('navigation', { name: 'Main' });
     expect(nav.classList.contains('shell-tabs')).toBe(true);
-    // Wraps rather than scrolls sideways: a scroll strip hides the tabs
-    // people then never find. Real layout at 360px is checked in a browser.
-    expect(componentsCSS).toMatch(/\.shell-tabs\s*\{[^}]*flex-wrap:\s*wrap/);
+    // A wrapped tab row made the header taller than --header-h (final
+    // review M7). The four tabs fit at 360px, so the strip only scrolls
+    // at extreme zoom; real layout at 360px is checked in a browser.
+    expect(componentsCSS).toMatch(/\.shell-tabs\s*\{[^}]*flex-wrap:\s*nowrap/);
   });
 
   it('the current tab is underlined with a border, never a shadow', () => {
@@ -565,5 +566,52 @@ describe('useMediaQuery', () => {
     } finally {
       window.matchMedia = saved;
     }
+  });
+});
+
+// M7: --header-h is what scroll-padding reads, so the header must be that
+// tall by construction, not by measurement: nothing in it may wrap onto a
+// new line at 200% zoom or with a long name.
+describe('Shell header height is fixed by construction', () => {
+  const tokensCSS = readFileSync('src/styles/tokens.css', 'utf8');
+  // rule returns the body of the first `selector {` block in css.
+  const rule = (css: string, selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    if (at < 0) throw new Error(`no rule for ${selector}`);
+    return css.slice(at, css.indexOf('}', at));
+  };
+  const narrowAt = componentsCSS.indexOf('@media (max-width: 880px) {\n  .shell-bar');
+  const narrow = componentsCSS.slice(narrowAt, componentsCSS.indexOf('\n}\n', narrowAt));
+
+  it('the header is exactly --header-h tall, and the bar fills it without wrapping', () => {
+    expect(rule(componentsCSS, '.shell-header')).toMatch(/\bheight:\s*var\(--header-h\)/);
+    expect(rule(componentsCSS, '.shell-header')).toMatch(/box-sizing:\s*border-box/);
+    const bar = rule(componentsCSS, '.shell-bar');
+    expect(bar).toMatch(/flex-wrap:\s*nowrap/);
+    expect(bar).toMatch(/\bheight:\s*100%/);
+    expect(rule(componentsCSS, '.shell-meta')).toMatch(/flex-wrap:\s*nowrap/);
+  });
+
+  it('the brand is cut short with an ellipsis, and the tabs scroll inside their row', () => {
+    const brand = rule(componentsCSS, '.shell-brand');
+    expect(brand).toMatch(/white-space:\s*nowrap/);
+    expect(brand).toMatch(/text-overflow:\s*ellipsis/);
+    expect(brand).toMatch(/overflow:\s*hidden/);
+    expect(brand).toMatch(/min-width:\s*0/);
+    const tabs = rule(componentsCSS, '.shell-tabs');
+    expect(tabs).toMatch(/flex-wrap:\s*nowrap/);
+    expect(tabs).toMatch(/overflow-x:\s*auto/);
+    expect(rule(componentsCSS, '.shell-who')).toMatch(/text-overflow:\s*ellipsis/);
+  });
+
+  it('at 880px and below the header is two fixed rows: the rest over a 44px tab row', () => {
+    expect(narrowAt).toBeGreaterThan(0);
+    expect(narrow).toMatch(/grid-template-rows:\s*minmax\(0,\s*1fr\)\s+var\(--s-11\)/);
+    expect(narrow).toMatch(/\.shell-tabs\s*\{[^}]*grid-area:\s*2\s*\/\s*1\s*\/\s*3\s*\/\s*-1/);
+    expect(narrow).not.toMatch(/flex-wrap:\s*wrap/);
+    // The two tokens the rows add up to: 61 = 60 + hairline; 101 = 56 + 44 + hairline.
+    expect(tokensCSS).toMatch(/--header-h:\s*61px/);
+    expect(tokensCSS).toMatch(/@media \(max-width: 880px\)\s*\{\s*:root\s*\{\s*--header-h:\s*101px/);
+    expect(tokensCSS).toMatch(/--s-11:\s*44px/);
   });
 });

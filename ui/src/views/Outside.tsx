@@ -4,6 +4,7 @@ import EmptyState from '../components/EmptyState';
 import Sentence from '../components/Sentence';
 import { describe, targetOf } from '../lib/describe';
 import { clock } from '../lib/format';
+import { useEscapeBack } from '../hooks/useEscapeBack';
 
 // The first range matches the Activity banner (the last 24 hours), so
 // following its link lands on the same count it showed.
@@ -29,6 +30,7 @@ export default function Outside() {
   const [rows, setRows] = useState<BypassRow[] | null>(null);
   const [error, setError] = useState('');
   const seq = useRef(0);
+  useEscapeBack('#/activity');
 
   useEffect(() => {
     // seq drops a slow answer for the range that was just replaced.

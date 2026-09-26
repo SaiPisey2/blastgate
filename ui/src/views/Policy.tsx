@@ -22,7 +22,7 @@ function parseHours(v: string): number | null {
 // The words a decision reads as, in plain language (spec §4/§5). A value
 // this UI has not been taught yet still shows, raw, rather than vanish
 // behind an unmatched case.
-const DECISION_WORDS: Record<string, string> = { hold: 'Waited for approval', allow: 'Allowed', deny: 'Denied' };
+const DECISION_WORDS: Record<string, string> = { hold: 'Held', allow: 'Allowed', deny: 'Denied' };
 function decisionWord(d: string): string {
   return Object.hasOwn(DECISION_WORDS, d) ? DECISION_WORDS[d] : d;
 }
@@ -204,7 +204,9 @@ function Result({ r }: { r: ReplayResult }) {
   const changes = r.changes ?? [];
   return (
     <section className="policy-result" role="region" aria-label="Replay result">
-      <p className="policy-result-count">
+      {/* A status, so the count is heard when a replay finishes: the
+          button only changes back from "Replaying…" otherwise. */}
+      <p className="policy-result-count" role="status">
         <strong>
           {r.changed} of {r.evaluated}
         </strong>{' '}

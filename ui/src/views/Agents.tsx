@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { get, post, type Session } from '../api';
 import { ARM_MS } from '../lib/friction';
 import { duration, useNow } from '../lib/format';
@@ -89,6 +89,19 @@ function Row({ s, now, onChanged }: { s: Session; now: number; onChanged: () => 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const status = statusOf(s, now);
+  const stopRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const statusRef = useRef<HTMLTableCellElement>(null);
+  // backTo: where focus goes when the confirm closes. The control that
+  // had it (Cancel or the confirm's Stop) is unmounted, and the browser
+  // would drop focus to <body>, losing the keyboard user's place in the
+  // table. Cancel returns to the row's Stop; a stop that went through
+  // lands on the row's status, which is about to read Stopped.
+  const backTo = useRef<'stop' | 'status' | null>(null);
+  // stopped: a stop went through and the reload has not yet shown it. The
+  // row can be moved in the table when it does (live rows sort first),
+  // so focus is put back on its status once the new state arrives.
+  const stopped = useRef(false);
 
   // The confirm control takes Stop's own place, so a double-click on Stop
   // lands its second click here: it stays inert for a moment, as on the
@@ -100,11 +113,33 @@ function Row({ s, now, onChanged }: { s: Session; now: number; onChanged: () => 
     return () => clearTimeout(t);
   }, [confirming]);
 
+  // Opening the confirm puts focus on Cancel, never on the confirm's Stop:
+  // a held Enter on the first Stop would key-repeat into the second.
+  // Layout effects, so focus moves before the old control's blur lands.
+  useLayoutEffect(() => {
+    if (confirming) {
+      cancelRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    const to = backTo.current;
+    backTo.current = null;
+    if (to === 'stop') stopRef.current?.focus({ preventScroll: true });
+    else if (to === 'status') statusRef.current?.focus({ preventScroll: true });
+  }, [confirming]);
+
+  useLayoutEffect(() => {
+    if (!stopped.current || s.state !== 'revoked') return;
+    stopped.current = false;
+    statusRef.current?.focus({ preventScroll: true });
+  }, [s.state]);
+
   async function stop() {
     setBusy(true);
     setError('');
     try {
       await post(`/api/sessions/${encodeURIComponent(s.id)}/revoke`);
+      backTo.current = 'status';
+      stopped.current = true;
       setConfirming(false);
       onChanged();
     } catch (e) {
@@ -118,7 +153,8 @@ function Row({ s, now, onChanged }: { s: Session; now: number; onChanged: () => 
     <tr>
       <td data-label="Agent">{s.agent}</td>
       <td data-label="On behalf of">{s.human}</td>
-      <td data-label="Status" className={status.live ? 'agents-status-ok' : 'agents-status-off'}>
+      {/* tabIndex -1: it holds focus after a stop, without becoming a tab stop. */}
+      <td ref={statusRef} tabIndex={-1} data-label="Status" className={status.live ? 'agents-status-ok' : 'agents-status-off'}>
         {status.text}
       </td>
       <td data-label="" className="agents-row-actions">
@@ -129,7 +165,15 @@ function Row({ s, now, onChanged }: { s: Session; now: number; onChanged: () => 
                 Stop {s.agent} for {s.human}?
               </span>
               <span className="agents-confirm-buttons">
-                <Button variant="quiet" onClick={() => setConfirming(false)} disabled={busy}>
+                <Button
+                  ref={cancelRef}
+                  variant="quiet"
+                  onClick={() => {
+                    backTo.current = 'stop';
+                    setConfirming(false);
+                  }}
+                  disabled={busy}
+                >
                   Cancel
                 </Button>
                 <Button variant="danger" disabled={!armed || busy} onClick={() => void stop()}>
@@ -138,7 +182,7 @@ function Row({ s, now, onChanged }: { s: Session; now: number; onChanged: () => 
               </span>
             </div>
           ) : (
-            <Button variant="quiet" onClick={() => setConfirming(true)}>
+            <Button ref={stopRef} variant="quiet" onClick={() => setConfirming(true)}>
               Stop
             </Button>
           ))}

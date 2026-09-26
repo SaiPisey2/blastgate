@@ -282,3 +282,92 @@ describe('Details, fix round 1', () => {
     expect(within(card).queryByRole('list', { name: /in numbers/i })).toBeNull();
   });
 });
+
+describe('Details, final review', () => {
+  // I1: blastgate keeps manifests only. Beside "1 volume destroyed" the
+  // big Undo number must say the data is lost, never "Snapshot kept".
+  it('the Undo number says objects saved, data lost, when a volume is destroyed', async () => {
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(del, deploymentImpact({ undo: 'objects' })) } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    await screen.findByRole('article');
+    expect(value(big(/^undo$/i))).toBe('Objects saved, data lost');
+    expect(screen.queryByText(/snapshot/i)).toBeNull();
+  });
+
+  it('the Undo number says manifests only when no data is destroyed', async () => {
+    const s = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    await screen.findByRole('article');
+    expect(value(big(/^undo$/i))).toBe('Objects saved (manifests only)');
+  });
+
+  // M1: reached by Enter on an Activity row, the first focus is the
+  // question: on Deny, that Enter held down would key-repeat into a deny.
+  it('first focus on arrival is the question, not Deny', async () => {
+    const s = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole('heading', { level: 2 })));
+    expect(document.activeElement).not.toBe(within(card).getByRole('button', { name: /^deny$/i }));
+  });
+
+  it('after deciding, focus goes to the question, not <body>', async () => {
+    let status = 'pending';
+    const plain = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    mockFetch({
+      [`GET /api/approvals/${ID1}`]: () => ({ body: detail({ ...plain, status }, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) }),
+      [`POST /api/approvals/${ID1}/deny`]: () => {
+        status = 'denied';
+        return { body: {} };
+      },
+    });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    await userEvent.click(within(card).getByRole('button', { name: /^deny$/i }));
+    await screen.findByText(/^Denied/);
+    const h2 = within(screen.getByRole('article')).getByRole('heading', { level: 2 });
+    await waitFor(() => expect(document.activeElement).toBe(h2));
+  });
+
+  // M2: the shortcut list says Esc goes back. It does, from the page, but
+  // never from the typed field, the confirm step or an open dialog.
+  it('Esc goes back to Waiting from the page, not from the typed field', async () => {
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(del, deploymentImpact()) } });
+    window.location.hash = `#/approvals/${ID1}`;
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    await screen.findByRole('article');
+    screen.getByLabelText(/to approve, type/i).focus();
+    await userEvent.keyboard('{Escape}');
+    expect(window.location.hash).toBe(`#/approvals/${ID1}`);
+    within(screen.getByRole('article')).getByRole('heading', { level: 2 }).focus();
+    await userEvent.keyboard('{Escape}');
+    expect(window.location.hash).toBe('#/waiting');
+  });
+
+  it('Esc in the confirm step cancels it and stays; with a dialog open it does nothing here', async () => {
+    const s = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) } });
+    window.location.hash = `#/approvals/${ID1}`;
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    const card = await screen.findByRole('article');
+    await userEvent.click(within(card).getByRole('button', { name: /^approve$/i }));
+    within(card).getByRole('button', { name: /cancel/i }).focus();
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(within(card).queryByRole('button', { name: /confirm approval/i })).toBeNull());
+    expect(window.location.hash).toBe(`#/approvals/${ID1}`);
+
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    document.body.appendChild(dialog);
+    try {
+      (document.activeElement as HTMLElement).blur();
+      await userEvent.keyboard('{Escape}');
+      expect(window.location.hash).toBe(`#/approvals/${ID1}`);
+    } finally {
+      dialog.remove();
+    }
+  });
+});

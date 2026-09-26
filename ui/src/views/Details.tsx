@@ -6,6 +6,7 @@ import EmptyState from '../components/EmptyState';
 import ImpactTree from '../components/ImpactTree';
 import { GLYPH } from '../components/Tag';
 import { actionText, ago, useNow } from '../lib/format';
+import { useEscapeBack } from '../hooks/useEscapeBack';
 import { APPROVAL_ID } from '../router';
 
 type Big = { label: string; value: string; tone?: 'danger' | 'caution' };
@@ -33,7 +34,7 @@ function bigNumbers(i: Impact): Big[] {
     count(effects, 'object affected', 'objects affected'),
     count(emptied, 'service left with no backends', 'services left with no backends'),
     count(pdbs, 'disruption budget broken', 'disruption budgets broken'),
-    { label: 'Undo', value: undoLabel(i.undo) },
+    { label: 'Undo', value: undoLabel(i.undo, destroyed) },
   ];
 }
 
@@ -55,6 +56,8 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
   const now = useNow();
   const techId = useId();
   const affectedId = useId();
+  const mainRef = useRef<HTMLDivElement>(null);
+  useEscapeBack('#/waiting');
 
   const load = useCallback(async () => {
     if (!valid) return;
@@ -82,6 +85,14 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
       else setError(e instanceof Error ? e.message : 'Could not load this request.');
     }
   }, [id, valid]);
+
+  // After a decision the buttons are replaced by the outcome, and focus
+  // on them would drop to <body>: the next Tab would start from the top
+  // of the page. The question is where the outcome is read from.
+  const onDecided = useCallback(() => {
+    mainRef.current?.querySelector<HTMLElement>('.decision h2')?.focus();
+    void load();
+  }, [load]);
 
   useEffect(() => {
     setD(null);
@@ -128,14 +139,15 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
 
       {d && (
         <div className="details-grid">
-          <div className="details-main">
+          <div className="details-main" ref={mainRef}>
             <DecisionPanel
               summary={d}
               detail={d}
               me={me}
               onRetry={() => void load()}
-              onDecided={() => void load()}
+              onDecided={onDecided}
               standalone
+              headingFirst
               body={
                 <div className="details-body">
                   <p className="details-asked">

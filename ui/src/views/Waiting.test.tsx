@@ -50,6 +50,9 @@ const plain = summary({
 });
 const plainImpact = impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects', effects: [{ kind: 'destroys', object: 'apps/Deployment/demo/web' }] });
 
+// sentenceIn: a row's sentence, whose identifier is its own mono span.
+const sentenceIn = (row: HTMLElement) => row.querySelector<HTMLElement>('.waiting-sentence')!;
+
 const posts = (calls: Call[]) => calls.filter((c) => c.method === 'POST').map((c) => c.url);
 
 // server stands in for the admin API: a mutable pending list, the detail
@@ -136,16 +139,20 @@ describe('Waiting', () => {
   it('the list is oldest first even if the server sends newest first', async () => {
     setMedia(WIDE, true);
     // Newest first; two share a created time, and the id breaks the tie.
+    // One timestamp for the tie: two at(60) calls can land a millisecond
+    // apart under load, and then the tie is no tie (a flake seen in a
+    // full parallel run).
+    const tie = at(60);
     const rows = [
       summary({ id: ID3, name: 'newest', created: at(10) }),
-      summary({ id: ID2, name: 'tie-b', created: at(60) }),
-      summary({ id: ID0, name: 'tie-a', created: at(60) }),
+      summary({ id: ID2, name: 'tie-b', created: tie }),
+      summary({ id: ID0, name: 'tie-a', created: tie }),
       summary({ id: ID1, name: 'oldest', created: at(300) }),
     ];
     server(rows);
     renderWithMotion(<Waiting me="bob" />);
     await waitFor(() => expect(options()).toHaveLength(4));
-    const names = options().map((o) => within(o).getByText(/^Delete the volume claim /).textContent);
+    const names = options().map((o) => sentenceIn(o).textContent);
     expect(names).toEqual([
       'Delete the volume claim oldest',
       'Delete the volume claim tie-a',
@@ -183,7 +190,7 @@ describe('Waiting', () => {
     await waitFor(() => expect(options()).toHaveLength(2));
     srv.set([plain]);
     await stream([ID2]);
-    await waitFor(() => expect(screen.queryByText('Delete the volume claim data', { selector: '.waiting-sentence' })).toBeNull());
+    await waitFor(() => expect(options().map((o) => sentenceIn(o).textContent)).toEqual(['Change the deployment web']));
   });
 
   it('a stream row during load is not lost', async () => {
@@ -219,11 +226,11 @@ describe('Waiting', () => {
     renderWithMotion(<Waiting me="bob" />);
     await waitFor(() => expect(options()).toHaveLength(2));
     const [a, b] = options();
-    expect(within(a).getByText('Delete the volume claim data')).toBeTruthy();
+    expect(sentenceIn(a).textContent).toBe('Delete the volume claim data');
     expect(within(a).getByText(/alice · /)).toBeTruthy();
     // The dot says its tone in words too, never colour alone.
     expect(within(a).getByText(/cannot be undone/i)).toBeTruthy();
-    expect(within(b).getByText('Change the deployment web')).toBeTruthy();
+    expect(sentenceIn(b).textContent).toBe('Change the deployment web');
     expect(heading().textContent).toBe('coding-agent wants to delete the volume claim demo/data');
     // No position line: that belongs to the one-at-a-time layout.
     expect(screen.queryByText(/of 2 waiting for you/)).toBeNull();
@@ -232,7 +239,7 @@ describe('Waiting', () => {
     expect(b.getAttribute('aria-selected')).toBe('true');
     expect(heading().textContent).toBe('coding-agent wants to change the deployment demo/web');
     // Each detail is fetched once, for the request being looked at.
-    await within(panel()).findByText('Snapshot kept');
+    await within(panel()).findByText('Objects saved (manifests only)');
   });
 
   it('narrow screens show one at a time with its position', async () => {
@@ -473,7 +480,9 @@ describe('Waiting', () => {
     server([s]);
     const view = renderWithMotion(<Waiting me="bob" />);
     await waitFor(() => expect(options()).toHaveLength(1));
-    expect(within(options()[0]).getByText(`Delete the volume claim ${long}`).classList.contains('waiting-wrap')).toBe(true);
+    const sent = sentenceIn(options()[0]);
+    expect(sent.textContent).toBe(`Delete the volume claim ${long}`);
+    expect(sent.classList.contains('waiting-wrap')).toBe(true);
     view.unmount();
 
     setMedia(WIDE, false);
@@ -505,7 +514,7 @@ describe('Waiting', () => {
     await waitFor(() => expect(heading().textContent).toContain('demo/web'));
     // A reversible change: no typing, and Deny sends at once.
     expect(within(panel()).queryByRole('textbox')).toBeNull();
-    await within(panel()).findByText('Snapshot kept');
+    await within(panel()).findByText('Objects saved (manifests only)');
     await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
     expect(await screen.findByText('Nothing is waiting for you.')).toBeTruthy();
     expect(posts(srv.calls)).toEqual([`/api/approvals/${ID1}/approve`, `/api/approvals/${ID2}/deny`]);
@@ -520,7 +529,7 @@ describe('Waiting', () => {
       'POST /api/approvals/': { status: 409, body: { error: 'not pending' } },
     });
     renderWithMotion(<Waiting me="bob" />);
-    await within(await screen.findByRole('article')).findByText('Snapshot kept');
+    await within(await screen.findByRole('article')).findByText('Objects saved (manifests only)');
     await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
     expect(await screen.findByText('That request was already decided or has expired.')).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('option')).toBeNull());
@@ -576,5 +585,65 @@ describe('Waiting, carried from review', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(screen.queryByRole('option')).toBeNull();
     expect(screen.queryByText(/demo\/web/)).toBeNull();
+  });
+});
+
+describe('Waiting, final review', () => {
+  // M4: the list's identifiers are mono, as in the panel and every list.
+  it('list rows set the identifier in mono', async () => {
+    setMedia(WIDE, true);
+    server([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    const ident = within(options()[0]).getByText('data');
+    expect(ident.classList.contains('mono')).toBe(true);
+    expect(sentenceIn(options()[0]).textContent).toBe('Delete the volume claim data');
+  });
+
+  // M5: on a narrow screen a reload that takes the shown request away
+  // says so, before the next one is read as if it were the same.
+  it('narrow: a reload that moves the shown request says it was already decided', async () => {
+    setMedia(WIDE, false);
+    const srv = server([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    expect(await screen.findByText('1 of 2 waiting for you')).toBeTruthy();
+    expect(screen.queryByText('That request was already decided or has expired.')).toBeNull();
+    srv.set([plain]);
+    await stream([ID2]);
+    expect(await screen.findByText('1 of 1 waiting for you')).toBeTruthy();
+    expect(screen.getByText('That request was already decided or has expired.').getAttribute('role')).toBe('status');
+  });
+
+  it('narrow: a reload that keeps the shown request says nothing', async () => {
+    setMedia(WIDE, false);
+    const srv = server([severe, plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    expect(await screen.findByText('1 of 2 waiting for you')).toBeTruthy();
+    srv.set([severe]);
+    await stream([ID1]);
+    expect(await screen.findByText('1 of 1 waiting for you')).toBeTruthy();
+    expect(screen.queryByText('That request was already decided or has expired.')).toBeNull();
+  });
+
+  // M6: with the note being said, the empty state is not a second live
+  // region talking over it.
+  it('the empty state is not a status while the decision note is shown', async () => {
+    setMedia(WIDE, true);
+    server([plain]);
+    renderWithMotion(<Waiting me="bob" />);
+    await within(await screen.findByRole('article')).findByText('Objects saved (manifests only)');
+    await userEvent.click(within(panel()).getByRole('button', { name: /^deny$/i }));
+    const empty = (await screen.findByText('Nothing is waiting for you.')).closest('.empty-state')!;
+    expect(screen.getByText('Denied. The agent was refused.').getAttribute('role')).toBe('status');
+    expect(empty.getAttribute('role')).toBeNull();
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+  });
+
+  it('the empty state is a status when there is no note', async () => {
+    setMedia(WIDE, true);
+    server([]);
+    renderWithMotion(<Waiting me="bob" />);
+    const empty = (await screen.findByText('Nothing is waiting for you.')).closest('.empty-state')!;
+    expect(empty.getAttribute('role')).toBe('status');
   });
 });

@@ -28,33 +28,45 @@
   border: 0;
 }
 
-/* 56px, one hairline under it, no shadow and no blur: the header is
-   furniture, and the page below it is the work. */
+/* One hairline under it, no shadow and no blur: the header is
+   furniture, and the page below it is the work.
+
+   Its height IS --header-h, by construction: nothing in it wraps, so a
+   long name, a big badge or 200% zoom can never make it taller than the
+   token that scroll-padding reads. What does not fit is cut short (the
+   brand and the name, with an ellipsis) or scrolls inside its own row
+   (the tabs), never pushed onto a new line. */
 .shell-header {
   position: sticky;
   top: 0;
   z-index: 10;
+  box-sizing: border-box;
+  height: var(--header-h);
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
 
 .shell-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   column-gap: var(--s-7);
-  min-height: 56px;
+  height: 100%;
   padding: 0 var(--s-7);
 }
 
 .shell-brand {
-  display: inline-flex;
-  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
   min-height: var(--s-6);
+  overflow: hidden;
   color: var(--text);
   font-weight: 600;
   font-size: var(--fs-15);
+  line-height: var(--s-6);
   text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shell-brand:hover {
@@ -63,20 +75,23 @@
 }
 
 /* Tabs are plain links. They stretch to the full bar height so the
-   current tab's underline sits on the header's own hairline. */
+   current tab's underline sits on the header's own hairline. If they do
+   not fit they scroll sideways inside the header, never onto a new row. */
 .shell-tabs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-self: stretch;
   column-gap: var(--s-5);
   min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .shell-tab {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: var(--s-2);
-  min-height: 56px;
   color: var(--text-muted);
   font-size: var(--fs-15);
   font-weight: 500;
@@ -118,12 +133,12 @@
 
 .shell-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex: none;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--s-2) var(--s-4);
   margin-left: auto;
-  padding: var(--s-2) 0;
 }
 
 .shell-who {
@@ -151,21 +166,31 @@
 }
 
 /* Below the width where brand, tabs and controls fit on one row, the
-   tabs take a row of their own and wrap inside it; nothing scrolls
-   sideways at 360px. */
+   header is two fixed rows: brand and controls, then the tabs in a 44px
+   row of their own that scrolls sideways inside itself if it must. The
+   page never scrolls sideways, at 360px or at 200% zoom. */
 @media (max-width: 880px) {
   .shell-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) var(--s-11);
     padding: 0 var(--s-4);
     column-gap: var(--s-4);
   }
 
-  .shell-tabs {
-    order: 3;
-    flex-basis: 100%;
+  .shell-brand {
+    grid-area: 1 / 1;
+    justify-self: start;
+    max-width: 100%;
   }
 
-  .shell-tab {
-    min-height: var(--s-11);
+  .shell-meta {
+    grid-area: 1 / 2;
+    margin-left: 0;
+  }
+
+  .shell-tabs {
+    grid-area: 2 / 1 / 3 / -1;
   }
 }
 
@@ -729,6 +754,12 @@
   color: var(--text);
   font-size: var(--fs-13);
   white-space: pre-wrap;
+}
+
+/* Shown in view (an unmeasured or exec-like hold): it sits between the
+   facts and the buttons, read before deciding, as on the details page. */
+.decision-command-shown {
+  margin: 0 0 var(--s-6);
 }
 
 .empty-state {

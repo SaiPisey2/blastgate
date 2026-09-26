@@ -532,6 +532,8 @@ describe('Activity', () => {
     expect(names()).toEqual(['allowed-top', 'soon-allowed']);
   });
 
+  // 15s, not the default 5s: it renders a full 1000-row page twice, which
+  // ran past 5s under a loaded parallel run (a timeout, not a failure).
   it('when the cap trims rows that load older reached, it offers them again', async () => {
     const page = Array.from({ length: 1000 }, (_, i) => ok({ id: 5000 - i, name: `r-${i}` }));
     mockFetch({
@@ -547,7 +549,7 @@ describe('Activity', () => {
     act(() => emit('audit', ok({ id: 9000, name: 'newest' })));
     expect(screen.queryByText('deep')).toBeNull();
     expect(screen.getByRole('button', { name: 'Load older' })).toBeTruthy();
-  });
+  }, 15_000);
 
   it('the banner appears only when there are outside changes', async () => {
     const calls = mockFetch({ 'GET /api/bypass': { body: [bypassRow(), bypassRow({ name: 'other' })] }, 'GET /api/feed': { body: [] } });
