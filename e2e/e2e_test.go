@@ -9,12 +9,14 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +77,33 @@ func (l *logBuf) String() string              { l.mu.Lock(); defer l.mu.Unlock()
 type gate struct {
 	env  []string
 	logs *logBuf
+	api  *adminClient // signed in as bob on first use; see (*gate).admin
+}
+
+// freeAddr returns host:port for a port nothing is listening on right
+// now. Every listener blastgate opens gets one (ruling P2-R26): the
+// defaults (8443, 8444) may be taken on the machine running the suite,
+// or by a blastgate a previous test has not finished stopping.
+func freeAddr(t *testing.T, host string) string {
+	t.Helper()
+	l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}
+
+// value is the last setting of key in the gate's environment, the one
+// blastgate reads.
+func (g *gate) value(key string) string {
+	v := ""
+	for _, kv := range g.env {
+		if s, ok := strings.CutPrefix(kv, key+"="); ok {
+			v = s
+		}
+	}
+	return v
 }
 
 // start runs blastgate serve with a 3s hold, so a held request's ticket
@@ -83,12 +112,7 @@ type gate struct {
 // duplicate keys.
 func start(t *testing.T, extra ...string) *gate {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	l.Close()
+	addr := freeAddr(t, "127.0.0.1")
 	key := make([]byte, 32)
 	rand.Read(key)
 	dir := t.TempDir()
@@ -97,6 +121,7 @@ func start(t *testing.T, extra ...string) *gate {
 		"HOME=" + dir,
 		"BLASTGATE_DATA_DIR=" + filepath.Join(dir, "data"),
 		"BLASTGATE_LISTEN=" + addr,
+		"BLASTGATE_ADMIN_LISTEN=" + freeAddr(t, "127.0.0.1"),
 		"BLASTGATE_UPSTREAM_KUBECONFIG=" + upstreamKC,
 		"BLASTGATE_SIGNING_KEY=" + hex.EncodeToString(key),
 		"BLASTGATE_HOLD=3s",
@@ -114,14 +139,239 @@ func start(t *testing.T, extra ...string) *gate {
 			t.Logf("blastgate log:\n%s", g.logs.String())
 		}
 	})
-	for i := 0; i < 100; i++ {
-		if c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}); err == nil {
-			c.Close()
-			return g
+	// serve binds every listener before serving any, so once the proxy
+	// and the admin listener answer, the webhook's port is bound too.
+	for _, a := range []string{addr, g.value("BLASTGATE_ADMIN_LISTEN")} {
+		listening := false
+		for i := 0; i < 100 && !listening; i++ {
+			if c, err := tls.Dial("tcp", a, &tls.Config{InsecureSkipVerify: true}); err == nil {
+				c.Close()
+				listening = true
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		if !listening {
+			t.Fatalf("blastgate never listened on %s:\n%s", a, g.logs.String())
+		}
 	}
-	t.Fatalf("blastgate never listened:\n%s", g.logs.String())
+	return g
+}
+
+// adminClient talks to the admin listener the way the UI does: over TLS
+// verified against blastgate's own CA, carrying the session cookie in a
+// jar and the CSRF value on every call that is not a GET.
+type adminClient struct {
+	c    *http.Client
+	base string
+	csrf string
+}
+
+// adminHTTP is a client for the admin listener that trusts only
+// blastgate's CA. http2 picks the protocol: the stream must work over
+// both, since a browser may speak either. No proxy from the environment:
+// the listener is on loopback, and an HTTPS_PROXY must not see the cookie.
+func (g *gate) adminHTTP(t *testing.T, http2 bool, jar http.CookieJar) *http.Client {
+	t.Helper()
+	ca, err := os.ReadFile(filepath.Join(g.value("BLASTGATE_DATA_DIR"), "tls", "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(ca) {
+		t.Fatal("blastgate's ca.crt holds no certificate")
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	tr.ForceAttemptHTTP2 = http2
+	if !http2 {
+		// A non-nil empty map is how net/http is told never to upgrade.
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
+	return &http.Client{Transport: tr, Jar: jar, Timeout: 30 * time.Second}
+}
+
+// admin returns a client signed in as bob, an approver created with
+// `blastgate approver new` exactly as an operator would, logged in
+// through POST /api/login with the token it printed.
+func (g *gate) admin(t *testing.T) *adminClient {
+	t.Helper()
+	if g.api != nil {
+		return g.api
+	}
+	tok, err := g.run(t, "approver", "new", "--name", "bob")
+	if err != nil {
+		t.Fatalf("approver new: %v", err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &adminClient{c: g.adminHTTP(t, true, jar), base: "https://" + g.value("BLASTGATE_ADMIN_LISTEN")}
+	body, _ := json.Marshal(map[string]string{"token": strings.TrimSpace(tok)})
+	res, err := a.c.Post(a.base+"/api/login", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var me struct{ Name, CSRF string }
+	if err := json.NewDecoder(res.Body).Decode(&me); err != nil || res.StatusCode != http.StatusOK || me.Name != "bob" || me.CSRF == "" {
+		t.Fatalf("login: status %d, name %q, err %v", res.StatusCode, me.Name, err)
+	}
+	a.csrf = me.CSRF
+	g.api = a
+	return a
+}
+
+// do sends one API call and decodes a JSON answer into out (when non-nil),
+// returning the status. Non-GET calls carry the CSRF header, as the UI's.
+func (a *adminClient) do(t *testing.T, method, path string, body, out any) int {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd = strings.NewReader(string(b))
+	}
+	req, err := http.NewRequest(method, a.base+path, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if method != http.MethodGet {
+		req.Header.Set("X-Blastgate-CSRF", a.csrf)
+	}
+	res, err := a.c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	if out != nil && res.StatusCode < 300 {
+		if err := json.Unmarshal(b, out); err != nil {
+			t.Fatalf("%s %s: %v:\n%s", method, path, err, b)
+		}
+	}
+	if res.StatusCode >= 300 {
+		t.Logf("%s %s: %d %s", method, path, res.StatusCode, b)
+	}
+	return res.StatusCode
+}
+
+// startWithWebhook runs blastgate with its observe webhook listening
+// where the kind API server can reach it, registers the webhook in the
+// cluster with `blastgate webhook-config` and the fixture's admin
+// kubeconfig, and removes the registration when the test ends.
+//
+// The address is the kind network's gateway (BLASTGATE_E2E_HOST_IP), the
+// host's side of the bridge the node sits on. With Docker Desktop the
+// bridge lives inside Docker's VM, so no host interface has that address
+// and the bind fails; there the host's own outbound address is used
+// instead, which the node reaches through the VM's NAT. Either way the
+// node is asked to reach the listener before anything is registered: a
+// registration it cannot reach would, under failurePolicy Ignore, record
+// nothing, and every webhook assertion would be about an empty table.
+func startWithWebhook(t *testing.T) *gate {
+	t.Helper()
+	host := webhookHost(t)
+	addr := freeAddr(t, host)
+	g := start(t, "BLASTGATE_WEBHOOK_LISTEN="+addr, "BLASTGATE_ALLOW_REMOTE=1", "BLASTGATE_TLS_HOSTS=127.0.0.1,localhost,"+host)
+	// GET on /validate is a 405: reached, TLS done, the handler answering.
+	probe, _ := exec.Command("docker", "exec", fixtureNode, "curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
+		"--max-time", "5", "https://"+addr+"/validate").Output()
+	if code := strings.TrimSpace(string(probe)); code != "405" && code != "400" {
+		t.Logf("probe of https://%s/validate from %s answered %q", addr, fixtureNode, code)
+		t.Skip("host not reachable from kind")
+	}
+	cfg, err := g.run(t, "webhook-config", "--url", "https://"+addr+"/validate")
+	if err != nil {
+		t.Fatalf("webhook-config: %v", err)
+	}
+	t.Cleanup(func() {
+		kubectl(t, adminKC, nil, "", "delete", "validatingwebhookconfiguration", "blastgate-observe", "--ignore-not-found")
+	})
+	must(t)(kubectl(t, adminKC, nil, cfg, "apply", "-f", "-"))
+	// The API server picks up a new registration a moment after it is
+	// created. Until a write is seen, the webhook tests would pass for
+	// the wrong reason (no bypass row because nothing was observed).
+	g.bypassBarrier(t)
+	return g
+}
+
+// fixtureNode is the kind node container of the blastgate-fixture cluster.
+const fixtureNode = "blastgate-fixture-control-plane"
+
+func webhookHost(t *testing.T) string {
+	t.Helper()
+	gw := os.Getenv("BLASTGATE_E2E_HOST_IP")
+	if net.ParseIP(gw) == nil {
+		t.Fatalf("BLASTGATE_E2E_HOST_IP %q is not an address; run through make fixture-test", gw)
+	}
+	if l, err := net.Listen("tcp", net.JoinHostPort(gw, "0")); err == nil {
+		l.Close()
+		return gw
+	}
+	// A UDP "connection" sends nothing; it only asks the routing table
+	// which local address traffic toward the gateway would leave from.
+	c, err := net.Dial("udp", net.JoinHostPort(gw, "9"))
+	if err != nil {
+		t.Skip("host not reachable from kind")
+	}
+	defer c.Close()
+	host := c.LocalAddr().(*net.UDPAddr).IP.String()
+	t.Logf("kind gateway %s is not a local address (Docker Desktop); webhook listens on %s", gw, host)
+	return host
+}
+
+// bypassRow is one row of GET /api/bypass.
+type bypassRow struct {
+	At          string   `json:"at"`
+	User        string   `json:"user"`
+	Groups      []string `json:"groups"`
+	Verb        string   `json:"verb"`
+	Resource    string   `json:"resource"`
+	Subresource string   `json:"subresource"`
+	Namespace   string   `json:"namespace"`
+	Name        string   `json:"name"`
+	DryRun      bool     `json:"dry_run"`
+}
+
+func (g *gate) bypasses(t *testing.T) []bypassRow {
+	t.Helper()
+	var rows []bypassRow
+	if code := g.admin(t).do(t, http.MethodGet, "/api/bypass?since_hours=1&limit=500", nil, &rows); code != http.StatusOK {
+		t.Fatalf("GET /api/bypass: %d", code)
+	}
+	return rows
+}
+
+// bypassBarrier makes a write around blastgate -- a server-side dry run,
+// which reaches webhooks declaring sideEffects None and changes nothing --
+// and waits for its row. The webhook runs inside the API server's
+// handling of each write, so once this row is in, every write that
+// returned before the barrier began has been observed or ignored for
+// good: an absent row afterwards is a real absence, not a slow one.
+func (g *gate) bypassBarrier(t *testing.T) []bypassRow {
+	t.Helper()
+	name := fmt.Sprintf("e2e-barrier-%d", time.Now().UnixNano())
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		must(t)(kubectl(t, adminKC, nil, "", "create", "configmap", name, "-n", "demo", "--dry-run=server"))
+		rows := g.bypasses(t)
+		for _, r := range rows {
+			if r.Name == name {
+				return rows
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("the webhook never observed a write made around blastgate\n%s", g.logs.String())
 	return nil
 }
 

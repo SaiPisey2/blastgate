@@ -41,8 +41,15 @@ fixture-up:
 
 # The suite deletes the demo claim and changes the demo workloads, so a
 # second run needs a fresh fixture: make fixture-down; make fixture-up.
+#
+# BLASTGATE_E2E_HOST_IP is the kind network's gateway: the host as the
+# node sees it, where the webhook tests run blastgate's webhook listener
+# for the API server to call. Read here rather than in fixture-up, since
+# make runs each target in its own shell and nothing exported survives.
 fixture-test: build
-	cd e2e && BLASTGATE_E2E_ADMIN=$(ADMIN_KC) BLASTGATE_E2E_UPSTREAM=$(UP_KC) go test -tags=e2e -count=1 -v .
+	cd e2e && BLASTGATE_E2E_ADMIN=$(ADMIN_KC) BLASTGATE_E2E_UPSTREAM=$(UP_KC) \
+		BLASTGATE_E2E_HOST_IP=$$(docker network inspect kind -f '{{(index .IPAM.Config 0).Gateway}}') \
+		go test -tags=e2e -count=1 -v .
 
 fixture-down:
 	# --kubeconfig: without it kind removes the context from the default
