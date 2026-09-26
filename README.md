@@ -1,6 +1,6 @@
 # blastgate
 
-![The approval queue in blastgate's web UI, oldest first: a scale to zero, then an exec running SQL whose impact could not be measured, waiting for its confirmation to be typed](assets/ui-queue.png)
+![blastgate's approver console, Waiting tab: three held requests, and an exec running SQL whose impact could not be measured, waiting for its target to be typed before it can be approved](assets/ui-waiting.png)
 
 A gateway between AI agents and Kubernetes. An agent's kubectl talks to blastgate,
 and blastgate forwards each request **as the human who owns the agent's session**,
@@ -202,16 +202,16 @@ pods, a replica appeared — the approval is superseded and a new ticket is issu
 "The measured impact changed since the last approval." An approval is spent by one
 request, expires after `BLASTGATE_APPROVAL_TTL`, and a pending one after an hour.
 `blastgate approvals` lists newest first, and shows a pending approval past its hour as
-pending until the agent retries; the web queue leaves it out, and the rest of the web
-UI shows it as expired.
+pending until the agent retries; the console's Waiting tab leaves it out, and the rest of
+the console shows it as expired.
 
 Under the default policy every exec, attach and port-forward is held, since none can
 be measured: approve it while the command waits, or approve and retry.
 
 ## Using the web UI
 
-`blastgate serve` also serves an approver UI, on `https://127.0.0.1:8444` by default.
-Nobody can sign in until an approver exists:
+`blastgate serve` also serves an approver console, on `https://127.0.0.1:8444` by
+default. Nobody can sign in until an approver exists:
 
 ```sh
 # As blastgate's user, with its data directory. The token is printed once, to stdout.
@@ -220,57 +220,122 @@ blastgate approver list                 # ID, NAME, CREATED, STATE
 blastgate approver revoke <id>          # also ends every browser session bob holds
 ```
 
-1. **Sign in.** Open the admin address and paste the `bga_…` token. The certificate is
-   blastgate's serving certificate, signed by its own CA (`<data dir>/tls/ca.crt`): trust
-   that CA in the browser, or accept the warning once you have checked it is that CA.
-2. **Queue.** Every pending approval that can still be decided, oldest first, since the
-   oldest is the one closest to expiring. Each is a card: the class, the rule that held
-   it, the object, the human and agent it came from, and what approving it would do
-   (objects affected, volumes destroyed, Services emptied, disruption budgets broken, and
-   the undo). A request blastgate could not measure (an exec, a proxied request, a
-   scoring timeout) is marked `TERMINAL · UNMEASURED`: its zero counts mean nothing was
-   measured, not that nothing happens. A pending approval past its hour leaves the queue.
-   The count in the navigation updates live over a server-sent event stream.
-3. **Impact.** *Details* opens the approval: the parsed action, and the measured impact as
-   a tree, object by object, each with why it is affected.
+**Sign in.** Open the admin address and paste the `bga_…` token. The certificate is
+blastgate's serving certificate, signed by its own CA (`<data dir>/tls/ca.crt`): trust
+that CA in the browser, or accept the warning once you have checked it is that CA.
 
-   ![The impact tree for a held claim delete: the claim, and the volume whose data it destroys](assets/ui-impact.png)
+The console has four tabs: **Waiting**, **Activity**, **Agents** and **Policy**. The
+header also shows whether the live stream is connected (*Live*, *Connecting*,
+*Reconnecting*, *Offline*), a theme switch (System, Dark, Light; dark unless the system
+asks for light), the signed-in approver and *Sign out*. Press `?` for the keyboard
+shortcuts. Links to the old pages (`#/queue`, `#/feed`, `#/bypass`, `#/sessions`) still
+open their replacements.
 
-4. **Approve or deny.** Approving something that destroys data, or whose impact was not
-   measured, needs the namespace typed out first (for a cluster-scoped request, its
-   name or resource). The decision is recorded under the name of the signed-in approver,
-   never a name from the request. The agent's held request is released (or refused) exactly
-   as with `blastgate approve`/`deny`, which keep working.
+### Waiting
 
-The other pages:
+Every pending approval that can still be decided, oldest first, since the oldest is the
+one closest to expiring. The tab's badge is the count, kept up to date over a
+server-sent event stream. On a wide screen the requests are a list on the left (`j`/`k`
+move through it, `Enter` moves to the selected one's panel) and the chosen one's decision panel is
+on the right. On a phone there is only the panel, one request at a time ("1 of 3
+waiting for you"), and the next one appears after each decision. A pending approval
+past its hour leaves the list.
 
-- **Feed**: every request the agents sent, one row each, newest first, filtered by
-  agent, human, class or decision, with new rows arriving live. A write is recorded
-  twice, when it is decided and when it ends, and the feed folds the two into one row:
-  until the request ends (an exec that is still running, say) its status reads
-  *in flight*. Reads are `READ` and greyed out, so the writes stand out. kubectl
-  retries an exec over SPDY when its WebSocket attempt is refused, so one held exec
-  shows as two requests.
+The panel says what is being asked in plain words, with names in monospace: "coding-agent
+wants to run a command in `demo/db-…`". Above it, a tag says how hard the change is to
+take back; below it, one sentence why, then who asked, what it affects (objects,
+volumes destroyed, Services left with no backends, disruption budgets broken) and the
+undo. *Show the command* expands the recorded action; *Show details* opens the full page.
 
-  ![The live feed: two held exec attempts, reads allowed, a scale and a claim delete held](assets/ui-feed.png)
+How much it takes to approve follows the tag, first match wins:
 
-- **Sessions**: the agents' sessions, with *Revoke*, which stops the session's next request.
-- **Policy**: the running policy, and a replay of a candidate over the last hours of
-  decisions, the same as `blastgate replay`. It changes nothing: to adopt a policy, change
-  the file and restart `serve`.
+| Tag | When | To approve |
+|---|---|---|
+| Impact unknown | the class is missing or not one blastgate knows, or the impact was not measured (an exec, a proxied request, a scoring timeout) | type the target |
+| Cannot be undone | data is destroyed, or the class is TERMINAL | type the target |
+| Grants access | AUTHORITY | type the target |
+| Needs a follow-up to undo | COMPENSABLE | *Approve*, then *Confirm approval*, which shows the undo |
+| Can be undone | REVERSIBLE or READ | *Approve*, then *Confirm approval* |
 
-  ![A policy replay: a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
+The target is `namespace/name` (for a cluster-scoped object its name, and failing that
+the resource or verb). It must be typed exactly: paste and drop are refused, and a
+plain Enter does nothing; `⌘/Ctrl+Enter` or *Approve* sends it once it matches. *Confirm
+approval* only becomes pressable 300ms after it appears. *Deny* has the focus by default
+(the typed field, when typing is required), and no single key approves. An unmeasured
+request reads *Unknown*, never a count of zero: its zeros mean nothing was measured, not
+that nothing happens.
 
-- **Bypass**: the writes the webhook recorded (below).
+The console will not approve a request made on the signed-in approver's own behalf (the
+approver's name equals the request's human): *Approve* is disabled and says so. That is
+a check in the browser only; see [Known limits](#known-limits).
+
+The decision is recorded under the name of the signed-in approver, never a name from
+the request. The agent's held request is released (or refused) exactly as with
+`blastgate approve`/`deny`, which keep working.
+
+![Waiting in the light theme: the same three requests](assets/ui-waiting-light.png)
+
+### Details
+
+`#/approvals/<id>` is one request on its own page: the same question and controls, the
+numbers in large type, the command, and "What would be affected": the measured impact
+as a tree, namespace first and then each owner chain, every object with why it is
+affected. Branches with destroyed data or unmeasured objects start expanded. *Technical
+details* holds the verb, resource, namespace, name, rule, approval id and the recorded
+action. An expired request says so
+and has no buttons.
+
+![Details for a held claim delete: one volume destroyed, and the tree showing the claim and the volume whose data it destroys](assets/ui-details.png)
+
+### Activity
+
+Every request the agents sent through blastgate, one row each, newest first: the time, a
+plain sentence, who via which agent, and the outcome (*Allowed*, *Held*, *Waiting for
+approval*, *Denied*, *In flight*, *Failed*). A held row links to its details. Chips show
+All, Held, Denied or Allowed; *More filters* narrows by agent or human.
+
+A write is recorded twice, when it is decided and when it ends, and the two fold into
+one row: until the request ends (an exec that is still running, say) it reads *In
+flight*. Reads are greyed out, so the writes stand out. kubectl retries an exec over SPDY
+when its WebSocket attempt is refused, so one held exec shows as two requests. New rows
+arrive live; while you are reading (scrolled down, or with the pointer or focus in the
+list) they wait behind an "↑ N new" button instead of moving the list, and *Pause* holds
+them until you resume. *Load older* pages back.
+
+![Activity: two held exec attempts, reads allowed, a scale and a claim delete held, and a banner for one change made outside blastgate](assets/ui-activity.png)
+
+When the webhook recorded writes in the last 24 hours, a banner at the top says "N
+changes were made without going through blastgate" and opens **Changes outside
+blastgate** (`#/activity/outside`): when, who (user and groups), what and the target,
+over the last 24 hours, 7 days or 30 days. See
+[Writes that go around blastgate](#writes-that-go-around-blastgate).
+
+### Agents
+
+The agents' sessions: the agent, on whose behalf, and its state (*Active · 11h left*,
+*Stopped*, *Expired*). *Stop* asks "Stop coding-agent for alice?" and, once confirmed,
+revokes the session, which stops its next request.
+
+### Policy
+
+The loaded policy (collapsed, with where it came from), and *Try a policy*: edit a
+candidate and replay it over the last 1 to 720 hours of decisions, the same as
+`blastgate replay`. The result says how many decisions would change and lists each one
+("Waited for approval → Denied"). It changes nothing: to adopt a policy, change the file
+and restart `serve`.
+
+![A policy replay: a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
+
+### Tabs and streams
 
 Each sign-in can hold four live streams (one per tab) and the server 32 in all. A tab
-over the limit says *Too many open tabs* where the feed says *Live*, and keeps retrying,
+over the limit says *Too many tabs* where the header says *Live*, and keeps retrying,
 backing off from 5 seconds to a minute, until another tab closes.
 
-`scripts/demo.sh` builds that scene on the kind fixture: it starts blastgate, registers
-the webhook, creates the approver `bob` and a session for alice's `coding-agent`, holds a
-claim delete, a scale to zero and an exec running SQL, and makes one write with the admin
-kubeconfig. The screenshots here are from it.
+`scripts/demo.sh` builds the scene in these screenshots on the kind fixture: it starts
+blastgate, registers the webhook, creates the approver `bob` and a session for alice's
+`coding-agent`, holds a claim delete, a scale to zero and an exec running SQL, and makes
+one write with the admin kubeconfig.
 
 ```sh
 make fixture-up && make build && scripts/demo.sh
@@ -461,7 +526,7 @@ export BLASTGATE_BYPASS_IGNORE=system:node:,system:kube-,system:serviceaccount:k
 **Lease and Event creates and updates are skipped.** Those controllers renew a Lease
 (`coordination.k8s.io/leases`) every few seconds and write Events (core `events` and
 `events.k8s.io/events`) all day, which would be tens of thousands of rows a day and a
-Bypass page showing nothing else. They are not recorded, whoever makes them. Deletes
+list of outside changes showing nothing else. They are not recorded, whoever makes them. Deletes
 of Leases and Events are still recorded: controllers rarely make them, and removing a
 controller's Lease or the Events that recorded an action is what working around
 blastgate looks like. Set
@@ -469,9 +534,10 @@ blastgate looks like. Set
 groups and resources, so a custom resource that happens to be called `leases` is
 recorded.
 
-The records are in the Bypass page and `GET /api/bypass`, and the table is append-only.
+The records are in the console, behind the Activity banner (*Changes outside blastgate*),
+and in `GET /api/bypass`, and the table is append-only.
 
-![Bypass alerts: a configmap created with the admin kubeconfig, around blastgate](assets/ui-bypass.png)
+![Changes outside blastgate: a configmap created with the admin kubeconfig, around blastgate](assets/ui-outside.png)
 
 Know its limits:
 
@@ -592,6 +658,22 @@ A session for anyone else is then refused by the API server itself.
   names are claims, not logins.
 - **The bypass table is never pruned** (see
   [Writes that go around blastgate](#writes-that-go-around-blastgate)).
+- **Self-approval is refused only in the browser.** The console disables *Approve* when
+  the signed-in approver's name is the request's human, but the server does not check:
+  a direct `POST /api/approvals/<id>/approve`, or `blastgate approve`, from that person
+  goes through. Refusing it server-side is planned.
+- **Granting access needs one approver.** An AUTHORITY request (one that grants access)
+  needs its target typed, like any other hard-to-undo request, but not a second approver
+  or a recent sign-in. Both are planned.
+- **The console does not name the cluster.** `/api/me` returns the approver's name only,
+  so neither the header nor the decision panel says which cluster a request is for. Keep
+  one blastgate per cluster, or check the request's details. Adding the cluster or
+  context name is planned.
+- **No approve-rate statistics.** Policy replays a candidate, but does not yet say which
+  rules hold requests that are nearly always approved.
+- **The pending count stops at 500.** The Waiting list, its badge and the stream read at
+  most the 500 oldest pending approvals, so past that the count reads 500. A true count
+  is planned.
 
 ## Verified
 
