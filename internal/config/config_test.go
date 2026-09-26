@@ -220,3 +220,111 @@ func TestLoadSigningNeedsKeyNotUpstream(t *testing.T) {
 		t.Error("a 48h approval ttl was accepted")
 	}
 }
+
+func TestListenerDefaults(t *testing.T) {
+	c, err := Load(env(base()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AdminListen != "127.0.0.1:8444" || c.WebhookListen != "" || c.WebhookClientCA != "" {
+		t.Errorf("admin %q, webhook %q, client ca %q", c.AdminListen, c.WebhookListen, c.WebhookClientCA)
+	}
+	want := "system:node:,system:kube-,system:serviceaccount:kube-system:,system:apiserver"
+	if strings.Join(c.BypassIgnore, ",") != want {
+		t.Errorf("bypass ignore = %v", c.BypassIgnore)
+	}
+	// The default is copied out, so one Config editing its list cannot
+	// change what the next Load returns.
+	c.BypassIgnore[0] = "edited"
+	if c2, _ := Load(env(base())); c2.BypassIgnore[0] != "system:node:" {
+		t.Errorf("editing one config's list changed the default: %v", c2.BypassIgnore)
+	}
+}
+
+func TestListenerVariablesParsed(t *testing.T) {
+	m := base()
+	m["BLASTGATE_ADMIN_LISTEN"] = "127.0.0.1:9444"
+	m["BLASTGATE_WEBHOOK_LISTEN"] = "127.0.0.1:9445"
+	m["BLASTGATE_WEBHOOK_CLIENT_CA"] = "/etc/blastgate/apiserver-ca.pem"
+	m["BLASTGATE_BYPASS_IGNORE"] = " system:node: ,,system:serviceaccount:ops:controller "
+	c, err := Load(env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AdminListen != "127.0.0.1:9444" || c.WebhookListen != "127.0.0.1:9445" || c.WebhookClientCA != "/etc/blastgate/apiserver-ca.pem" {
+		t.Errorf("config = %+v", c)
+	}
+	if strings.Join(c.BypassIgnore, ",") != "system:node:,system:serviceaccount:ops:controller" {
+		t.Errorf("bypass ignore = %q", c.BypassIgnore)
+	}
+}
+
+func TestNonLoopbackAdminAndWebhookAreOptIn(t *testing.T) {
+	for _, name := range []string{"BLASTGATE_ADMIN_LISTEN", "BLASTGATE_WEBHOOK_LISTEN"} {
+		// 172.18.0.1:9443 is the shape the kind e2e uses: the docker
+		// gateway, reachable from the kind node.
+		for _, addr := range []string{"0.0.0.0:9443", ":9443", "172.18.0.1:9443", "[::]:9443"} {
+			m := base()
+			m[name] = addr
+			if _, err := Load(env(m)); !errors.Is(err, ErrInsecure) {
+				t.Errorf("%s=%s: err = %v, want ErrInsecure", name, addr, err)
+			}
+			m["BLASTGATE_ALLOW_REMOTE"] = "1"
+			if _, err := Load(env(m)); err != nil {
+				t.Errorf("%s=%s with opt-in: err = %v", name, addr, err)
+			}
+		}
+		m := base()
+		m[name] = "not-an-address"
+		if _, err := Load(env(m)); err == nil {
+			t.Errorf("%s: a malformed address was accepted", name)
+		}
+	}
+}
+
+func TestListenersMustDiffer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  map[string]string
+		ok   bool
+	}{
+		{"admin on the proxy's address", map[string]string{"BLASTGATE_ADMIN_LISTEN": "127.0.0.1:8443"}, false},
+		{"admin on the proxy's port via localhost", map[string]string{"BLASTGATE_ADMIN_LISTEN": "localhost:8443"}, false},
+		{"webhook on the admin address", map[string]string{"BLASTGATE_WEBHOOK_LISTEN": "127.0.0.1:8444"}, false},
+		{"webhook on the proxy address", map[string]string{"BLASTGATE_WEBHOOK_LISTEN": "127.0.0.1:8443"}, false},
+		{"webhook on every address, admin's port", map[string]string{"BLASTGATE_WEBHOOK_LISTEN": "0.0.0.0:8444", "BLASTGATE_ALLOW_REMOTE": "1"}, false},
+		{"proxy on every address, admin's port", map[string]string{"BLASTGATE_LISTEN": ":8444", "BLASTGATE_ALLOW_REMOTE": "1"}, false},
+		{"all distinct", map[string]string{"BLASTGATE_ADMIN_LISTEN": "127.0.0.1:9444", "BLASTGATE_WEBHOOK_LISTEN": "127.0.0.1:9445"}, true},
+		{"same port, different hosts", map[string]string{"BLASTGATE_WEBHOOK_LISTEN": "10.0.0.5:8444", "BLASTGATE_ALLOW_REMOTE": "1"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base()
+			for k, v := range tc.set {
+				m[k] = v
+			}
+			_, err := Load(env(m))
+			if tc.ok && err != nil {
+				t.Errorf("refused: %v", err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "same address")) {
+				t.Errorf("err = %v, want a same-address refusal", err)
+			}
+		})
+	}
+}
+
+func TestWebhookClientCANeedsTheWebhook(t *testing.T) {
+	m := base()
+	m["BLASTGATE_WEBHOOK_CLIENT_CA"] = "/etc/blastgate/apiserver-ca.pem"
+	if _, err := Load(env(m)); err == nil || !strings.Contains(err.Error(), "BLASTGATE_WEBHOOK_LISTEN") {
+		t.Errorf("err = %v, want a refusal naming BLASTGATE_WEBHOOK_LISTEN", err)
+	}
+}
+
+func TestBypassIgnoreOfOnlySeparatorsIsRefused(t *testing.T) {
+	m := base()
+	m["BLASTGATE_BYPASS_IGNORE"] = " , ,"
+	if _, err := Load(env(m)); err == nil {
+		t.Error("an ignore list with no prefixes was accepted")
+	}
+}

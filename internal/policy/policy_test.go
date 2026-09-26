@@ -215,3 +215,19 @@ unmeasured: hold
 		t.Errorf("verdict = %+v", v)
 	}
 }
+
+// The policy view shows DefaultText as what is in force when no file is
+// set; it must be the very text Default parsed, and a copy.
+func TestDefaultTextIsTheEmbeddedDefault(t *testing.T) {
+	b := DefaultText()
+	if _, err := Load(b); err != nil || len(b) == 0 {
+		t.Fatalf("DefaultText does not load: %v", err)
+	}
+	if string(b) != string(defaultYAML) {
+		t.Error("DefaultText differs from the embedded default")
+	}
+	b[0] ^= 0xff
+	if string(DefaultText()) != string(defaultYAML) {
+		t.Error("editing the returned text changed the embedded default")
+	}
+}

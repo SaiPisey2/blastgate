@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/client-go/rest"
@@ -18,6 +20,7 @@ import (
 	"github.com/SaiPisey2/sounding/pkg/model"
 	"github.com/SaiPisey2/sounding/pkg/score"
 
+	"github.com/SaiPisey2/blastgate/internal/admin"
 	"github.com/SaiPisey2/blastgate/internal/approval"
 	"github.com/SaiPisey2/blastgate/internal/config"
 	"github.com/SaiPisey2/blastgate/internal/engine"
@@ -29,10 +32,12 @@ import (
 	"github.com/SaiPisey2/blastgate/internal/store"
 	"github.com/SaiPisey2/blastgate/internal/tlsutil"
 	"github.com/SaiPisey2/blastgate/internal/upstream"
+	"github.com/SaiPisey2/blastgate/ui"
 )
 
 // serveCmd wires config, store, TLS, upstream and proxy into a running
-// HTTPS server, and shuts it down cleanly when ctx is cancelled. Logging is
+// HTTPS server, beside the admin listener (the approver UI), and shuts
+// them all down cleanly when ctx is cancelled. Logging is
 // JSON: the proxy logs attacker-chosen header names, and JSON escaping
 // keeps those safe in the log stream.
 func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer) int {
@@ -46,12 +51,13 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 	// policy an operator got wrong must stop the start, not surface as
 	// every write held for a reason nobody can see.
 	pol, policyName := policy.Default(), "default"
+	policySource, policyText := "embedded default", policy.DefaultText()
 	if cfg.PolicyPath != "" {
-		if pol, err = loadPolicy(cfg.PolicyPath); err != nil {
+		if pol, policyText, err = readPolicy(cfg.PolicyPath); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
-		policyName = cfg.PolicyPath
+		policyName, policySource = cfg.PolicyPath, cfg.PolicyPath
 	}
 	st, err := openStore(cfg.DataDir)
 	if err != nil {
@@ -88,7 +94,11 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		Poll:           500 * time.Millisecond,
 		Log:            log,
 	}
-	srv := &http.Server{
+	tlsConfig := func() *tls.Config {
+		return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	}
+	errorLog := slog.NewLogLogger(log.Handler(), slog.LevelWarn)
+	proxySrv := &http.Server{
 		Handler:           proxy.New(auth, g, up, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: watches, logs -f and exec sessions are meant
@@ -99,34 +109,113 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		// exec or port-forward is no longer the server's. Without it an
 		// idle client holds its connection and goroutine forever.
 		IdleTimeout: 120 * time.Second,
-		TLSConfig:   &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-		ErrorLog:    slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+		TLSConfig:   tlsConfig(),
+		ErrorLog:    errorLog,
 	}
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	adminSrv := &http.Server{
+		Handler: admin.NewServer(admin.NewAuth(st, log), admin.Deps{
+			Store: st, Approvals: svc, Policy: pol, PolicySource: policySource, PolicyText: policyText, Log: log,
+		}, ui.FS()),
+		ReadHeaderTimeout: adminReadHeaderTimeout,
+		ReadTimeout:       adminReadTimeout,
+		// /api/stream outlives this: it sets its own deadline before each
+		// write, which replaces the server's.
+		WriteTimeout: adminWriteTimeout,
+		IdleTimeout:  adminIdleTimeout,
+		TLSConfig:    tlsConfig(),
+		ErrorLog:     errorLog,
 	}
-	log.Info("listening", "addr", ln.Addr().String(), "upstream", up.URL.Host, "policy", policyName, "hold", cfg.Hold.String())
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ServeTLS(ln, "", "") }()
-	select {
-	case <-ctx.Done():
+	servers := []*listener{
+		{setting: "BLASTGATE_LISTEN", addr: cfg.Listen, srv: proxySrv},
+		{setting: "BLASTGATE_ADMIN_LISTEN", addr: cfg.AdminListen, srv: adminSrv},
+	}
+	for _, l := range servers[1:] {
+		warnUncovered(log, l.setting, l.addr, cfg.TLSHosts)
+	}
+	// Every address is bound before any is served: one that cannot bind
+	// stops the start with the others closed, rather than leaving a proxy
+	// running whose approvers have no UI.
+	for i, l := range servers {
+		ln, err := net.Listen("tcp", l.addr)
+		if err != nil {
+			for _, prev := range servers[:i] {
+				prev.ln.Close()
+			}
+			fmt.Fprintf(stderr, "%s: %v\n", l.setting, err)
+			return 1
+		}
+		l.ln = ln
+	}
+	log.Info("listening", "addr", servers[0].ln.Addr().String(), "upstream", up.URL.Host, "policy", policyName, "hold", cfg.Hold.String())
+	log.Info("admin listening", "addr", servers[1].ln.Addr().String())
+	errc := make(chan error, len(servers))
+	for _, l := range servers {
+		go func() {
+			if err := l.srv.ServeTLS(l.ln, "", ""); err != nil {
+				errc <- fmt.Errorf("%s: %w", l.setting, err)
+			}
+		}()
+	}
+	// shutdown stops every server together, each given the same 5s for
+	// the requests it is still answering.
+	shutdown := func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		// Shutdown does not wait for hijacked connections (exec, port-
-		// forward); those end when the process does.
-		if err := srv.Shutdown(sctx); err != nil {
-			log.Warn("shutdown", "err", err.Error())
+		var wg sync.WaitGroup
+		for _, l := range servers {
+			wg.Go(func() {
+				// Shutdown does not wait for hijacked connections (exec,
+				// port-forward); those end when the process does.
+				if err := l.srv.Shutdown(sctx); err != nil {
+					log.Warn("shutdown", "listener", l.setting, "err", err.Error())
+				}
+			})
 		}
+		wg.Wait()
+	}
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return 0
 	case err := <-errc:
+		shutdown()
 		if errors.Is(err, http.ErrServerClosed) {
 			return 0
 		}
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+}
+
+// Timeouts for the admin listener. The admin API answers small JSON
+// bodies (a replayed policy is at most 64 KiB), and a replay is the
+// slowest handler.
+const (
+	adminReadHeaderTimeout = 10 * time.Second
+	adminReadTimeout       = 30 * time.Second
+	adminWriteTimeout      = 60 * time.Second
+	adminIdleTimeout       = 120 * time.Second
+)
+
+// listener is one of serve's servers and the address it is bound to.
+type listener struct {
+	setting, addr string
+	srv           *http.Server
+	ln            net.Listener
+}
+
+// warnUncovered logs a listen address the serving certificate does not
+// name. It warns rather than refuses: clients may reach the listener by a
+// name in BLASTGATE_TLS_HOSTS that differs from the address it binds
+// (gate.internal in front of 10.0.0.5), which only the operator knows.
+// An address that binds every interface names no host to check.
+func warnUncovered(log *slog.Logger, setting, addr string, hosts []string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || unspecifiedHost(addr) || covered(host, hosts) {
+		return
+	}
+	log.Warn("the serving certificate does not cover this listen address; clients that reach it by this address will fail TLS verification (add it to BLASTGATE_TLS_HOSTS)",
+		"setting", setting, "addr", addr, "tls_hosts", strings.Join(hosts, ","))
 }
 
 // approvalsAdapter is gate.Approvals over the approval service and the

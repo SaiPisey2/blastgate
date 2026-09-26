@@ -83,13 +83,21 @@ func replayCmd(args []string, getenv func(string) string, stdout, stderr io.Writ
 // serve refuses to start on it, and "policy invalid" alone would not say
 // which of an operator's files to fix.
 func loadPolicy(path string) (*policy.Policy, error) {
+	p, _, err := readPolicy(path)
+	return p, err
+}
+
+// readPolicy is loadPolicy returning the text it parsed as well. serve
+// shows that text in the UI's policy view: the very bytes in force, not
+// the file re-read later after someone has edited it.
+func readPolicy(path string) (*policy.Policy, []byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("policy %s: %w", path, err)
+		return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 	}
 	p, err := policy.Load(b)
 	if err != nil {
-		return nil, fmt.Errorf("policy %s: %w", path, err)
+		return nil, nil, fmt.Errorf("policy %s: %w", path, err)
 	}
-	return p, nil
+	return p, b, nil
 }

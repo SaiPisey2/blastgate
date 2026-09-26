@@ -126,6 +126,11 @@ type doc struct {
 var topLevelKeys = map[string]bool{"rules": true, "default": true, "unmeasured": true}
 var ruleKeys = map[string]bool{"name": true, "when": true, "then": true}
 
+// DefaultText is the embedded default policy's source, for showing the
+// operator what is in force when no policy file is set. A copy, so a
+// caller cannot edit the text Default parses.
+func DefaultText() []byte { return bytes.Clone(defaultYAML) }
+
 func Default() *Policy {
 	p, err := Load(defaultYAML)
 	if err != nil {

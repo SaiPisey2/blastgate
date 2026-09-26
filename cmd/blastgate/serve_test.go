@@ -70,6 +70,18 @@ func TestServeRefusals(t *testing.T) {
 // log. It waits for serve to listen before returning.
 func startServe(t *testing.T, env func(string) string) *syncBuf {
 	t.Helper()
+	// The admin listener's default, 127.0.0.1:8444, is one fixed port: a
+	// test that did not choose one gets a free port instead, so the suite
+	// does not depend on 8444 being unused on the machine running it.
+	if env("BLASTGATE_ADMIN_LISTEN") == "" {
+		admin, inner := freeAddr(t), env
+		env = func(k string) string {
+			if k == "BLASTGATE_ADMIN_LISTEN" {
+				return admin
+			}
+			return inner(k)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	logs := &syncBuf{}

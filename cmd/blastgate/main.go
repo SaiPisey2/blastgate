@@ -19,7 +19,7 @@ var version = "dev"
 const usage = `usage: blastgate <command>
 
 commands:
-  serve       run the proxy
+  serve       run the proxy and the approver UI
   session     new | list | revoke
   approver    who may sign in to the UI: new --name <name> | list | revoke <id>
   approvals   list approvals [--status pending]

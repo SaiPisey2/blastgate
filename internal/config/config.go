@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 )
@@ -30,6 +31,16 @@ type Config struct {
 	// PolicyPath is the operator's policy file; "" means the built-in
 	// default policy.
 	PolicyPath string
+
+	// AdminListen is the approver UI and its API; WebhookListen is the
+	// observe-only admission webhook, "" (the default) meaning off.
+	AdminListen, WebhookListen string
+	// WebhookClientCA is a PEM file of the CAs whose client certificates
+	// the webhook listener requires; "" asks for no client certificate.
+	WebhookClientCA string
+	// BypassIgnore are the username prefixes whose writes the webhook
+	// never records: Kubernetes' own components.
+	BypassIgnore []string
 }
 
 const (
@@ -49,6 +60,11 @@ const (
 	maxBudget         = 30 * time.Second
 	maxApprovalTTL    = 24 * time.Hour
 )
+
+// defaultBypassIgnore matches webhook.DefaultIgnore (a test in cmd/blastgate
+// pins the two together); config does not import the webhook, which would
+// pull the Kubernetes API types into every command's configuration.
+var defaultBypassIgnore = []string{"system:node:", "system:kube-", "system:serviceaccount:kube-system:", "system:apiserver"}
 
 // Load is the configuration serve needs: everything LoadSigning reads,
 // plus the hold window, score budget, policy file and upstream cluster.
@@ -82,7 +98,111 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("set BLASTGATE_UPSTREAM_KUBECONFIG to the service-account kubeconfig blastgate forwards with, or BLASTGATE_UPSTREAM_IN_CLUSTER=1 inside a pod; the default kubeconfig is never used")
 	}
 	c.UpstreamKubeconfig, c.UpstreamInCluster = path, inCluster
+	if err := loadListeners(&c, getenv); err != nil {
+		return Config{}, err
+	}
 	return c, nil
+}
+
+// loadListeners reads the admin and webhook addresses, the webhook's
+// client CA and its ignore list. Only serve reads them: a command that
+// signs or lists has no listener to get wrong.
+func loadListeners(c *Config, getenv func(string) string) error {
+	c.AdminListen = "127.0.0.1:8444"
+	if v := getenv("BLASTGATE_ADMIN_LISTEN"); v != "" {
+		c.AdminListen = v
+	}
+	c.WebhookListen = getenv("BLASTGATE_WEBHOOK_LISTEN")
+	remote := getenv("BLASTGATE_ALLOW_REMOTE") == "1"
+	if err := checkListen("BLASTGATE_ADMIN_LISTEN", c.AdminListen, remote,
+		"the admin listener decides held writes"); err != nil {
+		return err
+	}
+	addrs := []struct{ name, addr string }{{"BLASTGATE_LISTEN", c.Listen}, {"BLASTGATE_ADMIN_LISTEN", c.AdminListen}}
+	if c.WebhookListen != "" {
+		if err := checkListen("BLASTGATE_WEBHOOK_LISTEN", c.WebhookListen, remote,
+			"the webhook writes bypass records"); err != nil {
+			return err
+		}
+		addrs = append(addrs, struct{ name, addr string }{"BLASTGATE_WEBHOOK_LISTEN", c.WebhookListen})
+	}
+	// Two listeners on one address would fail to bind at start-up with
+	// "address already in use"; saying which two settings collide beats
+	// leaving the operator to work it out from the port.
+	for i := range addrs {
+		for j := i + 1; j < len(addrs); j++ {
+			if sameAddress(addrs[i].addr, addrs[j].addr) {
+				return fmt.Errorf("%s %q and %s %q are the same address; each listener needs its own", addrs[i].name, addrs[i].addr, addrs[j].name, addrs[j].addr)
+			}
+		}
+	}
+	c.WebhookClientCA = getenv("BLASTGATE_WEBHOOK_CLIENT_CA")
+	if c.WebhookClientCA != "" && c.WebhookListen == "" {
+		// A client CA with no webhook reads like protection that is on;
+		// it protects nothing, and the webhook the operator meant to lock
+		// down is not running either.
+		return errors.New("BLASTGATE_WEBHOOK_CLIENT_CA is set but BLASTGATE_WEBHOOK_LISTEN is not; the webhook is off")
+	}
+	// A copy, so a caller appending to its list never edits the default.
+	c.BypassIgnore = slices.Clone(defaultBypassIgnore)
+	if v := getenv("BLASTGATE_BYPASS_IGNORE"); v != "" {
+		// Commas and spaces alone would ignore nothing, and every
+		// ReplicaSet scale and kubelet status write would become a bypass
+		// record; that is a typo, not a setting.
+		if c.BypassIgnore = splitList(v); len(c.BypassIgnore) == 0 {
+			return fmt.Errorf("BLASTGATE_BYPASS_IGNORE %q names no username prefixes", v)
+		}
+	}
+	return nil
+}
+
+// checkListen applies BLASTGATE_LISTEN's rule to another listener: a
+// loopback address, or an explicit BLASTGATE_ALLOW_REMOTE=1.
+func checkListen(name, addr string, remote bool, why string) error {
+	loop, err := isLoopback(addr)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", name, addr, err)
+	}
+	if !loop && !remote {
+		return fmt.Errorf("%w: %s %q is not a loopback address; %s, so listening beyond this machine is opt-in (BLASTGATE_ALLOW_REMOTE=1)", ErrInsecure, name, addr, why)
+	}
+	return nil
+}
+
+// sameAddress reports two listen addresses that cannot both bind: the
+// same port on the same host, on hosts that are both loopback, or where
+// either binds every address. Port 0 (pick any) never collides.
+func sameAddress(a, b string) bool {
+	ha, pa, err1 := net.SplitHostPort(a)
+	hb, pb, err2 := net.SplitHostPort(b)
+	if err1 != nil || err2 != nil || pa != pb || pa == "0" {
+		return false
+	}
+	if ha == hb || anyHost(ha) || anyHost(hb) {
+		return true
+	}
+	la, _ := isLoopback(a)
+	lb, _ := isLoopback(b)
+	return la && lb
+}
+
+func anyHost(h string) bool {
+	if h == "" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// splitList is a comma list with blanks trimmed and empty entries dropped.
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // LoadSigning is the configuration a command that signs approvals needs
@@ -136,13 +256,7 @@ func LoadLocal(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("BLASTGATE_DATA_DIR is not set")
 	}
 	if v := getenv("BLASTGATE_TLS_HOSTS"); v != "" {
-		var hosts []string
-		for _, h := range strings.Split(v, ",") {
-			if h = strings.TrimSpace(h); h != "" {
-				hosts = append(hosts, h)
-			}
-		}
-		c.TLSHosts = hosts
+		c.TLSHosts = splitList(v)
 	}
 	loop, err := isLoopback(c.Listen)
 	if err != nil {
