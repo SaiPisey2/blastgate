@@ -85,6 +85,11 @@ func (c *countingStore) ListApprovalsLimit(ctx context.Context, status string, l
 	c.lastLimit.Store(int64(limit))
 	return c.Store.ListApprovalsLimit(ctx, status, limit)
 }
+func (c *countingStore) ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error) {
+	c.n.Add(1)
+	c.lastLimit.Store(int64(limit))
+	return c.Store.ListPendingApprovals(ctx, now, limit)
+}
 func (c *countingStore) ApprovalByID(ctx context.Context, id string) (store.Approval, error) {
 	c.n.Add(1)
 	return c.Store.ApprovalByID(ctx, id)
@@ -260,20 +265,23 @@ const approvalID = "0123456789abcdef0123456789abcdef"
 
 func (f *apiFixture) pending(t *testing.T, id string) store.Approval {
 	t.Helper()
+	a := pendingApproval(id, f.clock.Now())
+	if err := f.st.CreateApproval(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func pendingApproval(id string, now time.Time) store.Approval {
 	imp, _ := json.Marshal(engine.Impact{
 		Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none",
 		Effects:       []engine.Effect{{Kind: "deleted", Object: "PersistentVolumeClaim/demo/data"}},
 		EndpointsLeft: map[string]int{"demo/web": 0}, PDBViolations: []string{"demo/web-pdb"},
 	})
 	act, _ := json.Marshal(normalize.Action{Verb: "delete", Resource: "persistentvolumeclaims", Namespace: "demo", Name: "data"})
-	now := f.clock.Now()
-	a := store.Approval{ID: id, Session: "0123456789abcdef", Human: "alice", Agent: "coding-agent",
+	return store.Approval{ID: id, Session: "0123456789abcdef", Human: "alice", Agent: "coding-agent",
 		RequestDigest: "req-" + id, ImpactDigest: "imp", ActionJSON: act, ImpactJSON: imp,
 		Rule: "data-destruction", Status: "pending", Created: now.Add(-90 * time.Second), Expires: now.Add(time.Hour)}
-	if err := f.st.CreateApproval(context.Background(), a); err != nil {
-		t.Fatal(err)
-	}
-	return a
 }
 
 func keysOf(m map[string]any) []string {
@@ -1024,5 +1032,66 @@ func TestConcurrentDecisionIs409(t *testing.T) {
 	row, _ := f.st.ApprovalByID(context.Background(), approvalID)
 	if row.Status != "denied" || row.DecidedBy != "dave" || row.Token != "" {
 		t.Errorf("row after the race: status=%q decided_by=%q token set=%v", row.Status, row.DecidedBy, row.Token != "")
+	}
+}
+
+// pendingAt is f.pending with its own created and expiry times.
+func (f *apiFixture) pendingAt(t *testing.T, id string, created, expires time.Time) {
+	t.Helper()
+	a := pendingApproval(id, f.clock.Now())
+	a.Created, a.Expires = created, expires
+	if err := f.st.CreateApproval(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPendingQueueIsLiveAndOldestFirst: the queue holds only approvals a
+// person can still decide, oldest (closest to expiring) first. A pending
+// row past its expiry is left out of the list and shown as expired
+// everywhere else, without Approve or Deny (P2-R29, I1 and I4).
+func TestPendingQueueIsLiveAndOldestFirst(t *testing.T) {
+	f := newAPIFixture(t)
+	now := f.clock.Now()
+	const (
+		newest = "cccccccccccccccccccccccccccccccc"
+		middle = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		oldest = "dddddddddddddddddddddddddddddddd"
+		lapsed = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	)
+	// Inserted newest first, so neither insertion order nor id order is
+	// the answer by accident.
+	f.pendingAt(t, newest, now.Add(-time.Minute), now.Add(time.Hour))
+	f.pendingAt(t, middle, now.Add(-2*time.Minute), now.Add(time.Hour))
+	f.pendingAt(t, oldest, now.Add(-3*time.Minute), now.Add(time.Hour))
+	f.pendingAt(t, lapsed, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	c := f.signIn(t, "carol")
+
+	_, body := c.get(t, "/api/approvals?status=pending")
+	var ids []string
+	for _, s := range decode[[]ApprovalSummary](t, body) {
+		ids = append(ids, s.ID)
+	}
+	if want := []string{oldest, middle, newest}; !slices.Equal(ids, want) {
+		t.Errorf("pending queue = %v\nwant oldest first, no lapsed row: %v", ids, want)
+	}
+	// The queue's default reaches as far as the stream's count does.
+	if f.cs.lastLimit.Load() != streamPendingLimit {
+		t.Errorf("pending list asked the store for %d, want %d", f.cs.lastLimit.Load(), streamPendingLimit)
+	}
+
+	_, body = c.get(t, "/api/approvals")
+	statuses := map[string]string{}
+	for _, s := range decode[[]ApprovalSummary](t, body) {
+		statuses[s.ID] = s.Status
+	}
+	if statuses[lapsed] != "expired" || statuses[oldest] != "pending" {
+		t.Errorf("unfiltered list statuses: %v", statuses)
+	}
+	code, body := c.get(t, "/api/approvals/"+lapsed)
+	if d := decode[ApprovalDetail](t, body); code != 200 || d.Status != "expired" {
+		t.Errorf("detail of a lapsed approval: %d %s", code, body)
+	}
+	if code, _ := c.post(t, "/api/approvals/"+lapsed+"/approve", ""); code != 409 {
+		t.Errorf("approving a lapsed approval: %d, want 409", code)
 	}
 }

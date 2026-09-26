@@ -616,3 +616,26 @@ func TestStreamResumesFromLastEventID(t *testing.T) {
 		f.waitSlots(t, 3*time.Second)
 	}
 }
+
+// TestStreamCountsOnlyLivePendingApprovals: the badge and "N waiting"
+// come from this event, so a pending row past its expiry must leave it,
+// including one that lapses while the stream is open (I1).
+func TestStreamCountsOnlyLivePendingApprovals(t *testing.T) {
+	fastStream(t, 10*time.Millisecond, time.Minute)
+	f := newAPIFixture(t)
+	now := f.clock.Now()
+	const soon, later, gone = "11111111111111111111111111111111", "22222222222222222222222222222222", "33333333333333333333333333333333"
+	f.pendingAt(t, soon, now.Add(-time.Minute), now.Add(time.Minute))
+	f.pendingAt(t, later, now.Add(-time.Minute), now.Add(time.Hour))
+	f.pendingAt(t, gone, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	c := f.signIn(t, "carol")
+	_, ch := openStream(t, c)
+	next(t, ch, 3*time.Second) // hello
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":2,"ids":["`+soon+`","`+later+`"]}` {
+		t.Errorf("first approvals: %+v", ap)
+	}
+	f.clock.Add(2 * time.Minute)
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+later+`"]}` {
+		t.Errorf("after one lapsed: %+v", ap)
+	}
+}

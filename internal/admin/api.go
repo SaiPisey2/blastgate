@@ -86,6 +86,7 @@ type apiStore interface {
 	AuditAfter(ctx context.Context, afterID int64, limit int) ([]store.AuditRow, error)
 	AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]store.AuditRow, error)
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
+	ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	ListSessions(ctx context.Context) ([]store.Session, error)
 	RevokeSession(ctx context.Context, id string, at time.Time) error
@@ -341,6 +342,12 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 	if json.Unmarshal(a.ImpactJSON, &imp) == nil {
 		s.Summary, s.Class, s.DataDestroyed = imp.Summary(), imp.Class, imp.DataDestroyed
 	}
+	// Nothing moves a lapsed pending approval to expired until the agent
+	// retries, and it usually never does. Shown as pending, it would offer
+	// Approve and Deny that can only ever answer 409.
+	if a.Status == "pending" && now.After(a.Expires) {
+		s.Status = "expired"
+	}
 	if age := now.Sub(a.Created); age > 0 {
 		s.AgeSeconds = int64(age / time.Second)
 	}
@@ -369,17 +376,30 @@ func (h *api) approvals(w http.ResponseWriter, r *http.Request, _ store.UISessio
 		fail(w, http.StatusBadRequest, errBadStatus)
 		return
 	}
-	limit, ok := listLimit(r, approvalsLimit)
+	def := int64(approvalsLimit)
+	if status == "pending" {
+		// The queue reaches as far as the stream's pending count, so the
+		// badge never counts cards the queue does not show.
+		def = streamPendingLimit
+	}
+	limit, ok := listLimit(r, def)
 	if !ok {
 		fail(w, http.StatusBadRequest, errBadQuery)
 		return
 	}
-	l, err := h.st.ListApprovalsLimit(r.Context(), status, limit)
+	now := h.auth.Now()
+	var l []store.Approval
+	var err error
+	if status == "pending" {
+		// The queue: only what can still be decided, oldest first.
+		l, err = h.st.ListPendingApprovals(r.Context(), now, limit)
+	} else {
+		l, err = h.st.ListApprovalsLimit(r.Context(), status, limit)
+	}
 	if err != nil {
 		h.internal(w, "list approvals", err)
 		return
 	}
-	now := h.auth.Now()
 	out := make([]ApprovalSummary, 0, len(l))
 	for _, a := range l {
 		out = append(out, summarize(a, now))

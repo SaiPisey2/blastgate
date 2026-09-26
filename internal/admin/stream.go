@@ -280,7 +280,9 @@ func (st *streamState) poll(ctx context.Context) bool {
 		return st.failed(ctx, "stream session lookup", err)
 	}
 
-	l, err := h.st.ListApprovalsLimit(ctx, "pending", streamPendingLimit)
+	// Read at each poll's own time, so an approval that lapses while the
+	// stream is open leaves the count without anything else changing.
+	l, err := h.st.ListPendingApprovals(ctx, h.auth.Now(), streamPendingLimit)
 	if err != nil {
 		return st.failed(ctx, "stream pending approvals", err)
 	}

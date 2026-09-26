@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -292,5 +294,64 @@ func TestListApprovalsLimitKeepsTheNewest(t *testing.T) {
 	}
 	if got, _ := s.ListApprovalsLimit(ctx, "pending", 0); len(got) != 0 {
 		t.Errorf("limit 0 is nothing, not unlimited: %d", len(got))
+	}
+}
+
+// The queue lists what a person can still decide, oldest first: the
+// oldest is the one closest to expiring, and a limit must drop the newest,
+// not it. A pending row past its expiry is not decidable (Approve refuses
+// it) and nothing else moves it to expired, so it is left out.
+func TestListPendingApprovalsIsOldestFirstAndLive(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	now := t0.Add(time.Hour)
+	for i, c := range []struct {
+		id      string
+		created time.Duration
+		expires time.Duration
+		status  string
+	}{
+		{"new", 3 * time.Minute, 2 * time.Hour, "pending"},
+		{"mid", 2 * time.Minute, 2 * time.Hour, "pending"},
+		{"old", time.Minute, 2 * time.Hour, "pending"},
+		{"lapsed", 0, 30 * time.Minute, "pending"},
+		{"edge", 30 * time.Second, time.Hour, "pending"}, // expires exactly now: still decidable
+		{"denied", 0, 2 * time.Hour, "denied"},
+	} {
+		a := appr(c.id)
+		a.RequestDigest = fmt.Sprintf("rd%d", i)
+		a.Created, a.Expires, a.Status = t0.Add(c.created), t0.Add(c.expires), c.status
+		if err := s.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The same created time twice: id breaks the tie, so the order is stable.
+	for _, id := range []string{"tie-b", "tie-a"} {
+		a := appr(id)
+		a.Created, a.Expires = t0.Add(4*time.Minute), t0.Add(2*time.Hour)
+		if err := s.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListPendingApprovals(ctx, now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, a := range got {
+		ids = append(ids, a.ID)
+	}
+	if want := "edge,old,mid,new,tie-a,tie-b"; strings.Join(ids, ",") != want {
+		t.Errorf("pending = %v, want %s", ids, want)
+	}
+	if got, _ := s.ListPendingApprovals(ctx, now, 2); len(got) != 2 || got[0].ID != "edge" || got[1].ID != "old" {
+		t.Errorf("a limit keeps the oldest: %+v", got)
+	}
+	if got, _ := s.ListPendingApprovals(ctx, now, 0); len(got) != 0 {
+		t.Errorf("limit 0 is nothing, not unlimited: %d", len(got))
+	}
+	// The CLI's list is unchanged: newest first, lapsed rows included.
+	if all, _ := s.ListApprovals(ctx, "pending"); len(all) != 7 || all[0].ID != "tie-a" && all[0].ID != "tie-b" {
+		t.Errorf("ListApprovals changed: %d rows, first %+v", len(all), all[0].ID)
 	}
 }

@@ -8,6 +8,20 @@ const NOTES: Record<Outcome, string> = {
   gone: 'That request was already decided or has expired.',
 };
 
+// oldestFirst orders the queue by when each hold was made, then by id so
+// equal times keep one order. The server already sends them this way; the
+// sort keeps the page right if it ever does not, since the oldest is the
+// one closest to expiring. A time that does not parse sorts first rather
+// than hiding at the bottom.
+function oldestFirst(a: ApprovalSummary, b: ApprovalSummary): number {
+  const ta = Date.parse(a.created);
+  const tb = Date.parse(b.created);
+  const ka = Number.isNaN(ta) ? -Infinity : ta;
+  const kb = Number.isNaN(tb) ? -Infinity : tb;
+  if (ka !== kb) return ka < kb ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 export default function Queue() {
   const [items, setItems] = useState<ApprovalSummary[] | null>(null);
   const [details, setDetails] = useState<Record<string, ApprovalDetail>>({});
@@ -34,7 +48,7 @@ export default function Queue() {
   const load = useCallback(async () => {
     try {
       const list = await get<ApprovalSummary[]>('/api/approvals?status=pending');
-      const rows = list ?? [];
+      const rows = [...(list ?? [])].sort(oldestFirst);
       idsRef.current = rows.map((r) => r.id).sort().join(',');
       setItems(rows);
       setError('');

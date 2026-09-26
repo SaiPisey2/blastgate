@@ -222,6 +222,29 @@ describe('Queue', () => {
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
   });
 
+  it('lists the oldest first, whatever order the server sent', async () => {
+    const ID3 = 'c'.repeat(32);
+    const ID0 = '0'.repeat(32);
+    const at = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+    // Newest first, as the server used to send them; two share a created
+    // time, and the id breaks that tie.
+    const list = [
+      summary({ id: ID3, name: 'newest', created: at(10) }),
+      summary({ id: ID2, name: 'tie-b', created: at(60) }),
+      summary({ id: ID0, name: 'tie-a', created: at(60) }),
+      summary({ id: ID1, name: 'oldest', created: at(300) }),
+    ];
+    mockFetch({
+      'GET /api/approvals?status=pending': { body: list },
+      'GET /api/approvals/': (c) => ({ body: detail(list.find((s) => c.url.endsWith(s.id))!, impact()) }),
+    });
+    render(<Queue />);
+    await screen.findByText('newest');
+    const names = screen.getAllByRole('article').map((a) => within(a).getByText(/^(newest|tie-a|tie-b|oldest)$/).textContent);
+    expect(names).toEqual(['oldest', 'tie-a', 'tie-b', 'newest']);
+    expect(screen.getByText(/oldest first/i)).toBeTruthy();
+  });
+
   it('a decision made elsewhere removes the card with a note', async () => {
     mockFetch({
       'GET /api/approvals?status=pending': { body: [plain] },

@@ -141,6 +141,22 @@ func (s *Store) ListApprovalsLimit(ctx context.Context, status string, limit int
 	return s.listApprovals(ctx, status, limit)
 }
 
+// ListPendingApprovals is the approver queue: pending approvals that can
+// still be decided at now, oldest first, at most limit of them. Oldest
+// first because the oldest is the one about to expire, and a limit that
+// kept the newest would drop exactly that one. A pending row past its
+// expiry is left out: Approve refuses it, and nothing moves it to expired
+// until the agent retries, which it usually never does, so listing it
+// would keep a card nobody can act on in the queue for good. Expired
+// means now after expires_at, as approval.Service reads it.
+func (s *Store) ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]Approval, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status = 'pending' AND expires_at >= ?
+		ORDER BY created_at ASC, id ASC LIMIT ?`, ms(now), limit)
+}
+
 func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]Approval, error) {
 	q := `SELECT ` + approvalCols + ` FROM approvals`
 	var args []any
@@ -153,6 +169,10 @@ func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]
 		q += ` LIMIT ?`
 		args = append(args, limit)
 	}
+	return s.queryApprovals(ctx, q, args...)
+}
+
+func (s *Store) queryApprovals(ctx context.Context, q string, args ...any) ([]Approval, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
