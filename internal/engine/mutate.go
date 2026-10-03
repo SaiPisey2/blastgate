@@ -103,11 +103,7 @@ var templated = map[string]map[string]bool{
 // that with the live object.
 func (e *Engine) assessMutation(ctx context.Context, a normalize.Action, body []byte) Impact {
 	if isAuthority(a) {
-		return Impact{Class: ClassAuthority, Measured: true, Undo: "none", Effects: []Effect{{
-			Kind:        "grants",
-			Object:      resourceRef(a),
-			Explanation: "changes who may act in the cluster",
-		}}}
+		return authorityImpact(a, body)
 	}
 	if a.Principal.Human == "" {
 		// Without Impersonate-User the dry-run would run as blastgate's own

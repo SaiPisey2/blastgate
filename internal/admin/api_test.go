@@ -448,7 +448,7 @@ func TestApprovalDetailHasImpactButNoSecrets(t *testing.T) {
 	d := decode[map[string]any](t, body)
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
 		"class", "data_destroyed", "measured", "age_seconds", "created", "expires", "action", "impact", "decided_by", "decided",
-		"needs_approvers", "first_approver", "first_approved", "sql_detected")
+		"needs_approvers", "first_approver", "first_approved", "sql_detected", "target_name", "grant")
 	if got := keysOf(d); !slices.Equal(got, wantKeys) {
 		t.Errorf("detail keys %v\nwant %v", got, wantKeys)
 	}
@@ -488,7 +488,7 @@ func TestApprovalListShapeAndStatusFilter(t *testing.T) {
 	}
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
 		"class", "data_destroyed", "measured", "age_seconds", "created", "expires",
-		"needs_approvers", "first_approver", "first_approved", "sql_detected")
+		"needs_approvers", "first_approver", "first_approved", "sql_detected", "target_name", "grant")
 	if got := keysOf(l[0]); !slices.Equal(got, wantKeys) {
 		t.Errorf("summary keys %v\nwant %v", got, wantKeys)
 	}
@@ -1654,5 +1654,83 @@ func TestUntrustedSQLFlagFollowsTheRequest(t *testing.T) {
 	// Trusted, the impact's own flag wins either way.
 	if sqlDetected(true, engine.Impact{SQLDetected: false}, normalize.Action{Resource: "pods", Subresource: "exec"}, "pods/exec") {
 		t.Error("a trusted false was overridden")
+	}
+}
+
+// An access grant's summary names what it grants (I3): the object, for
+// the typed confirmation a create without a name in its path would
+// otherwise ask for as the bare resource, and the binding itself. Only
+// from an impact that matches its digest; never for other classes.
+func TestSummaryNamesTheAccessGrant(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	grant := engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none", Effects: []engine.Effect{{Kind: "grants",
+		Object: "rbac.authorization.k8s.io/ClusterRoleBinding//agent-view", Explanation: "binds ClusterRole/view to User coding-agent"}}}
+	ns := grant
+	ns.Effects = []engine.Effect{{Kind: "grants", Object: "rbac.authorization.k8s.io/RoleBinding/demo/edit", Explanation: "binds Role/editor to Group devs"}}
+	unread := engine.Impact{Class: engine.ClassAuthority, Measured: false, Reason: "x", Undo: "none", Effects: []engine.Effect{{Kind: "grants",
+		Object: "rbac.authorization.k8s.io/clusterrolebindings//", Explanation: engine.GrantUnknown}}}
+	ids := []string{"10000000000000000000000000000000", "20000000000000000000000000000000", "30000000000000000000000000000000",
+		"40000000000000000000000000000000", "50000000000000000000000000000000"}
+	rows := []store.Approval{approvalWithImpact(ids[0], f.clock.Now(), grant), approvalWithImpact(ids[1], f.clock.Now(), ns),
+		approvalWithImpact(ids[2], f.clock.Now(), unread), approvalWithImpact(ids[3], f.clock.Now(), grant), pendingApproval(ids[4], f.clock.Now())}
+	// A grant whose impact no longer matches its digest shows nothing
+	// from it: the token would not cover what was shown.
+	rows[3].ImpactDigest = "edited"
+	for i, a := range rows {
+		a.RequestDigest = "req-" + ids[i]
+		if err := f.st.CreateApproval(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := f.signIn(t, "carol")
+	want := map[string][2]string{
+		ids[0]: {"agent-view", "binds ClusterRole/view to User coding-agent"},
+		ids[1]: {"demo/edit", "binds Role/editor to Group devs"},
+		ids[2]: {"", ""},
+		ids[3]: {"", ""},
+		ids[4]: {"", ""},
+	}
+	_, body := c.get(t, "/api/approvals?status=pending")
+	for _, s := range decode[[]map[string]any](t, body) {
+		w := want[s["id"].(string)]
+		if s["target_name"] != w[0] || s["grant"] != w[1] {
+			t.Errorf("%s: target_name %q grant %q, want %q %q", s["id"], s["target_name"], s["grant"], w[0], w[1])
+		}
+	}
+	_, body = c.get(t, "/api/approvals/"+ids[0])
+	if d := decode[map[string]any](t, body); d["target_name"] != "agent-view" || d["grant"] != want[ids[0]][1] {
+		t.Errorf("detail: %v", d)
+	}
+}
+
+// Ruling E-R15a through real sessions: revoking the first approver
+// withdraws their approval. The next approval becomes the first and
+// releases nothing; a third, live approver releases.
+func TestRevokedFirstApproverIsReplacedThroughTheAPI(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	if err := f.st.CreateApproval(ctx, approvalWithImpact(approvalID, f.clock.Now(),
+		engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/approvals/" + approvalID + "/approve"
+	bob, carol, dave := f.signIn(t, "bob"), f.signIn(t, "carol"), f.signIn(t, "dave")
+	if code, body := bob.post(t, path, ""); code != 200 {
+		t.Fatalf("bob: %d %s", code, body)
+	}
+	if err := f.st.RevokeApprover(ctx, "ap-bob", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	code, body := carol.post(t, path, "")
+	if d := decode[map[string]any](t, body); code != 200 || d["status"] != "partially_approved" || d["first_approver"] != "carol" {
+		t.Fatalf("carol after bob's revocation: %d %s", code, body)
+	}
+	if r, _ := f.st.ApprovalByID(ctx, approvalID); r.Token != "" || r.Nonce != "" || r.FirstApproverID != "ap-carol" {
+		t.Fatalf("carol's approval released or did not replace bob: %+v", r)
+	}
+	code, body = dave.post(t, path, "")
+	if d := decode[map[string]any](t, body); code != 200 || d["status"] != "approved" || d["first_approver"] != "carol" || d["decided_by"] != "dave" {
+		t.Fatalf("dave: %d %s", code, body)
 	}
 }

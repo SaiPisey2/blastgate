@@ -346,6 +346,15 @@ type ApprovalSummary struct {
 	// without fetching each detail. It is trusted from the impact only
 	// when the impact matches its digest; otherwise see sqlDetected.
 	SQLDetected bool `json:"sql_detected"`
+	// TargetName and Grant name what an access grant grants, from the
+	// impact's effect: the object ("namespace/name", or "name" when
+	// cluster-scoped) and what it does ("binds ClusterRole/view to User
+	// coding-agent"). A create carries no name in its path, so without
+	// TargetName the console could only ask the approver to type the bare
+	// resource. Both are set only for an AUTHORITY impact that matches its
+	// digest -- the value the token binds -- and are empty otherwise.
+	TargetName string `json:"target_name"`
+	Grant      string `json:"grant"`
 }
 
 // ApprovalDetail is everything the human is deciding on. It is built
@@ -383,7 +392,11 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 	if decoded {
 		s.Summary, s.Class, s.DataDestroyed, s.Measured = imp.Summary(), imp.Class, imp.DataDestroyed, imp.Measured
 	}
-	s.SQLDetected = sqlDetected(decoded && imp.Digest() == a.ImpactDigest, imp, act, resource)
+	trusted := decoded && imp.Digest() == a.ImpactDigest
+	s.SQLDetected = sqlDetected(trusted, imp, act, resource)
+	if trusted {
+		s.TargetName, s.Grant = grantOf(imp)
+	}
 	// Nothing moves a lapsed pending approval to expired until the agent
 	// retries, and it usually never does. Shown as pending, it would offer
 	// Approve and Deny that can only ever answer 409. A partial approval
@@ -395,6 +408,31 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 		s.AgeSeconds = int64(age / time.Second)
 	}
 	return s
+}
+
+// grantOf reads an access grant's object and explanation from its first
+// "grants" effect. The object is group/Kind/namespace/name (core objects
+// without the group), so the last two parts are the namespace and name.
+// The explanation is left out when the engine could not read the object:
+// its stand-in text says nothing the class does not.
+func grantOf(imp engine.Impact) (target, grant string) {
+	if imp.Class != engine.ClassAuthority || len(imp.Effects) == 0 || imp.Effects[0].Kind != "grants" {
+		return "", ""
+	}
+	ef := imp.Effects[0]
+	parts := strings.Split(ef.Object, "/")
+	if len(parts) >= 3 {
+		if ns, name := parts[len(parts)-2], parts[len(parts)-1]; name != "" {
+			target = name
+			if ns != "" {
+				target = ns + "/" + name
+			}
+		}
+	}
+	if imp.Measured && ef.Explanation != engine.GrantUnknown {
+		grant = ef.Explanation
+	}
+	return target, grant
 }
 
 // execSubresources are the pod subresources that run or attach to a

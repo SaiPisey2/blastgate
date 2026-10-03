@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -168,6 +169,12 @@ func resumeCursor(h string, newest int64) (int64, bool) {
 type pendingEvent struct {
 	Count int      `json:"count"`
 	IDs   []string `json:"ids"`
+	// Partial maps each partially approved id among IDs to its first
+	// approver's name. Without it a first approval changed nothing the
+	// event carried (the id was waiting before and after), so no event
+	// was sent and an open console kept offering the first approver a
+	// second Approve the server would refuse.
+	Partial map[string]string `json:"partial"`
 }
 
 func (h *api) stream(w http.ResponseWriter, r *http.Request, _ store.UISession) {
@@ -262,6 +269,10 @@ type streamState struct {
 	lastID  int64
 	pending []string
 	count   int
+	// partial is each partially approved id's first approver, by id and
+	// name, as of the last event: a first approval, or a revoked first
+	// approver replaced (ruling E-R15a), changes it without changing ids.
+	partial map[string]string
 	sent    bool // whether an approvals event has been sent yet
 }
 
@@ -293,17 +304,22 @@ func (st *streamState) poll(ctx context.Context) bool {
 		return st.failed(ctx, "stream pending count", err)
 	}
 	ids := make([]string, 0, len(l))
+	partial, names := map[string]string{}, map[string]string{}
 	for _, a := range l {
 		ids = append(ids, a.ID)
+		if a.Status == "partially_approved" {
+			partial[a.ID] = a.FirstApproverID + "\x00" + a.FirstApproverName
+			names[a.ID] = a.FirstApproverName
+		}
 	}
 	slices.Sort(ids)
 	// The count is compared too: past the id cap a new row can change it
 	// while the oldest 500 ids stay the same.
-	if !st.sent || count != st.count || !slices.Equal(ids, st.pending) {
-		if st.s.event("approvals", "", pendingEvent{Count: count, IDs: ids}) != nil {
+	if !st.sent || count != st.count || !slices.Equal(ids, st.pending) || !maps.Equal(partial, st.partial) {
+		if st.s.event("approvals", "", pendingEvent{Count: count, IDs: ids, Partial: names}) != nil {
 			return false
 		}
-		st.pending, st.count, st.sent = ids, count, true
+		st.pending, st.count, st.partial, st.sent = ids, count, partial, true
 	}
 
 	for n := 0; n < streamCatchUp; {

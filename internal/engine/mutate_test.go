@@ -187,7 +187,7 @@ func TestRBACWriteIsAuthorityWithoutDryRun(t *testing.T) {
 	var seen []*http.Request
 	e := apiServer(t, "", "", 200, &seen)
 	a := normalize.Action{Verb: "create", Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings", Principal: alice}
-	i := e.assessMutation(context.Background(), a, []byte(`{}`))
+	i := e.assessMutation(context.Background(), a, []byte(`{"metadata":{"name":"agent-view"},"roleRef":{"kind":"ClusterRole","name":"view"},"subjects":[{"kind":"User","name":"coding-agent"}]}`))
 	if i.Class != ClassAuthority || !i.Measured {
 		t.Errorf("impact = %+v", i)
 	}

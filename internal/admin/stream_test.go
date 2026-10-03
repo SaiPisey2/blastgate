@@ -225,7 +225,7 @@ func TestStreamEventsAreWhatTheUIParses(t *testing.T) {
 		t.Errorf("hello: %+v", hello)
 	}
 	ap := next(t, ch, 3*time.Second)
-	if ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+approvalID+`"]}` {
+	if ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+approvalID+`"],"partial":{}}` {
 		t.Errorf("first approvals: %+v", ap)
 	}
 
@@ -280,7 +280,7 @@ quiet:
 	second := "00000000000000000000000000000001"
 	f.pending(t, second)
 	ap = next(t, ch, 3*time.Second)
-	if ap.name != "approvals" || ap.data != `{"count":2,"ids":["`+second+`","`+approvalID+`"]}` {
+	if ap.name != "approvals" || ap.data != `{"count":2,"ids":["`+second+`","`+approvalID+`"],"partial":{}}` {
 		t.Errorf("after a second hold: %+v", ap)
 	}
 	// Deciding one takes it out; an empty queue is [] not null, which the
@@ -292,7 +292,7 @@ quiet:
 	}
 	for {
 		ap = next(t, ch, 3*time.Second)
-		if ap.name == "approvals" && ap.data == `{"count":0,"ids":[]}` {
+		if ap.name == "approvals" && ap.data == `{"count":0,"ids":[],"partial":{}}` {
 			break
 		}
 		if ap.name != "approvals" {
@@ -631,11 +631,47 @@ func TestStreamCountsOnlyLivePendingApprovals(t *testing.T) {
 	c := f.signIn(t, "carol")
 	_, ch := openStream(t, c)
 	next(t, ch, 3*time.Second) // hello
-	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":2,"ids":["`+soon+`","`+later+`"]}` {
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":2,"ids":["`+soon+`","`+later+`"],"partial":{}}` {
 		t.Errorf("first approvals: %+v", ap)
 	}
 	f.clock.Add(2 * time.Minute)
-	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+later+`"]}` {
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+later+`"],"partial":{}}` {
 		t.Errorf("after one lapsed: %+v", ap)
+	}
+}
+
+// A first approval leaves the id in the queue, so ids alone never told
+// the console it happened (M2): the event carries each partial id's
+// first approver, and a change to it -- a first approval, or a revoked
+// first approver replaced (ruling E-R15a) -- sends a new event.
+func TestStreamAnnouncesPartialApprovals(t *testing.T) {
+	fastStream(t, 10*time.Millisecond, time.Minute)
+	f := newAPIFixture(t)
+	if err := f.st.CreateApproval(context.Background(), approvalWithImpact(approvalID, f.clock.Now(),
+		engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})); err != nil {
+		t.Fatal(err)
+	}
+	carol := f.signIn(t, "carol")
+	_, ch := openStream(t, carol)
+	next(t, ch, 3*time.Second) // hello
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+approvalID+`"],"partial":{}}` {
+		t.Fatalf("first approvals: %+v", ap)
+	}
+	bob := f.signIn(t, "bob")
+	if code, body := bob.post(t, "/api/approvals/"+approvalID+"/approve", ""); code != 200 {
+		t.Fatalf("bob: %d %s", code, body)
+	}
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+approvalID+`"],"partial":{"`+approvalID+`":"bob"}}` {
+		t.Fatalf("after the first approval: %+v", ap)
+	}
+	if err := f.st.RevokeApprover(context.Background(), "ap-bob", f.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	dave := f.signIn(t, "dave")
+	if code, body := dave.post(t, "/api/approvals/"+approvalID+"/approve", ""); code != 200 || decode[map[string]any](t, body)["status"] != "partially_approved" {
+		t.Fatalf("dave after bob's revocation: %d %s", code, body)
+	}
+	if ap := next(t, ch, 3*time.Second); ap.name != "approvals" || ap.data != `{"count":1,"ids":["`+approvalID+`"],"partial":{"`+approvalID+`":"dave"}}` {
+		t.Fatalf("after the replacement: %+v", ap)
 	}
 }
