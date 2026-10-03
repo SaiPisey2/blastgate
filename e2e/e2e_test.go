@@ -162,9 +162,10 @@ func start(t *testing.T, extra ...string) *gate {
 // verified against blastgate's own CA, carrying the session cookie in a
 // jar and the CSRF value on every call that is not a GET.
 type adminClient struct {
-	c    *http.Client
-	base string
-	csrf string
+	c            *http.Client
+	base         string
+	csrf         string
+	loginCluster string // the cluster POST /api/login answered with
 }
 
 // adminHTTP is a client for the admin listener that trusts only
@@ -198,10 +199,24 @@ func (g *gate) adminHTTP(t *testing.T, http2 bool, jar http.CookieJar) *http.Cli
 // through POST /api/login with the token it printed.
 func (g *gate) admin(t *testing.T) *adminClient {
 	t.Helper()
-	if g.api != nil {
-		return g.api
+	if g.api == nil {
+		g.api = g.approver(t, "bob")
 	}
-	tok, err := g.run(t, "approver", "new", "--name", "bob")
+	return g.api
+}
+
+// approver creates another approver account with `blastgate approver
+// new` (humans become --human links) and signs it in through POST
+// /api/login in its own cookie jar: a second person, not bob's session
+// under another name. The two-person rule counts accounts, so a test of
+// it needs a second account with its own session.
+func (g *gate) approver(t *testing.T, name string, humans ...string) *adminClient {
+	t.Helper()
+	args := []string{"approver", "new", "--name", name}
+	for _, h := range humans {
+		args = append(args, "--human", h)
+	}
+	tok, err := g.run(t, args...)
 	if err != nil {
 		t.Fatalf("approver new: %v", err)
 	}
@@ -216,13 +231,35 @@ func (g *gate) admin(t *testing.T) *adminClient {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	var me struct{ Name, CSRF string }
-	if err := json.NewDecoder(res.Body).Decode(&me); err != nil || res.StatusCode != http.StatusOK || me.Name != "bob" || me.CSRF == "" {
+	var me struct{ Name, CSRF, Cluster string }
+	if err := json.NewDecoder(res.Body).Decode(&me); err != nil || res.StatusCode != http.StatusOK || me.Name != name || me.CSRF == "" {
 		t.Fatalf("login: status %d, name %q, err %v", res.StatusCode, me.Name, err)
 	}
-	a.csrf = me.CSRF
-	g.api = a
+	a.csrf, a.loginCluster = me.CSRF, me.Cluster
 	return a
+}
+
+// refusal sends a call the server is expected to refuse and returns the
+// status with the {"error"} text it answered.
+func (a *adminClient) refusal(t *testing.T, method, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, a.base+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Blastgate-CSRF", a.csrf)
+	res, err := a.c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	var e struct{ Error string }
+	json.Unmarshal(b, &e)
+	if e.Error == "" {
+		t.Logf("%s %s: %d %s", method, path, res.StatusCode, b)
+	}
+	return res.StatusCode, e.Error
 }
 
 // do sends one API call and decodes a JSON answer into out (when non-nil),

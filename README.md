@@ -117,6 +117,8 @@ own writes.
 | `BLASTGATE_BYPASS_INCLUDE_NOISE` | unset | `1` makes the webhook record Lease and Event creates and updates too, which it skips by default (deletes are always recorded); anything but `0` or `1` is refused |
 | `BLASTGATE_ALLOW_REMOTE` | unset | `1` lets any of the three listeners bind a non-loopback address; without it `serve` refuses to start |
 | `BLASTGATE_TLS_HOSTS` | `127.0.0.1,localhost` | the names and addresses the serving certificate covers, for all three listeners |
+| `BLASTGATE_AUTHORITY_REAUTH` | `15m` | how recently each of the two approvers of an access grant must have signed in to the console; `1m` to `12h` (see [Access grants need two people](#access-grants-need-two-people)) |
+| `BLASTGATE_CLUSTER_NAME` | the upstream kubeconfig's current context | the cluster name the console shows approvers; printable, at most 63 characters. Unset, a context name is cleaned of unprintable characters and cut to 63; with `BLASTGATE_UPSTREAM_IN_CLUSTER=1`, or no context, it reads `unnamed cluster` |
 
 ## Service account
 
@@ -194,6 +196,12 @@ blastgate approve <id> --by bob
 blastgate deny <id> --by bob                # retries of the same request are refused for an hour
 ```
 
+Nobody approves a request made on their own behalf: `approve --by alice` on alice's
+request is refused with "you can't approve a request made on your behalf". An access
+grant (an `AUTHORITY` request) cannot be approved from the CLI at all ("access grants
+need two approvers in the browser"); it needs two people in the console, see
+[Access grants need two people](#access-grants-need-two-people). `deny` works on both.
+
 The agent then retries the same request. The approval is bound to the session, the
 human, the agent, the request (a canonical digest, so kubectl re-serialising the body
 does not matter, but a different body does) and the **measured impact**. A retry is
@@ -201,7 +209,8 @@ always measured again: if the impact has changed — another Service now selects
 pods, a replica appeared — the approval is superseded and a new ticket is issued, with
 "The measured impact changed since the last approval." An approval is spent by one
 request, expires after `BLASTGATE_APPROVAL_TTL`, and a pending one after an hour.
-`blastgate approvals` lists newest first, and shows a pending approval past its hour as
+`blastgate approvals` lists newest first (`--status pending` includes access grants one
+person has approved, `partially_approved`), and shows a pending approval past its hour as
 pending until the agent retries; the console's Waiting tab leaves it out, and the rest of
 the console shows it as expired.
 
@@ -216,16 +225,21 @@ default. Nobody can sign in until an approver exists:
 ```sh
 # As blastgate's user, with its data directory. The token is printed once, to stdout.
 (umask 077; blastgate approver new --name bob > bob.token)
-blastgate approver list                 # ID, NAME, CREATED, STATE
+# --human links the identities carol's own agents act as; repeatable.
+(umask 077; blastgate approver new --name carol --human carol@example.com > carol.token)
+blastgate approver list                 # ID, NAME (linked humans), CREATED, STATE
 blastgate approver revoke <id>          # also ends every browser session bob holds
 ```
+
+Links cannot be edited: to change them, revoke the approver and create them again.
 
 **Sign in.** Open the admin address and paste the `bga_…` token. The certificate is
 blastgate's serving certificate, signed by its own CA (`<data dir>/tls/ca.crt`): trust
 that CA in the browser, or accept the warning once you have checked it is that CA.
 
 The console has four tabs: **Waiting**, **Activity**, **Agents** and **Policy**. The
-header also shows whether the live stream is connected (*Live*, *Connecting*,
+header names the cluster beside the brand on every screen (see `BLASTGATE_CLUSTER_NAME`),
+and also shows whether the live stream is connected (*Live*, *Connecting*,
 *Reconnecting*, *Offline*), a theme switch (System, Dark, Light; dark unless the system
 asks for light), the signed-in approver and *Sign out*. Press `?` for the keyboard
 shortcuts. `Esc` goes back: from Details to Waiting, and from Changes outside blastgate
@@ -236,8 +250,9 @@ open their replacements.
 ### Waiting
 
 Every pending approval that can still be decided, oldest first, since the oldest is the
-one closest to expiring. The tab's badge is the count, kept up to date over a
-server-sent event stream. On a wide screen the requests are a list on the left (`j`/`k`
+one closest to expiring, access grants waiting for their second approver included. The
+tab's badge is the true count, kept up to date over a server-sent event stream; the list
+itself holds the 500 oldest. On a wide screen the requests are a list on the left (`j`/`k`
 move through it, `Enter` moves to the selected one's panel) and the chosen one's decision panel is
 on the right. On a phone there is only the panel, one request at a time ("1 of 3
 waiting for you"), and the next one appears after each decision. A pending approval
@@ -245,7 +260,7 @@ past its hour leaves the list.
 
 The panel says what is being asked in plain words, with names in monospace: "coding-agent
 wants to run a command in `demo/db-…`", or "run a database command" when blastgate
-detected SQL in it. Above it, a tag says how hard the change is to take back; below it,
+detected SQL in it, and under that "On cluster `<name>`". Above it, a tag says how hard the change is to take back; below it,
 one sentence why, then who asked, what it affects (objects, volumes destroyed, Services
 left with no backends, disruption budgets broken, and *Runs SQL* when SQL was detected)
 and the undo. The undo reads *Objects saved (manifests only)* when blastgate snapshotted
@@ -264,7 +279,7 @@ How much it takes to approve follows the tag, first match wins:
 |---|---|---|
 | Impact unknown | the class is missing or not one blastgate knows, or the impact was not measured (an exec, a proxied request, a scoring timeout) | type the target |
 | Cannot be undone | data is destroyed, or the class is TERMINAL | type the target |
-| Grants access | AUTHORITY | type the target |
+| Grants access | AUTHORITY | type the target, and a second approver (see [Access grants need two people](#access-grants-need-two-people)) |
 | Needs a follow-up to undo | COMPENSABLE | *Approve*, then *Confirm approval*, which says how to undo it ("restore the saved objects", or the follow-up blastgate worked out) |
 | Can be undone | REVERSIBLE or READ | *Approve*, then *Confirm approval* |
 
@@ -276,15 +291,45 @@ approval* only becomes pressable 300ms after it appears. *Deny* has the focus by
 single key approves. An unmeasured request reads *Unknown*, never a count of zero: its
 zeros mean nothing was measured, not that nothing happens.
 
-The console will not approve a request made on the signed-in approver's own behalf (the
-approver's name equals the request's human): *Approve* is disabled and says so. That is
-a check in the browser only; see [Known limits](#known-limits).
+Nobody approves a request made on their own behalf. The server refuses it, with 403
+"you can't approve a request made on your behalf", when the approver's name is the
+request's human, or the request's human is one linked to the approver with `approver new
+--human`. Both match exactly, case included. The console disables *Approve* for such a
+request and says why. *Deny* is never blocked. `blastgate approve --by` checks the name it
+is given; linked humans belong to console accounts.
 
 The decision is recorded under the name of the signed-in approver, never a name from
 the request. The agent's held request is released (or refused) exactly as with
 `blastgate approve`/`deny`, which keep working.
 
 ![Waiting in the light theme: the same three requests](assets/ui-waiting-light.png)
+
+### Access grants need two people
+
+A request that changes who may act in the cluster (any RBAC write, a service-account
+token, a CSR approval; class `AUTHORITY`, tagged *Grants access*) needs two approvers,
+each signed in to the console with their own account:
+
+- The first approval records who gave it and releases nothing: the request's status is
+  `partially_approved`, it stays in Waiting, the agent's retry is held on the same ticket, and the panel says
+  "Approved by bob at 14:02 · needs one more approver".
+- The second must come from a different account, with a different name. The same account
+  approving twice gets 409 "you already approved this; it needs a second person", and
+  for that person the console disables *Approve* and says so.
+- Each of the two must have signed in within `BLASTGATE_AUTHORITY_REAUTH` (15 minutes by
+  default) of approving. Otherwise the server answers 403 "sign in again to approve
+  access grants", and the console offers *Sign in again*, which signs out and comes back
+  to the same request.
+- Only the second approval mints the approval token. The decision records the second
+  approver, and the approval keeps the first one's name and time.
+- It is browser only: `blastgate approve` refuses access grants. Any approver, or
+  `blastgate deny`, can still deny at any point, and a partial approval expires like a
+  pending one.
+
+The rule fails closed: a stored impact whose class blastgate does not know, or that no
+longer matches its digest, needs two people too.
+
+![A partially approved access grant, seen by a second approver: approved by bob, needs one more approver](assets/ui-two-person.png)
 
 ### Details
 
@@ -336,7 +381,13 @@ candidate and replay it over the last 1 to 720 hours of decisions, the same as
 ("Held → Denied"). It changes nothing: to adopt a policy, change the file and restart
 `serve`.
 
-![A policy replay: a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
+*How each rule is used* lists, for each rule that held something in the last 7 days, how
+many requests it held and how many of those were approved, denied or expired, with the
+approve rate (approved out of approved plus denied). A rule that held at least 10 and is
+approved at least 95% of the time is flagged "Almost always approved — consider allowing
+it". The same numbers are at `GET /api/policy/stats?since_hours=N` (1 to 720).
+
+![Policy: how each rule is used over the last 7 days, and a replay in which a candidate that denies instead of holding would have changed three decisions](assets/ui-policy.png)
 
 ### Tabs and streams
 
@@ -347,7 +398,10 @@ backing off from 5 seconds to a minute, until another tab closes.
 `scripts/demo.sh` builds the scene in these screenshots on the kind fixture: it starts
 blastgate, registers the webhook, creates the approver `bob` and a session for alice's
 `coding-agent`, holds a claim delete, a scale to zero and an exec running SQL, and makes
-one write with the admin kubeconfig.
+one write with the admin kubeconfig. The screenshots ran it with
+`BLASTGATE_CLUSTER_NAME=kind-blastgate-fixture` (unset, the header reads the upstream
+kubeconfig's context, `fixture`). For the two-person one, alice's agent then asked for a
+role binding, bob approved it, and a second approver, carol, signed in.
 
 ```sh
 make fixture-up && make build && scripts/demo.sh
@@ -664,28 +718,14 @@ A session for anyone else is then refused by the API server itself.
   for that one replay.
 - **"Decided by" is a name, not an identity.** A decision from the web UI records the
   signed-in approver's name. `blastgate approve --by` records whatever text it is given,
-  checked against nothing, and the two read the same in the record. A revoked
+  checked only against the request's human, and the two read the same in the record. A revoked
   approver's name can be given to a new approver. Anyone who can run `blastgate approve`
   already holds the signing key and the data directory, so the CLI is trusted, but its
   names are claims, not logins.
 - **The bypass table is never pruned** (see
   [Writes that go around blastgate](#writes-that-go-around-blastgate)).
-- **Self-approval is refused only in the browser.** The console disables *Approve* when
-  the signed-in approver's name is the request's human, but the server does not check:
-  a direct `POST /api/approvals/<id>/approve`, or `blastgate approve`, from that person
-  goes through. Refusing it server-side is planned.
-- **Granting access needs one approver.** An AUTHORITY request (one that grants access)
-  needs its target typed, like any other hard-to-undo request, but not a second approver
-  or a recent sign-in. Both are planned.
-- **The console does not name the cluster.** `/api/me` returns the approver's name only,
-  so neither the header nor the decision panel says which cluster a request is for. Keep
-  one blastgate per cluster, or check the request's details. Adding the cluster or
-  context name is planned.
-- **No approve-rate statistics.** Policy replays a candidate, but does not yet say which
-  rules hold requests that are nearly always approved.
-- **The pending count stops at 500.** The Waiting list, its badge and the stream read at
-  most the 500 oldest pending approvals, so past that the count reads 500. A true count
-  is planned.
+- **Self-approval matching is exact.** An approver named `Bob` is not the human `bob`,
+  and a linked human must be spelled exactly as sessions record it.
 
 ## Verified
 
@@ -704,7 +744,12 @@ with `approver new`: approve and deny from the API release and refuse kubectl's 
 revoking a session from the API stops it, replay from the API reports the change, the
 stream delivers a held request over HTTP/1.1 and HTTP/2, a write with the admin kubeconfig
 is recorded as a bypass, and neither a write through blastgate nor a controller's writes
-are. The suite deletes the claim and changes the demo workloads, so run
+are. The approval-rule scenarios: a cluster role binding is held as an access grant, bob's
+approval leaves kubectl's retry held on the same ticket, bob approving again gets 409, the
+CLI cannot approve it, and carol's approval releases the retry; an approver linked to alice
+with `--human alice` is refused 403 on alice's request and can still deny it; and `/api/me`
+and the login answer name the upstream kubeconfig's context, or `BLASTGATE_CLUSTER_NAME`
+when set. The suite deletes the claim and changes the demo workloads, so run
 it on a fresh fixture: `make fixture-down; make fixture-up && make fixture-test`. On a list call against that cluster: direct p50 877µs, p95
 1.416ms; through blastgate p50 1.474ms, p95 2.133ms. Added latency: p50 **597µs**,
 p95 **717µs**.
