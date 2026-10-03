@@ -129,6 +129,17 @@ var migrations = []string{
 	CREATE INDEX bypass_at ON bypass(at);
 	CREATE TRIGGER bypass_no_update BEFORE UPDATE ON bypass BEGIN SELECT RAISE(ABORT, 'bypass is append-only'); END;
 	CREATE TRIGGER bypass_no_delete BEFORE DELETE ON bypass BEGIN SELECT RAISE(ABORT, 'bypass is append-only'); END;`,
+	// v0.4.0: the humans an approver also acts as, so they cannot approve
+	// their own agent's request under a second name, and the first of two
+	// approvals an access grant needs.
+	`CREATE TABLE approver_humans (
+		approver_id TEXT NOT NULL REFERENCES approvers(id),
+		human       TEXT NOT NULL,
+		PRIMARY KEY (approver_id, human)
+	);
+	ALTER TABLE approvals ADD COLUMN first_approver_id   TEXT NOT NULL DEFAULT '';
+	ALTER TABLE approvals ADD COLUMN first_approver_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE approvals ADD COLUMN first_approved_at   INTEGER;`,
 }
 
 func Open(path string) (*Store, error) {

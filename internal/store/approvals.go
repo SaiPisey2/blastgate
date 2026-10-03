@@ -20,7 +20,8 @@ import (
 var ErrConflict = errors.New("approval state changed")
 
 // Approval is one hold on a mutating request: created pending, moved to
-// approved or denied by a human, and — if approved — consumed exactly
+// approved or denied by a human (an access grant passes through
+// partially_approved first, waiting for a second person), and — if approved — consumed exactly
 // once when the held request is retried. superseded/expired are terminal
 // states reached without ever being consumed.
 type Approval struct {
@@ -33,24 +34,32 @@ type Approval struct {
 	ActionJSON    []byte
 	ImpactJSON    []byte
 	Rule          string
-	Status        string // pending | approved | denied | consumed | superseded | expired
+	Status        string // pending | partially_approved | approved | denied | consumed | superseded | expired
 	Created       time.Time
 	Decided       time.Time
 	Expires       time.Time
 	DecidedBy     string
 	Nonce         string
 	Token         string
+	// FirstApprover* record the first of two approvals on an access
+	// grant; they stay set after the second person decides, so the row
+	// names both.
+	FirstApproverID   string
+	FirstApproverName string
+	FirstApproved     time.Time
 }
 
 const approvalCols = `id, session_id, human, agent, request_digest, impact_digest,
-	action_json, impact_json, rule, status, created_at, decided_at, decided_by, nonce, token, expires_at`
+	action_json, impact_json, rule, status, created_at, decided_at, decided_by, nonce, token, expires_at,
+	first_approver_id, first_approver_name, first_approved_at`
 
 func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var a Approval
 	var created, expires int64
-	var decided sql.NullInt64
+	var decided, firstApproved sql.NullInt64
 	if err := row.Scan(&a.ID, &a.Session, &a.Human, &a.Agent, &a.RequestDigest, &a.ImpactDigest,
-		&a.ActionJSON, &a.ImpactJSON, &a.Rule, &a.Status, &created, &decided, &a.DecidedBy, &a.Nonce, &a.Token, &expires); err != nil {
+		&a.ActionJSON, &a.ImpactJSON, &a.Rule, &a.Status, &created, &decided, &a.DecidedBy, &a.Nonce, &a.Token, &expires,
+		&a.FirstApproverID, &a.FirstApproverName, &firstApproved); err != nil {
 		return Approval{}, err
 	}
 	a.Created = time.UnixMilli(created).UTC()
@@ -58,6 +67,7 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	if decided.Valid {
 		a.Decided = time.UnixMilli(decided.Int64).UTC()
 	}
+	a.FirstApproved = fromMS(firstApproved)
 	return a, nil
 }
 
@@ -92,9 +102,14 @@ func (s *Store) CreateApproval(ctx context.Context, a Approval) error {
 	if !a.Decided.IsZero() {
 		decided = sql.NullInt64{Int64: ms(a.Decided), Valid: true}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	var firstApproved sql.NullInt64
+	if !a.FirstApproved.IsZero() {
+		firstApproved = sql.NullInt64{Int64: ms(a.FirstApproved), Valid: true}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.Session, a.Human, a.Agent, a.RequestDigest, a.ImpactDigest,
-		a.ActionJSON, a.ImpactJSON, a.Rule, a.Status, ms(a.Created), decided, a.DecidedBy, a.Nonce, a.Token, ms(a.Expires)); err != nil {
+		a.ActionJSON, a.ImpactJSON, a.Rule, a.Status, ms(a.Created), decided, a.DecidedBy, a.Nonce, a.Token, ms(a.Expires),
+		a.FirstApproverID, a.FirstApproverName, firstApproved); err != nil {
 		return err
 	}
 	if err := insertOutbox(ctx, tx, "approval.pending", a.ID, a.Status, a.Created); err != nil {
@@ -141,8 +156,9 @@ func (s *Store) ListApprovalsLimit(ctx context.Context, status string, limit int
 	return s.listApprovals(ctx, status, limit)
 }
 
-// ListPendingApprovals is the approver queue: pending approvals that can
-// still be decided at now, oldest first, at most limit of them. Oldest
+// ListPendingApprovals is the approver queue: pending (or partially
+// approved, still waiting for a second person) approvals that can still
+// be decided at now, oldest first, at most limit of them. Oldest
 // first because the oldest is the one about to expire, and a limit that
 // kept the newest would drop exactly that one. A pending row past its
 // expiry is left out: Approve refuses it, and nothing moves it to expired
@@ -153,8 +169,18 @@ func (s *Store) ListPendingApprovals(ctx context.Context, now time.Time, limit i
 	if limit < 1 {
 		return nil, nil
 	}
-	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status = 'pending' AND expires_at >= ?
+	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status IN ('pending', 'partially_approved') AND expires_at >= ?
 		ORDER BY created_at ASC, id ASC LIMIT ?`, ms(now), limit)
+}
+
+// CountPendingApprovals is the true size of the queue ListPendingApprovals
+// pages through, under the same filter: the badge used to be the length
+// of a capped list, so it stopped counting at the cap.
+func (s *Store) CountPendingApprovals(ctx context.Context, now time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM approvals WHERE status IN ('pending', 'partially_approved') AND expires_at >= ?`, ms(now)).Scan(&n)
+	return n, err
 }
 
 func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]Approval, error) {
@@ -189,11 +215,13 @@ func (s *Store) queryApprovals(ctx context.Context, q string, args ...any) ([]Ap
 	return out, rows.Err()
 }
 
-// DecideApproval moves a pending approval to approved or denied. The
-// WHERE clause is the compare-and-swap: two humans racing to decide the
-// same approval must not both succeed, so only the first UPDATE that
-// still finds status='pending' takes effect and the second gets
-// ErrConflict instead of silently overwriting the first decision.
+// DecideApproval moves a pending or partially approved approval to
+// approved or denied. The WHERE clause is the compare-and-swap: two
+// humans racing to decide the same approval must not both succeed, so
+// only the first UPDATE that still finds it undecided takes effect and
+// the second gets ErrConflict instead of silently overwriting the first
+// decision. Whether a partially approved row may be approved by this
+// person is the caller's rule; the store only guards the state.
 func (s *Store) DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -201,7 +229,7 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, by, nonce, token
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, nonce = ?, token = ?, expires_at = ? WHERE id = ? AND status = 'pending'`,
+		`UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, nonce = ?, token = ?, expires_at = ? WHERE id = ? AND status IN ('pending', 'partially_approved')`,
 		status, ms(decided), by, nonce, token, ms(expires), id)
 	if err != nil {
 		return err
@@ -214,6 +242,46 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, by, nonce, token
 		return ErrConflict
 	}
 	if err := insertOutbox(ctx, tx, "approval.decided", id, status, decided); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// MarkPartiallyApproved records the first of two approvals on an access
+// grant. Only a pending row moves: a second first-approval racing this
+// one, or one arriving after the second person decided, gets ErrConflict
+// rather than overwriting who approved first. The outbox event is written
+// in the same transaction so the record of the first person never exists
+// without the state change, or the reverse.
+func (s *Store) MarkPartiallyApproved(ctx context.Context, id, approverID, approverName string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET status = 'partially_approved', first_approver_id = ?, first_approver_name = ?, first_approved_at = ?
+		 WHERE id = ? AND status = 'pending'`,
+		approverID, approverName, ms(at), id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM approvals WHERE id = ?`, id).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return ErrConflict
+	}
+	if err := insertOutbox(ctx, tx, "approval.partial", id, "partially_approved", at); err != nil {
 		return err
 	}
 	return tx.Commit()

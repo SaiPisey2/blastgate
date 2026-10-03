@@ -111,6 +111,43 @@ func (s *Store) RevokeApprover(ctx context.Context, id string, at time.Time) err
 	return tx.Commit()
 }
 
+// AddApproverHumans links humans to an approver, so a request made on
+// any of their behalf is one the approver may not approve. A link that
+// already exists is left as it is: re-running the same command must not
+// fail halfway through a list.
+func (s *Store) AddApproverHumans(ctx context.Context, approverID string, humans []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, h := range humans {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO approver_humans (approver_id, human) VALUES (?, ?)`, approverID, h); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ApproverHumans returns the humans linked to an approver, sorted, so
+// `approver list` prints them the same way every time.
+func (s *Store) ApproverHumans(ctx context.Context, approverID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT human FROM approver_humans WHERE approver_id = ? ORDER BY human`, approverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // UISession is a browser login: the cookie value is never stored, only
 // its hash (id_hash), the same way an approver's token is never stored.
 // There is no separate visible ID, unlike Session — a UI session is
