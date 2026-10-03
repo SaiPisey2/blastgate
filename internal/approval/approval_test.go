@@ -28,7 +28,7 @@ func svc(t *testing.T, now *time.Time) (*Service, *store.Store, string) {
 
 func pending(t *testing.T, st *store.Store, now time.Time) store.Approval {
 	a := store.Approval{ID: NewID(), Session: "s1", Human: "alice", Agent: "coding-agent", RequestDigest: "rd", ImpactDigest: "impact-1",
-		ActionJSON: []byte(`{}`), ImpactJSON: []byte(`{}`), Rule: "data-destruction", Status: "pending", Created: now, Expires: now.Add(time.Hour)}
+		ActionJSON: []byte(`{}`), ImpactJSON: []byte(`{"class":"TERMINAL"}`), Rule: "data-destruction", Status: "pending", Created: now, Expires: now.Add(time.Hour)}
 	if err := st.CreateApproval(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestApprovedRetryWithSameImpactIsReleasedOnce(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
@@ -80,7 +80,7 @@ func TestVerifyFailsWhenImpactChanged(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	o, got, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-2")
@@ -96,7 +96,7 @@ func TestAnotherAgentCannotUseTheApproval(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	if o, _, err := s.Check(context.Background(), "s1", "alice", "other-agent", "rd", "impact-1"); err != nil || o != Void {
@@ -108,7 +108,7 @@ func TestExpiredTokenIsNotReleased(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	s.Approve(context.Background(), a.ID, "bob")
+	s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"})
 	now = now.Add(16 * time.Minute)
 	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
 		t.Errorf("check after expiry = %v", o)
@@ -138,7 +138,7 @@ func TestTamperedRowIsVoid(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, path := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	// simulate an attacker with DB write access changing impact_digest
@@ -200,18 +200,18 @@ func TestApproveRefusesDecidedOrStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ErrNotPending is how the admin API tells a 409 from a 500.
-	if _, err := s.Approve(context.Background(), a.ID, "carol"); !errors.Is(err, ErrNotPending) {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "carol", Channel: "cli"}); !errors.Is(err, ErrNotPending) {
 		t.Errorf("approving a denied approval: %v, want ErrNotPending", err)
 	}
 	b := pending(t, st, now)
 	now = now.Add(2 * time.Hour)
-	if _, err := s.Approve(context.Background(), b.ID, "carol"); !errors.Is(err, ErrNotPending) {
+	if _, err := s.Approve(context.Background(), b.ID, Approver{Name: "carol", Channel: "cli"}); !errors.Is(err, ErrNotPending) {
 		t.Errorf("approving a stale pending approval: %v, want ErrNotPending", err)
 	}
 	if _, err := s.Deny(context.Background(), b.ID, "carol"); !errors.Is(err, ErrNotPending) {
 		t.Errorf("denying a stale pending approval: %v, want ErrNotPending", err)
 	}
-	if _, err := s.Approve(context.Background(), "ffffffffffffffffffffffffffffffff", "carol"); errors.Is(err, ErrNotPending) || !errors.Is(err, store.ErrNotFound) {
+	if _, err := s.Approve(context.Background(), "ffffffffffffffffffffffffffffffff", Approver{Name: "carol", Channel: "cli"}); errors.Is(err, ErrNotPending) || !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("approving an unknown id: %v, want ErrNotFound only", err)
 	}
 	if row, _ := st.ApprovalByID(context.Background(), b.ID); row.Token != "" {
@@ -226,7 +226,7 @@ func TestEmptyKeyFailsClosed(t *testing.T) {
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
 	s.Key = nil
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err == nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err == nil {
 		t.Error("approved with no signing key")
 	}
 	if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); err == nil || o == Release {
@@ -241,7 +241,7 @@ func TestApprovalMovedToAnotherSessionIsVoid(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, path := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tamper(path, a.ID, "session_id", "s2"); err != nil {
@@ -257,7 +257,7 @@ func TestAnotherHumanCannotUseTheApproval(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	if o, _, err := s.Check(context.Background(), "s1", "mallory", "coding-agent", "rd", "impact-1"); err != nil || o != Void {
@@ -280,7 +280,7 @@ func TestTamperedExpiryOrNonceIsVoid(t *testing.T) {
 			now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 			s, st, path := svc(t, &now)
 			a := pending(t, st, now)
-			approved, err := s.Approve(context.Background(), a.ID, "bob")
+			approved, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -305,7 +305,7 @@ func TestConcurrentChecksReleaseOnce(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
@@ -342,7 +342,7 @@ func TestVerifyDoesNotSpend(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -375,7 +375,7 @@ func TestConcurrentVerifyThenConsumeReleasesOnce(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	var verified []store.Approval
@@ -418,7 +418,7 @@ func TestConsumeRefusesALapsedToken(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if _, err := s.Approve(context.Background(), a.ID, "bob"); err != nil {
+	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	_, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")

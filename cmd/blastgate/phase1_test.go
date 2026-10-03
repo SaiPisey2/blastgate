@@ -416,3 +416,46 @@ func TestReplaySaysWhenTheListIsCut(t *testing.T) {
 		t.Errorf("%d change lines, want 500", n)
 	}
 }
+
+// The CLI's --by is a claim, not an account, so it can neither approve an
+// access grant nor approve on behalf of the human who asked. Both are
+// refusals of a request that is still waiting -- exit 1 with the fixed
+// text -- including once one browser approver has approved (partially
+// approved), when the row is no longer "pending". Deny still works.
+func TestCLIApproveRulesOnAnAccessGrant(t *testing.T) {
+	dir, env := cliEnv(t)
+	id := "fedcba9876543210fedcba9876543210"
+	imp, _ := json.Marshal(engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})
+	withStore(t, dir, func(st *store.Store) {
+		now := time.Now().UTC()
+		if err := st.CreateApproval(context.Background(), store.Approval{
+			ID: id, Session: "sess-1", Human: "alice", Agent: "coding-agent",
+			RequestDigest: "req", ImpactDigest: "imp", ActionJSON: []byte(`{}`), ImpactJSON: imp,
+			Rule: "access-grant", Status: "pending", Created: now, Expires: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if code, _, errs := runCLI(env, "approve", id, "--by", "bob"); code != 1 || errs != "access grants need two approvers in the browser\n" {
+		t.Errorf("cli approve of a pending grant: exit %d, %q", code, errs)
+	}
+	withStore(t, dir, func(st *store.Store) {
+		if err := st.MarkPartiallyApproved(context.Background(), id, "ap1", "carol", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if code, _, errs := runCLI(env, "approve", id, "--by", "bob"); code != 1 || errs != "access grants need two approvers in the browser\n" {
+		t.Errorf("cli approve of a partial grant: exit %d, %q", code, errs)
+	}
+	if code, _, errs := runCLI(env, "approve", id, "--by", "alice"); code != 1 || errs != "you can't approve a request made on your behalf\n" {
+		t.Errorf("cli self approval of a partial grant: exit %d, %q", code, errs)
+	}
+	if code, _, errs := runCLI(env, "deny", id, "--by", "bob"); code != 0 {
+		t.Errorf("cli deny of a partial grant: exit %d, %s", code, errs)
+	}
+	withStore(t, dir, func(st *store.Store) {
+		if a, err := st.ApprovalByID(context.Background(), id); err != nil || a.Status != "denied" || a.Token != "" {
+			t.Errorf("after cli deny: %+v, %v", a, err)
+		}
+	})
+}

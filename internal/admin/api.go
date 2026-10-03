@@ -445,7 +445,7 @@ func (h *api) decide(verb string) func(http.ResponseWriter, *http.Request, store
 		var a store.Approval
 		var err error
 		if verb == "approve" {
-			a, err = h.d.Approvals.Approve(r.Context(), id, u.ApproverName)
+			a, err = h.d.Approvals.Approve(r.Context(), id, approval.Approver{Name: u.ApproverName, ID: u.ApproverID, SignedIn: u.Created, Channel: "ui"})
 		} else {
 			a, err = h.d.Approvals.Deny(r.Context(), id, u.ApproverName)
 		}
@@ -462,7 +462,10 @@ func (h *api) decide(verb string) func(http.ResponseWriter, *http.Request, store
 			h.internal(w, verb, err)
 			return
 		}
-		h.log.Info("approval decided", "id", id, "decision", a.Status, "by", u.ApproverName)
+		// first_approver keeps both people of an access grant in the log
+		// (ruling E-R3): the first approval's line names them, and so does
+		// the second's.
+		h.log.Info("approval decided", "id", id, "decision", a.Status, "by", u.ApproverName, "first_approver", a.FirstApproverName)
 		reply(w, http.StatusOK, detail(a, h.auth.Now()))
 	}
 }

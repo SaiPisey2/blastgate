@@ -100,7 +100,7 @@ func decideCmd(verb string, args []string, getenv func(string) string, stdout, s
 	ctx := context.Background()
 	var a store.Approval
 	if verb == "approve" {
-		a, err = svc.Approve(ctx, id, *by)
+		a, err = svc.Approve(ctx, id, approval.Approver{Name: *by, Channel: "cli"})
 	} else {
 		a, err = svc.Deny(ctx, id, *by)
 	}
@@ -130,8 +130,11 @@ func decideFailed(ctx context.Context, st *store.Store, svc *approval.Service, i
 		fmt.Fprintf(stderr, "approval %s was decided by someone else first\n", safe(id))
 		return 2
 	}
+	// A partially approved row is still waiting, like a pending one: a
+	// refusal on it (self approval, an access grant from the cli) is
+	// exit 1, not the exit 2 of an approval nobody can decide any more.
 	a, rerr := st.ApprovalByID(ctx, id)
-	if rerr == nil && (a.Status != "pending" || svc.Now().After(a.Expires)) {
+	if rerr == nil && ((a.Status != "pending" && a.Status != "partially_approved") || svc.Now().After(a.Expires)) {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}

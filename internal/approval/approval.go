@@ -11,12 +11,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/SaiPisey2/blastgate/internal/engine"
 	"github.com/SaiPisey2/blastgate/internal/store"
 )
 
@@ -26,6 +29,7 @@ type Store interface {
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	LatestApproval(ctx context.Context, session, requestDigest string) (store.Approval, error)
 	DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error
+	MarkPartiallyApproved(ctx context.Context, id, approverID, approverName string, at time.Time) error
 	ConsumeApproval(ctx context.Context, id, nonce string, at time.Time) error
 	SetApprovalStatus(ctx context.Context, id, from, to string) error
 }
@@ -35,7 +39,50 @@ type Service struct {
 	Key        []byte
 	TokenTTL   time.Duration
 	PendingTTL time.Duration
-	Now        func() time.Time
+	// Reauth is how recently an approver must have signed in to approve
+	// an access grant; 0 means defaultReauth. A browser session left open
+	// all day must not be enough to hand out cluster power.
+	Reauth time.Duration
+	Now    func() time.Time
+}
+
+const defaultReauth = 15 * time.Minute
+
+// Approver is who is approving, as the server knows them -- never as the
+// request claims. ID is the approver account (empty from the CLI, which
+// has no accounts), Humans the humans linked to it, SignedIn the browser
+// session's creation time, Channel "ui" or "cli".
+type Approver struct {
+	ID, Name string
+	Humans   []string
+	SignedIn time.Time
+	Channel  string // "ui" | "cli"
+}
+
+// The refusals the approval rules give. Their texts are shown to the
+// approver as they are, by the admin API and the CLI.
+var (
+	ErrSelfApproval        = errors.New("you can't approve a request made on your behalf")
+	ErrNeedsSecondApprover = errors.New("you already approved this; it needs a second person")
+	ErrReauthRequired      = errors.New("sign in again to approve access grants")
+	ErrChannelNotAllowed   = errors.New("access grants need two approvers in the browser")
+)
+
+// NeedsTwo reports whether an approval needs two people: its stored
+// impact class is AUTHORITY. It fails closed -- an impact it cannot read,
+// an empty class, or a class it does not know all need two -- because
+// guessing "one" for an access grant whose impact row was damaged or
+// written by a newer version would let a single person grant power.
+func NeedsTwo(a store.Approval) bool {
+	var imp engine.Impact
+	if err := json.Unmarshal(a.ImpactJSON, &imp); err != nil {
+		return true
+	}
+	switch imp.Class {
+	case engine.ClassRead, engine.ClassReversible, engine.ClassCompensable, engine.ClassTerminal:
+		return false
+	}
+	return true
 }
 
 // Outcome is what a retried request should do with its latest approval.
@@ -106,23 +153,59 @@ func (s *Service) Token(a store.Approval, nonce string, expires time.Time) strin
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// Approve mints a single-use token for a pending approval. The store's
-// compare-and-swap on status='pending' is what stops two approvers (or an
-// approve racing a deny) from both succeeding; the checks here only give
-// a clear error for the common cases.
-func (s *Service) Approve(ctx context.Context, id, by string) (store.Approval, error) {
+// Approve applies the approval rules and, when they are met, mints a
+// single-use token. Nobody approves a request made on their own behalf.
+// An access grant (NeedsTwo) needs two different approver accounts, both
+// in the browser and both recently signed in: the first approval only
+// records who it was (partially_approved, no token), and only the second
+// mints. The store's compare-and-swaps are what stop two approvers (or
+// an approve racing a deny) from both succeeding; the checks here decide
+// who may try.
+func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Approval, error) {
 	if len(s.Key) == 0 {
 		return store.Approval{}, errNoKey
 	}
+	// decidable first: a lapsed approval is refused before any rule can
+	// record a first approver on it (ruling E-R2).
 	a, err := s.decidable(ctx, id)
 	if err != nil {
 		return store.Approval{}, err
 	}
+	if by.Name == a.Human || slices.Contains(by.Humans, a.Human) {
+		return store.Approval{}, ErrSelfApproval
+	}
 	now := s.Now()
+	if NeedsTwo(a) {
+		// The CLI has no accounts: its --by is a claim, so it could
+		// supply both "people" by typing two names.
+		if by.Channel != "ui" {
+			return store.Approval{}, ErrChannelNotAllowed
+		}
+		reauth := s.Reauth
+		if reauth == 0 {
+			reauth = defaultReauth
+		}
+		// A sign-in time in the future is a clock or data fault, not a
+		// fresh sign-in; it must not open the window indefinitely.
+		if by.SignedIn.After(now) || now.Sub(by.SignedIn) > reauth {
+			return store.Approval{}, ErrReauthRequired
+		}
+		if a.Status == "pending" {
+			if err := s.Store.MarkPartiallyApproved(ctx, id, by.ID, by.Name, now); err != nil {
+				return store.Approval{}, err
+			}
+			return s.Store.ApprovalByID(ctx, id)
+		}
+		// An empty id cannot be told apart from anyone, so it is never
+		// the second person.
+		if by.ID == "" || by.ID == a.FirstApproverID {
+			return store.Approval{}, ErrNeedsSecondApprover
+		}
+	}
 	nonce := NewID()
 	expires := now.Add(s.TokenTTL)
 	token := s.Token(a, nonce, expires)
-	if err := s.Store.DecideApproval(ctx, id, "approved", by, nonce, token, now, expires); err != nil {
+	if err := s.Store.DecideApproval(ctx, id, "approved", by.Name, nonce, token, now, expires); err != nil {
 		return store.Approval{}, err
 	}
 	return s.Store.ApprovalByID(ctx, id)
@@ -156,19 +239,20 @@ func notPending(msg string) error              { return notPendingError(msg) }
 func (e notPendingError) Error() string        { return string(e) }
 func (e notPendingError) Is(target error) bool { return target == ErrNotPending }
 
-// decidable loads an approval a human may still decide: pending and not
-// past its expiry. A stale pending one must not be approved — the impact
-// the human is looking at may be an hour old.
+// decidable loads an approval a human may still decide: pending (or
+// partially approved, waiting on a second person) and not past its
+// expiry. A stale one must not be approved — the impact the human is
+// looking at may be an hour old.
 func (s *Service) decidable(ctx context.Context, id string) (store.Approval, error) {
 	a, err := s.Store.ApprovalByID(ctx, id)
 	if err != nil {
 		return store.Approval{}, err
 	}
-	if a.Status != "pending" {
+	if a.Status != "pending" && a.Status != "partially_approved" {
 		return store.Approval{}, notPending(fmt.Sprintf("approval %s is %s, not pending", id, a.Status))
 	}
 	if s.Now().After(a.Expires) {
-		return store.Approval{}, notPending(fmt.Sprintf("approval %s is pending but expired", id))
+		return store.Approval{}, notPending(fmt.Sprintf("approval %s is %s but expired", id, a.Status))
 	}
 	return a, nil
 }
@@ -226,9 +310,11 @@ func (s *Service) Verify(ctx context.Context, session, human, agent, requestDige
 	}
 	now := s.Now()
 	switch a.Status {
-	case "pending":
+	// A partial approval is still waiting on its second person: the same
+	// answer as pending, expiring on the same deadline, never releasable.
+	case "pending", "partially_approved":
 		if now.After(a.Expires) {
-			return s.expire(ctx, a, "pending")
+			return s.expire(ctx, a, a.Status)
 		}
 		return Pending, a, nil
 	case "denied":

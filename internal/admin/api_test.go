@@ -389,7 +389,7 @@ func TestApprovalDetailHasImpactButNoSecrets(t *testing.T) {
 	f.pending(t, approvalID)
 	// Approve through the service so the row carries a real nonce and
 	// token, then read it through every API view that shows it.
-	if _, err := f.svc.Approve(context.Background(), approvalID, "bob"); err != nil {
+	if _, err := f.svc.Approve(context.Background(), approvalID, approval.Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	row, err := f.st.ApprovalByID(context.Background(), approvalID)

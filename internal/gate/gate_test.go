@@ -664,3 +664,32 @@ func TestUpgradeGETIsScoredNotPassed(t *testing.T) {
 		t.Errorf("verdict %+v, engine calls %d", v, fe.calls)
 	}
 }
+
+// A first approval on an access grant is not a decision: the hold must
+// keep waiting through partially_approved and release only once the
+// second person approves. Treating it as terminal would turn every
+// access grant into a ticket even when both people approve in time.
+func TestGateWaitsThroughPartialApproval(t *testing.T) {
+	t.Run("gate keeps waiting while partially approved", func(t *testing.T) {
+		ap := &fakeApprovals{status: map[string]string{"a1": "pending"}}
+		g, _, _, _ := newGate(terminal, ap)
+		go func() {
+			time.Sleep(30 * time.Millisecond)
+			ap.set("a1", "partially_approved")
+			time.Sleep(60 * time.Millisecond)
+			ap.set("a1", "approved")
+		}()
+		if st := g.wait(context.Background(), "a1", 2*time.Second); st != "approved" {
+			t.Fatalf("pending -> partially_approved -> approved: wait = %q, want approved", st)
+		}
+
+		ap.set("a1", "partially_approved")
+		start := time.Now()
+		if st := g.wait(context.Background(), "a1", 150*time.Millisecond); st != "" {
+			t.Fatalf("stays partially_approved: wait = %q, want \"\"", st)
+		}
+		if time.Since(start) < 140*time.Millisecond {
+			t.Fatal("stopped waiting on a partial approval before the hold ran out")
+		}
+	})
+}

@@ -102,7 +102,7 @@ func (rr *realRelease) holdAndApprove(t *testing.T, method, target string) strin
 	if v.Forward || v.Ticket == "" {
 		t.Fatalf("not held: %+v", v)
 	}
-	if _, err := rr.svc.Approve(context.Background(), v.Ticket, "bob"); err != nil {
+	if _, err := rr.svc.Approve(context.Background(), v.Ticket, approval.Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	return v.Ticket

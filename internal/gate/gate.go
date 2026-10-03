@@ -303,7 +303,9 @@ func (g *Gate) wait(ctx context.Context, id string, window time.Duration) string
 		switch st {
 		case "approved", "denied":
 			return st
-		case "pending", "":
+		// partially_approved is an access grant one person has approved:
+		// still waiting on the second, never a decision on its own.
+		case "pending", "partially_approved", "":
 			continue
 		default:
 			// consumed, superseded, expired: it will never be approved
