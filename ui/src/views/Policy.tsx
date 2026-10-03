@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import { ApiError, get, post, type ReplayResult } from '../api';
+import { useEffect, useId, useRef, useState } from 'react';
+import { ApiError, get, post, type ReplayResult, type RuleStat, type RuleStats } from '../api';
 import { describe } from '../lib/describe';
 import Sentence from '../components/Sentence';
 import Button from '../components/Button';
+import { announce } from '../components/Shell';
+import Tag from '../components/Tag';
 
 type Loaded = { source: string; text: string };
 
@@ -25,6 +27,36 @@ function parseHours(v: string): number | null {
 const DECISION_WORDS: Record<string, string> = { hold: 'Held', allow: 'Allowed', deny: 'Denied' };
 function decisionWord(d: string): string {
   return Object.hasOwn(DECISION_WORDS, d) ? DECISION_WORDS[d] : d;
+}
+
+// A rule people approve nearly every time is a candidate for allow. Ten
+// holds is the least that says so: at nine, one more denial moves the
+// rate a long way.
+const STAMP_MIN_HELD = 10;
+const STAMP_MIN_RATE = 0.95;
+
+export function rubberStamped(r: Pick<RuleStat, 'held' | 'approve_rate'>): boolean {
+  return r.held >= STAMP_MIN_HELD && typeof r.approve_rate === 'number' && r.approve_rate >= STAMP_MIN_RATE;
+}
+
+// rate reads as a whole percentage; no decision is a dash, never 0%.
+function rate(v: number | null): string {
+  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—';
+}
+
+// count shows a count as text, and anything that is not one as a dash: a
+// value from the server is rendered, never trusted to be renderable.
+function count(v: unknown): string {
+  return typeof v === 'number' && Number.isFinite(v) ? String(v) : '—';
+}
+
+// window words the stats window: "7 days" for 168 hours, else hours.
+function windowText(hours: number): string {
+  if (hours % 24 === 0) {
+    const d = hours / 24;
+    return d === 1 ? 'day' : `${d} days`;
+  }
+  return hours === 1 ? 'hour' : `${hours} hours`;
 }
 
 export default function Policy() {
@@ -71,7 +103,11 @@ export default function Policy() {
     setResult(null);
     setBusy(true);
     try {
-      setResult(await post<ReplayResult>('/api/policy/replay', { policy: candidate, since_hours: since }));
+      const r = await post<ReplayResult>('/api/policy/replay', { policy: candidate, since_hours: since });
+      setResult(r);
+      // Said once through the shell's one alert region, so a screen reader
+      // hears the count when a replay finishes rather than only finding it.
+      if (r && typeof r === 'object') announce(`${r.changed} of ${r.evaluated} decisions would change`);
     } catch (e) {
       // 400: the candidate did not parse. The parser's own message says
       // exactly where, so it is shown exactly, never paraphrased. 429:
@@ -113,6 +149,8 @@ export default function Policy() {
           </pre>
         </details>
       )}
+
+      <Stats />
 
       {/* Try a policy sits beside its own result at 900px and wider (the
           approved mockup); below that the two stack, and neither ever
@@ -197,6 +235,81 @@ export default function Policy() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Stats is "How each rule is used": for each rule that held something,
+// how those requests ended. A rule approved almost every time is flagged
+// as one to consider allowing; nothing is changed from here.
+function Stats() {
+  const titleId = useId();
+  const [stats, setStats] = useState<RuleStats | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    get<RuleStats>('/api/policy/stats').then(
+      (r) => {
+        // A body without a rules list is no stats at all, never an empty table.
+        if (r && typeof r === 'object' && Array.isArray(r.rules)) setStats(r);
+        else setError('the server sent something that is not rule statistics');
+      },
+      (e) => setError(e instanceof Error ? e.message : 'request failed'),
+    );
+  }, []);
+
+  const hours = stats && typeof stats.since_hours === 'number' && stats.since_hours > 0 ? stats.since_hours : 168;
+  const rules = (stats?.rules ?? []).filter((r): r is RuleStat => !!r && typeof r === 'object');
+
+  return (
+    <section className="policy-stats" aria-labelledby={titleId}>
+      <h2 id={titleId}>How each rule is used</h2>
+      {error ? (
+        <p className="policy-note">Couldn't load how each rule is used: {error}</p>
+      ) : stats === null ? (
+        <p className="policy-note" aria-busy="true">
+          Loading…
+        </p>
+      ) : (
+        <>
+          <p className="policy-note">Requests each rule held in the last {windowText(hours)}, and how they ended.</p>
+          {rules.length === 0 ? (
+            <p className="policy-empty">No rule held a request in this time.</p>
+          ) : (
+            <table className="policy-stats-table">
+              <thead>
+                <tr>
+                  <th scope="col">Rule</th>
+                  <th scope="col">Held</th>
+                  <th scope="col">Approved</th>
+                  <th scope="col">Denied</th>
+                  <th scope="col">Expired</th>
+                  <th scope="col">Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((r, i) => (
+                  <tr key={`${r.rule}-${i}`}>
+                    <td data-label="Rule">
+                      <span className="mono policy-stats-rule">{typeof r.rule === 'string' ? r.rule : ''}</span>
+                      {rubberStamped(r) && (
+                        <span className="policy-stats-flag">
+                          <Tag tone="caution">Almost always approved — consider allowing it</Tag>
+                        </span>
+                      )}
+                    </td>
+                    <td data-label="Held">{count(r.held)}</td>
+                    <td data-label="Approved">{count(r.approved)}</td>
+                    <td data-label="Denied">{count(r.denied)}</td>
+                    <td data-label="Expired">{count(r.expired)}</td>
+                    <td data-label="Rate">{rate(r.approve_rate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 

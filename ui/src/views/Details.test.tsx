@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -337,7 +338,11 @@ describe('Details, final review', () => {
     mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(del, deploymentImpact()) } });
     window.location.hash = `#/approvals/${ID1}`;
     renderWithMotion(<Details id={ID1} me="bob" />);
-    await screen.findByRole('article');
+    const card = await screen.findByRole('article');
+    // The panel's first focus lands on the question in a passive effect,
+    // which can run after findByRole resolves on a loaded run; wait for it,
+    // or it takes focus back from the field and Esc reads from the page.
+    await waitFor(() => expect(document.activeElement).toBe(within(card).getByRole('heading', { level: 2 })));
     screen.getByLabelText(/to approve, type/i).focus();
     await userEvent.keyboard('{Escape}');
     expect(window.location.hash).toBe(`#/approvals/${ID1}`);
@@ -369,5 +374,36 @@ describe('Details, final review', () => {
     } finally {
       dialog.remove();
     }
+  });
+});
+
+describe('Details, v0.4.0', () => {
+  // Under StrictMode an effect runs twice on mount. A first focus consumed
+  // inside the effect was used up by the first run, and the second sent
+  // focus on to Deny.
+  it('details focuses the question under StrictMode', async () => {
+    const s = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web' });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects' })) } });
+    renderWithMotion(
+      <StrictMode>
+        <Details id={ID1} me="bob" />
+      </StrictMode>,
+    );
+    const card = await screen.findByRole('article');
+    const h2 = within(card).getByRole('heading', { level: 2 });
+    await waitFor(() => expect(document.activeElement).toBe(h2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(h2);
+    expect(document.activeElement).not.toBe(within(card).getByRole('button', { name: /^deny$/i }));
+  });
+
+  it('a partial approval is still decidable here, and the back link follows where you came from', async () => {
+    const s = summary({ status: 'partially_approved', needs_approvers: 2, first_approver: 'alice', first_approved: new Date().toISOString() });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact()) } });
+    renderWithMotion(<Details id={ID1} me="bob" back="#/activity" />);
+    const card = await screen.findByRole('article');
+    expect(within(card).getByRole('button', { name: /^deny$/i })).toBeTruthy();
+    expect(within(card).getByText(/^Approved by alice at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Back to Activity' }).getAttribute('href')).toBe('#/activity');
   });
 });

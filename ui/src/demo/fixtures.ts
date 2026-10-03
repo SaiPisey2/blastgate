@@ -62,6 +62,7 @@ const pending: ApprovalSummary[] = [
     class: 'TERMINAL',
     data_destroyed: 0,
     measured: false,
+    sql_detected: true,
     age_seconds: 55,
     created: ago(55),
   }),
@@ -75,6 +76,7 @@ const pending: ApprovalSummary[] = [
     summary: 'AUTHORITY, 1 object',
     class: 'AUTHORITY',
     data_destroyed: 0,
+    needs_approvers: 2,
     human: 'demo',
     age_seconds: 12,
     created: ago(12),
@@ -275,6 +277,13 @@ function json(body: unknown, status = 200): Response {
   return new Response(body === undefined ? '' : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+const stats = [
+  { rule: 'hold-writes', held: 41, approved: 40, denied: 1, expired: 0, approve_rate: 0.976 },
+  { rule: 'hold-exec', held: 17, approved: 9, denied: 6, expired: 2, approve_rate: 0.6 },
+  { rule: 'hold-terminal', held: 8, approved: 8, denied: 0, expired: 0, approve_rate: 1 },
+  { rule: 'hold-authority', held: 2, approved: 0, denied: 0, expired: 2, approve_rate: null },
+];
+
 // install answers /api/* in the page itself. mode: '' for a busy console,
 // 'empty' for every empty state, 'signedout' for the sign-in page.
 export function install(mode: string) {
@@ -294,7 +303,8 @@ export function install(mode: string) {
       return json({ name: 'demo', csrf: 'demo' });
     }
     if (!signedIn) return json({ error: 'unauthorized' }, 401);
-    if (path === '/api/me') return json({ name: 'demo', csrf: 'demo' });
+    if (path === '/api/me') return json({ name: 'demo', csrf: 'demo', cluster: 'kind-blastgate-fixture' });
+    if (path === '/api/approvals/count') return json({ count: waiting.length });
     if (path === '/api/logout') {
       signedIn = false;
       return json({});
@@ -318,6 +328,7 @@ export function install(mode: string) {
     if (path === '/api/sessions') return json(empty ? [] : sessions);
     if (/^\/api\/sessions\/[^/]+\/revoke$/.test(path)) return json({});
     if (path === '/api/policy') return json({ source: '/etc/blastgate/policy.yaml', text: policy });
+    if (path === '/api/policy/stats') return json({ since_hours: 168, rules: empty ? [] : stats });
     if (path === '/api/policy/replay') return json(empty ? { ...replay, changed: 0, changes: [] } : replay);
     return json({ error: 'not found' }, 404);
   };

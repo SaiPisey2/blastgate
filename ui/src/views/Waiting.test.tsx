@@ -647,3 +647,29 @@ describe('Waiting, final review', () => {
     expect(empty.getAttribute('role')).toBe('status');
   });
 });
+
+describe('Waiting, v0.4.0', () => {
+  it('list says database command when sql detected', async () => {
+    setMedia(WIDE, true);
+    const exec = (id: string, name: string, sql: boolean) =>
+      summary({ id, verb: 'create', resource: 'pods/exec', name, class: 'TERMINAL', measured: false, data_destroyed: 0, summary: 'not measured', sql_detected: sql });
+    // The list never fetched these details: the summary's flag alone words the row.
+    const calls = mockFetch({
+      'GET /api/approvals?status=pending': { body: [exec(ID1, 'db-0', true), exec(ID2, 'web-0', false)] },
+      'GET /api/approvals/': { status: 500, body: { error: 'down' } },
+    });
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(2));
+    expect(sentenceIn(options()[0]).textContent).toBe('Run a database command in db-0');
+    expect(sentenceIn(options()[1]).textContent).toBe('Run a command in web-0');
+    expect(calls.some((c) => c.url === `/api/approvals/${ID2}`)).toBe(false);
+  });
+
+  it('a partially approved request is still listed as waiting', async () => {
+    setMedia(WIDE, true);
+    server([summary({ status: 'partially_approved', needs_approvers: 2, first_approver: 'alice', first_approved: new Date().toISOString() })]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(1));
+    expect(await screen.findByText(/^Approved by alice at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
+  });
+});

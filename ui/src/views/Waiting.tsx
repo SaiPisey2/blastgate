@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { get, subscribe, type ApprovalDetail, type ApprovalSummary } from '../api';
+import { get, stillWaiting, subscribe, type ApprovalDetail, type ApprovalSummary } from '../api';
 import DecisionPanel, { GONE_TEXT, type Outcome } from '../components/DecisionPanel';
 import EmptyState from '../components/EmptyState';
 import Sentence from '../components/Sentence';
@@ -18,6 +18,7 @@ export const WIDE = '(min-width: 900px)';
 
 const NOTES: Record<Outcome, string> = {
   approved: 'Approved. The agent can go ahead.',
+  partial: 'Approved. It needs one more approver before the agent can go ahead.',
   denied: 'Denied. The agent was refused.',
   gone: 'That request was already decided or has expired.',
 };
@@ -47,8 +48,14 @@ export function resetLastDecision() {
 }
 
 
+// describeSummary words a list entry from the summary alone, the SQL flag
+// included: the list never waits on a detail to say what a row does.
+function describeSummary(s: ApprovalSummary) {
+  return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name, sqlDetected: s.sql_detected === true });
+}
+
 function sentenceOf(s: ApprovalSummary): string {
-  return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name }).sentence;
+  return describeSummary(s).sentence;
 }
 
 function ageOf(s: ApprovalSummary, now: number): string {
@@ -57,7 +64,8 @@ function ageOf(s: ApprovalSummary, now: number): string {
 }
 
 // me: the signed-in approver's name, for the panel's self-approval guard.
-export default function Waiting({ me = '' }: { me?: string }) {
+// cluster: where these decisions land, shown under each question.
+export default function Waiting({ me = '', cluster = '' }: { me?: string; cluster?: string }) {
   const wide = useMediaQuery(WIDE);
   const now = useNow();
   const listId = useId();
@@ -118,8 +126,9 @@ export default function Waiting({ me = '' }: { me?: string }) {
     try {
       const list = await get<ApprovalSummary[]>(PENDING);
       if (mine !== seq.current) return;
-      // The server lists pending only; anything else is not ours to show.
-      const rows = (Array.isArray(list) ? list : []).filter((r) => r && r.status === 'pending' && !decided.current.has(r.id)).sort(oldestFirst);
+      // The server lists what is still waiting, partial approvals included;
+      // anything else is not ours to show.
+      const rows = (Array.isArray(list) ? list : []).filter((r) => r && stillWaiting(r.status) && !decided.current.has(r.id)).sort(oldestFirst);
       const fresh: ApprovalSummary[] = [];
       for (const r of rows) {
         known.current.set(r.id, r);
@@ -253,6 +262,7 @@ export default function Waiting({ me = '' }: { me?: string }) {
       detail={details[current.id]}
       detailError={detailErrors[current.id]}
       me={me}
+      cluster={cluster}
       onRetry={() => fetchDetail(current.id)}
       onDecided={onDecided}
       position={wide ? undefined : { index: rows.indexOf(current) + 1, total: rows.length }}
@@ -338,7 +348,7 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
   const present = useIsPresent();
   const impact = detail && detail.id === s.id ? detail.impact : undefined;
   const f = frictionOf(s, impact);
-  const d = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name });
+  const d = describeSummary(s);
   return (
     <m.li
       id={id}
@@ -372,7 +382,7 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
 // was open: what it was, that it is no longer waiting, and no controls.
 function Gone({ summary: s }: { summary: ApprovalSummary }) {
   const qid = useId();
-  const d = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name });
+  const d = describeSummary(s);
   // As in the panel: the name at the end of the sentence is shown as the
   // full namespace/name, in mono. A suffix check, never a pattern: the
   // name is untrusted.

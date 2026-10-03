@@ -307,3 +307,15 @@ describeBlock('describe', () => {
     });
   });
 });
+
+describeBlock('describe sqlDetected', () => {
+  it('an exec with SQL detected is a database command; only exactly true counts', () => {
+    const r = { verb: 'create', resource: 'pods/exec', namespace: 'demo', name: 'db-0' };
+    expect(describe({ ...r, sqlDetected: true }).sentence).toBe('Run a database command in db-0');
+    expect(describe({ ...r, sqlDetected: false }).sentence).toBe('Run a command in db-0');
+    expect(describe(r).sentence).toBe('Run a command in db-0');
+    expect(describe({ ...r, sqlDetected: 'yes' as unknown as boolean }).sentence).toBe('Run a command in db-0');
+    // Only the exec sentence changes.
+    expect(describe({ verb: 'delete', resource: 'pods', namespace: 'demo', name: 'db-0', sqlDetected: true }).sentence).toBe('Delete the pod db-0');
+  });
+});

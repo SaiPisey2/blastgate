@@ -2,7 +2,10 @@
 // fields, RFC3339 time strings. Impact keeps the engine's own camelCase
 // because it is the engine's stored JSON, passed through untouched.
 
-export type Me = { name: string; csrf: string };
+// cluster: the cluster this gateway fronts, so every decision says where
+// it lands. Optional in the type because a server older than v0.4.0 does
+// not send it; the header and the panel then leave the line out.
+export type Me = { name: string; csrf: string; cluster?: string };
 
 export type FeedRow = {
   id: number;
@@ -70,7 +73,26 @@ export type ApprovalSummary = {
   age_seconds: number;
   created: string;
   expires: string;
+  // needs_approvers is 2 for an access grant, which takes two different
+  // people. first_approver and first_approved say who gave the first of
+  // the two, and when, while the status reads partially_approved.
+  // Optional: from untrusted JSON they may be missing, and missing means
+  // nobody has approved yet.
+  needs_approvers?: number;
+  first_approver?: string;
+  first_approved?: string;
+  // sql_detected: the request runs a database client. The server already
+  // fails safe (an exec-like request it cannot vouch for reads true), so
+  // the list can word its rows without fetching each detail.
+  sql_detected?: boolean;
 };
+
+// stillWaiting: a status that can still be decided. A partial approval
+// waits for its second person exactly as a pending one waits for its
+// first; treating it as decided would hide it from every other approver.
+export function stillWaiting(status: string): boolean {
+  return status === 'pending' || status === 'partially_approved';
+}
 
 export type ApprovalDetail = ApprovalSummary & {
   action: unknown;
@@ -125,6 +147,18 @@ export type ReplayResult = {
   changes: ReplayChange[];
 };
 
+export type RuleStat = {
+  rule: string;
+  held: number;
+  approved: number;
+  denied: number;
+  expired: number;
+  // null when nothing was decided: no rate, rather than a calm 0%.
+  approve_rate: number | null;
+};
+
+export type RuleStats = { since_hours: number; rules: RuleStat[] };
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -158,7 +192,10 @@ function signedOut() {
   signedOutListeners.forEach((fn) => fn());
 }
 
-export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+// quiet401: a 401 is only this call's failure, not a sign-out. For a
+// best-effort read whose failure changes nothing; any call that matters
+// still signs out on its own 401.
+export async function request<T>(method: string, path: string, body?: unknown, opts: { quiet401?: boolean } = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   // Only state-changing calls carry the CSRF value: the server demands it
@@ -171,7 +208,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
     credentials: 'same-origin',
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (res.status === 401 && path !== '/api/login') {
+  if (res.status === 401 && path !== '/api/login' && !opts.quiet401) {
     signedOut();
     throw new ApiError(401, 'signed out');
   }
@@ -204,6 +241,15 @@ export async function whoami(): Promise<Me> {
   const me = await get<Me>('/api/me');
   setCSRF(me.csrf);
   return me;
+}
+
+// clusterOf reads the cluster name alone. Sign-in answers with the name
+// and the CSRF value but not the cluster, so after a sign-in the console
+// asks /api/me for it. Best effort: without it the header and the panel
+// leave the line out, which is no reason to sign anyone out.
+export async function clusterOf(): Promise<string> {
+  const me = await request<Partial<Me> | undefined>('GET', '/api/me', undefined, { quiet401: true });
+  return me && typeof me.cluster === 'string' ? me.cluster : '';
 }
 
 export async function logout(): Promise<void> {

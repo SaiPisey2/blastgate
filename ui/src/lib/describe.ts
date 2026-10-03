@@ -6,7 +6,10 @@
 // that quietly ignores part of the request.
 
 export type Described = { sentence: string; target: string; resourceNoun: string };
-export type Requestish = { verb: string; group?: string; resource: string; subresource?: string; namespace: string; name: string };
+// sqlDetected: the command runs a database client, so an exec reads "Run
+// a database command in ...". Only exactly true counts: a wrong-typed
+// value must not change the words.
+export type Requestish = { verb: string; group?: string; resource: string; subresource?: string; namespace: string; name: string; sqlDetected?: boolean };
 
 // targetOf: the display identifier for a namespace/name pair. Unlike
 // friction's typedTarget, this may be empty — describe() falls back to
@@ -139,7 +142,7 @@ export function describe(r: Requestish): Described {
         sentence = (r.verb === 'patch' || r.verb === 'update') && hasNoun ? (hasName ? `Scale the ${singular} ${r.name}` : `Scale ${unnamed}`) : fallback();
         break;
       case 'exec':
-        sentence = pod ? `Run a command in ${pod}` : fallback();
+        sentence = pod ? `${r.sqlDetected === true ? 'Run a database command in' : 'Run a command in'} ${pod}` : fallback();
         break;
       case 'attach':
         sentence = pod ? `Attach to ${pod}` : fallback();

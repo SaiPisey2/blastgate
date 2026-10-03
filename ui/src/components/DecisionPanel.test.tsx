@@ -953,3 +953,98 @@ describe('DecisionPanel default focus never scrolls the page (I1)', () => {
     expect(baseCSS).toMatch(/html\s*\{[^}]*scroll-padding-top:\s*calc\(var\(--header-h\)/);
   });
 });
+
+describe('DecisionPanel two-person approvals', () => {
+  const FIRST_AT = new Date(Date.now() - 120_000).toISOString();
+  // An access grant alice has approved once: it still waits, for a second
+  // person. Typed-confirm, as every AUTHORITY request already is.
+  const grant = summary({
+    status: 'partially_approved',
+    rule: 'hold-authority',
+    human: 'dave',
+    verb: 'create',
+    resource: 'rolebindings',
+    namespace: 'demo',
+    name: 'admin-binding',
+    summary: 'AUTHORITY, 1 object',
+    class: 'AUTHORITY',
+    data_destroyed: 0,
+    needs_approvers: 2,
+    first_approver: 'alice',
+    first_approved: FIRST_AT,
+  });
+  const grantImpact = impact({ class: 'AUTHORITY', dataDestroyed: 0, undo: 'objects', effects: [{ kind: 'created', object: 'rbac.authorization.k8s.io/RoleBinding/demo/admin-binding' }] });
+  const FIRST_REASON = 'You already approved this; it needs a second person';
+
+  it('a partial approval shows who approved and needs one more', async () => {
+    const calls = routes();
+    const { onDecided } = renderPanel({ ...withDetail(grant, grantImpact), me: 'bob' });
+    const hh = new Date(FIRST_AT);
+    const at = `${String(hh.getHours()).padStart(2, '0')}:${String(hh.getMinutes()).padStart(2, '0')}`;
+    expect(screen.getByText(`Approved by alice at ${at} · needs one more approver`)).toBeTruthy();
+    // Still waiting: the ladder is unchanged, typed confirm for a grant.
+    expect(screen.getByText('Grants access')).toBeTruthy();
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.type(typedField(), 'demo/admin-binding');
+    expect(approveButton().disabled).toBe(false);
+    await userEvent.click(approveButton());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'approved'));
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+  });
+
+  it('a first approval says it needs one more person, never that the agent can go ahead', async () => {
+    routes({ body: detail({ ...grant, status: 'partially_approved', first_approver: 'bob' }, grantImpact) });
+    const pendingGrant = { ...grant, status: 'pending', first_approver: '', first_approved: '' };
+    const { onDecided } = renderPanel({ ...withDetail(pendingGrant, grantImpact), me: 'bob' });
+    await userEvent.type(typedField(), 'demo/admin-binding');
+    await userEvent.click(approveButton());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'partial'));
+    expect(screen.getByRole('status').textContent).toBe('Approved. It needs one more approver before the agent can go ahead.');
+  });
+
+  it('the first approver cannot approve again', async () => {
+    const calls = routes();
+    const { onDecided } = renderPanel({ ...withDetail(grant, grantImpact), me: 'alice' });
+    const approve = approveButton();
+    expect(approve.disabled).toBe(true);
+    expect(screen.getByText(FIRST_REASON)).toBeTruthy();
+    const described = approve.getAttribute('aria-describedby') ?? '';
+    expect(described.split(' ').map((id) => document.getElementById(id)?.textContent).join(' ')).toContain(FIRST_REASON);
+    // Typing the target never lifts it: this reason sits on top of the ladder.
+    await userEvent.type(typedField(), 'demo/admin-binding');
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.keyboard('{Enter}');
+    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+    await userEvent.click(approveButton());
+    expect(posts(calls)).toEqual([]);
+    // Deny is never blocked.
+    await userEvent.click(denyButton());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'denied'));
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/deny`]);
+  });
+
+  it('second-person and self texts are shown', async () => {
+    for (const [status, error, shown] of [
+      [409, 'you already approved this; it needs a second person', FIRST_REASON],
+      [403, "you can't approve a request made on your behalf", SELF_REASON],
+    ] as const) {
+      routes({ status, body: { error } });
+      const { onDecided, unmount } = renderPanel(withDetail(reversible, reversibleImpact));
+      await userEvent.click(approveButton());
+      const confirm = screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement;
+      await waitFor(() => expect(confirm.disabled).toBe(false));
+      await userEvent.click(confirm);
+      // Shown in the panel's words, and the request is not treated as gone.
+      expect(await screen.findByText(shown)).toBeTruthy();
+      expect(screen.queryByText(error)).toBeNull();
+      expect(screen.queryByText(GONE)).toBeNull();
+      expect(onDecided).not.toHaveBeenCalled();
+      // Approve stays shut with the reason tied to it; Deny is still there.
+      expect(approveButton().disabled).toBe(true);
+      const described = approveButton().getAttribute('aria-describedby') ?? '';
+      expect(described.split(' ').map((id) => document.getElementById(id)?.textContent).join(' ')).toContain(shown);
+      expect(denyButton().disabled).toBe(false);
+      unmount();
+    }
+  });
+});

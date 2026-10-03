@@ -1,15 +1,17 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ApiError, post, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
+import { ApiError, logout, post, stillWaiting, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
 import { ARM_MS, canSelfApprove, frictionOf, typedTarget } from '../lib/friction';
 import { describe } from '../lib/describe';
-import { actionText, ago, clock, plural, useNow } from '../lib/format';
+import { actionText, ago, clock, hhmm, plural, useNow } from '../lib/format';
 import { AnimatePresence, DUR, EASE, m, useIsPresent, useReducedMotion } from '../motion';
 import Button from './Button';
 import Facts, { type Fact } from './Facts';
 import Tag from './Tag';
 import TypedConfirm from './TypedConfirm';
 
-export type Outcome = 'approved' | 'denied' | 'gone';
+// partial: this approver gave the first of the two approvals an access
+// grant needs. The request still waits, for someone else.
+export type Outcome = 'approved' | 'partial' | 'denied' | 'gone';
 
 export type DecisionPanelProps = {
   summary: ApprovalSummary;
@@ -17,6 +19,9 @@ export type DecisionPanelProps = {
   detailError?: string;
   // me: the signed-in approver's name, for the self-approval guard.
   me: string;
+  // cluster: where this decision lands, from /api/me. Empty leaves the
+  // line out rather than say "On cluster" about nothing.
+  cluster?: string;
   onRetry: () => void;
   onDecided: (id: string, outcome: Outcome) => void;
   // position: set in the one-at-a-time layout ("1 of 3 waiting for you").
@@ -38,12 +43,48 @@ export type DecisionPanelProps = {
 };
 
 export const SELF_APPROVAL_REASON = "You can't approve a request made on your behalf";
+export const FIRST_APPROVER_REASON = 'You already approved this; it needs a second person';
+export const REAUTH_TEXT = 'Sign in again to approve access grants';
 export const GONE_TEXT = 'This request is no longer waiting.';
 
 const DONE_TEXT: Record<Exclude<Outcome, 'gone'>, string> = {
   approved: 'Approved. The agent can go ahead.',
+  // Never "the agent can go ahead": it cannot, until a second person
+  // approves too.
+  partial: 'Approved. It needs one more approver before the agent can go ahead.',
   denied: 'Denied. The agent was refused.',
 };
+
+// The server's refusals of an approval, by their fixed texts (spec §11).
+// Matched exactly and mapped to the panel's own sentences, so nothing the
+// server sends is shown as a refusal unless it is one of these. A 409
+// with any other text is still "decided elsewhere".
+type Refusal = 'self' | 'second' | 'reauth';
+const REFUSALS: Record<string, { status: number; refusal: Refusal }> = {
+  "you can't approve a request made on your behalf": { status: 403, refusal: 'self' },
+  'you already approved this; it needs a second person': { status: 409, refusal: 'second' },
+  'sign in again to approve access grants': { status: 403, refusal: 'reauth' },
+};
+const REFUSAL_TEXT: Record<Refusal, string> = {
+  self: SELF_APPROVAL_REASON,
+  second: FIRST_APPROVER_REASON,
+  reauth: REAUTH_TEXT,
+};
+
+function refusalOf(e: unknown): Refusal | null {
+  if (!(e instanceof ApiError) || !Object.hasOwn(REFUSALS, e.message)) return null;
+  const r = REFUSALS[e.message];
+  return r.status === e.status ? r.refusal : null;
+}
+
+// partialText is "Approved by alice at 14:02 · needs one more approver".
+// A name or a time that is missing is left out, never made up.
+function partialText(by: string | undefined, at: string | undefined): string {
+  const name = typeof by === 'string' && by !== '' ? ` by ${by}` : '';
+  const t = typeof at === 'string' && at !== '' ? Date.parse(at) : NaN;
+  const when = Number.isNaN(t) ? '' : ` at ${hhmm(new Date(t))}`;
+  return `Approved${name}${when} · needs one more approver`;
+}
 
 // The status comes from the API, so it picks words from a fixed map or is
 // shown raw.
@@ -103,11 +144,6 @@ export function isExecLike(resource: string): boolean {
   return i !== -1 && EXEC_LIKE.has(resource.slice(i + 1));
 }
 
-// RUN_A_COMMAND is describe()'s exec opening. With SQL detected it reads
-// "run a database command in ...", as the approved mockup does, so the
-// question itself says what kind of command this is.
-const RUN_A_COMMAND = 'Run a command in ';
-
 // affects is the count summary for "What it affects". Only reached for a
 // measured impact: an unmeasured one reads Unknown, never a count, since
 // its zeros mean "not looked at", not "nothing".
@@ -154,7 +190,7 @@ export default function DecisionPanel(props: DecisionPanelProps) {
   return <Panel key={props.summary.id} {...props} />;
 }
 
-function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDecided, position, standalone, body, headingFirst }: DecisionPanelProps) {
+function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetry, onDecided, position, standalone, body, headingFirst }: DecisionPanelProps) {
   // One check for both places the body changes: the facts row and the
   // command toggle.
   const hasBody = body !== undefined;
@@ -167,14 +203,20 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const typedLabelId = useId();
   const typedHintId = useId();
   const detailErrorId = useId();
+  const refusalId = useId();
   const commandId = useId();
   const rootRef = useRef<HTMLElement>(null);
   const denyRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const approveRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const firstFocus = useRef(headingFirst === true);
   const inFlight = useRef(false);
+  // headingFocus: the first default focus still goes to the question. In
+  // state, not a ref the effect clears: StrictMode runs a mount effect
+  // twice, and a ref cleared by the first run sent the second on to Deny.
+  // State keeps its value for both runs of one commit, and is cleared
+  // for the renders after it.
+  const [headingFocus, setHeadingFocus] = useState(headingFirst === true);
 
   const [typed, setTyped] = useState('');
   const [confirming, setConfirming] = useState(false);
@@ -183,6 +225,10 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const [error, setError] = useState('');
   const [result, setResult] = useState<Outcome | null>(null);
   const [showCommand, setShowCommand] = useState(false);
+  // refusal: the server refused this approver's approval by one of its
+  // rules. Approve stays shut after it: pressing again would only be
+  // refused again. Deny is never affected.
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   // A detail for some other request (a late answer after the selection
   // moved) is no detail at all: it must never enable Approve here.
@@ -191,28 +237,33 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   const friction = frictionOf(s, impact);
   const needsTyping = friction.level === 'typed';
   const expected = typedTarget(s);
-  const described = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name });
   // sqlDetected is exactly true, never merely truthy: a wrong-typed value
-  // must not change the question's words.
-  const runsSQL = impact?.sqlDetected === true;
-  const sentence =
-    runsSQL && described.sentence.startsWith(RUN_A_COMMAND)
-      ? `Run a database command in ${described.sentence.slice(RUN_A_COMMAND.length)}`
-      : described.sentence;
-  const { words, ident } = questionParts(sentence, described.target, s.name);
+  // must not change the question's words. Either source saying SQL is
+  // enough: the summary's flag is the server's fail-safe reading, and the
+  // list words its row from it before any detail has loaded.
+  const runsSQL = impact?.sqlDetected === true || s.sql_detected === true;
+  const described = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name, sqlDetected: runsSQL });
+  const { words, ident } = questionParts(described.sentence, described.target, s.name);
   // commandShown: for an unmeasured hold, or an exec-like request, the
   // command is the impact. It sits in view above the controls, as on the
   // details page, never behind "Show the command": an approver must not
   // be able to approve `psql -c 'drop table orders'` without having it
   // in front of them (ruling D-R24, over spec 4.1 item 7).
   const commandShown = friction.unknownImpact || isExecLike(s.resource);
-  const pending = s.status === 'pending';
+  // pending: still waiting for a decision, a partial approval included.
+  const pending = stillWaiting(s.status);
+  const partial = s.status === 'partially_approved';
   const selfBlocked = !canSelfApprove(me, s.human);
+  // firstBlocked: this approver gave the first approval and cannot give
+  // the second. Exact match, as the server compares names; the server
+  // also refuses by account, so this only says early what it would say.
+  const firstBlocked = partial && me !== '' && me === s.first_approver;
 
   // open: Approve can be pressed at all. ready: this press may send.
   // Both are computed here and checked again inside decide(), so no path
   // (a click, Enter, a chord, a stale closure) can approve around them.
-  const decidable = pending && detail !== undefined && !selfBlocked && result === null;
+  // The two-person reasons sit on top of the ladder, never in its place.
+  const decidable = pending && detail !== undefined && !selfBlocked && !firstBlocked && refusal === null && result === null;
 
   // Everything that armed or half-confirmed an approval is thrown away the
   // moment what it confirmed changes: the ladder level, the target to
@@ -291,6 +342,8 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   // Deny, and never Approve. It only takes focus the page is not using
   // elsewhere (nothing focused, or already inside this panel), so a list
   // the approver is moving through with the keyboard keeps its focus.
+  // headingFocus is read but not a dependency: clearing it must not run
+  // the effect again, which would move focus from the question to Deny.
   useEffect(() => {
     if (!pending) return;
     const active = document.activeElement;
@@ -299,8 +352,8 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     // and scrolling to it on arrival pushed the question up under the
     // sticky header. The page opens at the top, question first; Tab or a
     // keystroke still reaches the focused control.
-    if (firstFocus.current) {
-      firstFocus.current = false;
+    if (headingFocus) {
+      setHeadingFocus(false);
       headingRef.current?.focus({ preventScroll: true });
       return;
     }
@@ -329,12 +382,23 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
     setBusy(true);
     setError('');
     try {
-      await post(`/api/approvals/${encodeURIComponent(s.id)}/${action}`);
-      const outcome = action === 'approve' ? 'approved' : 'denied';
+      const got = await post<Partial<ApprovalSummary> | undefined>(`/api/approvals/${encodeURIComponent(s.id)}/${action}`);
+      // An approval that came back still partially approved was the first
+      // of two: saying "the agent can go ahead" would be false.
+      const outcome: Outcome =
+        action === 'deny' ? 'denied' : got && typeof got === 'object' && got.status === 'partially_approved' ? 'partial' : 'approved';
       live.current.result = outcome;
       setResult(outcome);
       onDecided(s.id, outcome);
     } catch (e) {
+      // One of the server's approval rules said no: not yours to approve,
+      // you gave the first approval already, or sign in again. Checked
+      // before the 409 below, which would read the second as "gone".
+      const refused = action === 'approve' ? refusalOf(e) : null;
+      if (refused) {
+        setRefusal(refused);
+        return;
+      }
       // 409: someone else decided it, or it expired, while this was open.
       // 404: it no longer exists. Either way it is not ours to decide.
       if (e instanceof ApiError && (e.status === 409 || e.status === 404)) {
@@ -381,10 +445,15 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
   let reason = '';
   if (pending && result === null) {
     if (selfBlocked) reason = SELF_APPROVAL_REASON;
+    else if (firstBlocked) reason = FIRST_APPROVER_REASON;
     else if (!detail && !detailError) reason = 'Approve is available once blastgate has loaded what this would change.';
   }
+  // A refusal already said in the reason line (self, first approver) is
+  // not said twice.
+  const refusalShown = refusal !== null && pending && result === null && REFUSAL_TEXT[refusal] !== reason;
   const approveDescribedBy = [
     reason ? reasonId : '',
+    refusalShown ? refusalId : '',
     detailError && !detail ? detailErrorId : '',
     needsTyping && !typedOK ? `${typedLabelId} ${typedHintId}` : '',
   ]
@@ -408,6 +477,12 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         {s.agent || 'An agent'} wants to {words}
         {ident && <span className="mono">{ident}</span>}
       </h2>
+      {cluster && (
+        <p className="decision-cluster">
+          On cluster <span className="mono">{cluster}</span>
+        </p>
+      )}
+      {partial && <p className="decision-partial">{partialText(s.first_approver, s.first_approved)}</p>}
       <p className="decision-why">{friction.why}</p>
       {hasBody ? body : <Facts items={facts} />}
       {detail && !hasBody && commandShown && (
@@ -429,6 +504,20 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, onRetry, onDeci
         <p className="decision-error" role="alert">
           {error}
         </p>
+      )}
+
+      {refusalShown && refusal && (
+        <div className="decision-refusal" role="alert">
+          <span id={refusalId}>{REFUSAL_TEXT[refusal]}</span>
+          {refusal === 'reauth' && (
+            // Signs out; signing back in returns to this same page (App
+            // remembers where a sign-out happened), with a fresh sign-in
+            // the server will accept for an access grant.
+            <Button variant="quiet" onClick={() => void logout().catch(() => {})}>
+              Sign in again
+            </Button>
+          )}
+        </div>
       )}
 
       {!pending ? (

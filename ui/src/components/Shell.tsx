@@ -85,9 +85,19 @@ export default function Shell({ route, pending, me, onSignOut, children }: Props
     <div className="shell">
       <header className="shell-header">
         <div className="shell-bar">
-          <a className="shell-brand" href="#/waiting">
-            blastgate
-          </a>
+          {/* The cluster rides beside the brand, so whichever screen is
+              open, the approver sees which cluster they are deciding for.
+              Cut short at 24ch; the full name is in its title. */}
+          <div className="shell-id">
+            <a className="shell-brand" href="#/waiting">
+              blastgate
+            </a>
+            {me.cluster && (
+              <span className="shell-cluster mono" title={me.cluster}>
+                {me.cluster}
+              </span>
+            )}
+          </div>
           <nav className="shell-tabs" aria-label="Main">
             {TABS.map((t) => {
               const active = t.match.includes(route.name);

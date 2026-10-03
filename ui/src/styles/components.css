@@ -55,6 +55,16 @@
   padding: 0 var(--s-7);
 }
 
+/* The brand and the cluster name, one group: the bar's columns and the
+   narrow grid place them together. */
+.shell-id {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: baseline;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
 .shell-brand {
   flex: 0 1 auto;
   min-width: 0;
@@ -72,6 +82,22 @@
 .shell-brand:hover {
   color: var(--text);
   text-decoration: none;
+}
+
+/* Which cluster this console decides for. Muted, beside the brand: read
+   when looked for, never louder than the page. A long name is cut at
+   24ch; the full name is in its title. */
+.shell-cluster {
+  /* Gives way long before the brand does: "b…" beside a half-shown
+     cluster would name neither. */
+  flex: 0 100 auto;
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Tabs are plain links. They stretch to the full bar height so the
@@ -178,7 +204,7 @@
     column-gap: var(--s-4);
   }
 
-  .shell-brand {
+  .shell-id {
     grid-area: 1 / 1;
     justify-self: start;
     max-width: 100%;
@@ -195,14 +221,16 @@
 }
 
 /* At phone width the brand and the controls share one row, tabs below:
-   the name moves to the screen reader only (it stays in the DOM and its
-   title), and the gaps close up, so the header is two rows, not three. */
+   the name and the cluster move to the screen reader only (they stay in
+   the DOM and their titles; every question still says its cluster), and
+   the gaps close up, so the header is two rows, not three. */
 @media (max-width: 480px) {
   .shell-meta {
     column-gap: var(--s-2);
   }
 
   .shell-who,
+  .shell-cluster,
   .theme-toggle-prefix {
     position: absolute;
     width: 1px;
@@ -575,6 +603,28 @@
   color: var(--text-muted);
 }
 
+/* Directly under the question: where approving lands. Quieter than the
+   question, the name itself in the text colour so it reads first. */
+.decision-cluster {
+  margin: 0 0 var(--s-3);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  overflow-wrap: anywhere;
+}
+
+.decision-cluster .mono {
+  color: var(--text);
+}
+
+/* An access grant one person has approved: who, when, and that it waits
+   for someone else. */
+.decision-partial {
+  margin: 0 0 var(--s-3);
+  color: var(--text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
 .facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
@@ -665,6 +715,27 @@
 
 .decision-detail-error .button-quiet {
   color: var(--danger-fg);
+}
+
+/* A rule refusal is not a failure: the server said why not, and what to
+   do about it. Caution, beside the action that fixes it when there is one. */
+.decision-refusal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--caution-line);
+  border-radius: var(--r-ctl);
+  background: var(--caution-bg);
+  color: var(--caution-fg);
+  overflow-wrap: anywhere;
+}
+
+.decision-refusal .button-quiet {
+  color: var(--caution-fg);
 }
 
 .decision-done {
@@ -1109,6 +1180,110 @@
   margin: var(--s-1) 0 0;
   color: var(--text-muted);
   font-size: var(--fs-13);
+}
+
+/* How each rule is used: a plain table of counts, read down a column.
+   Numbers are tabular so they line up; the flag sits under its rule's
+   name, so it never widens a numeric column. */
+.policy-stats {
+  margin: 0 0 var(--s-8);
+}
+
+.policy-stats h2 {
+  margin: 0 0 var(--s-2);
+  font-size: var(--fs-18);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.policy-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.policy-stats-table th {
+  padding: var(--s-2) var(--s-4) var(--s-2) 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.policy-stats-table td {
+  padding: var(--s-3) var(--s-4) var(--s-3) 0;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  vertical-align: top;
+}
+
+.policy-stats-table th:first-child,
+.policy-stats-table td:first-child {
+  text-align: left;
+}
+
+.policy-stats-table tr:last-child td {
+  border-bottom: none;
+}
+
+.policy-stats-rule {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.policy-stats-flag {
+  display: flex;
+  margin-top: var(--s-2);
+}
+
+/* Phone width: each rule stacks, its name and flag first, then one line
+   per count with the column name beside it, instead of six columns
+   squeezed past readable. */
+@media (max-width: 640px) {
+  .policy-stats-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .policy-stats-table,
+  .policy-stats-table tbody,
+  .policy-stats-table tr,
+  .policy-stats-table td {
+    display: block;
+  }
+
+  .policy-stats-table tr {
+    padding: var(--s-3) 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .policy-stats-table tr:last-child {
+    border-bottom: none;
+  }
+
+  .policy-stats-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--s-4);
+    padding: var(--s-1) 0;
+    border-bottom: none;
+  }
+
+  .policy-stats-table td:first-child {
+    display: block;
+    padding-bottom: var(--s-2);
+  }
+
+  .policy-stats-table td:not(:first-child)::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+    font-size: var(--fs-13);
+  }
 }
 
 /* === Sign in === */

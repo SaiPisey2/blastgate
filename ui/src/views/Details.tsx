@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { ApiError, get, subscribe, type ApprovalDetail, type Impact } from '../api';
+import { ApiError, get, stillWaiting, subscribe, type ApprovalDetail, type Impact } from '../api';
 import Button from '../components/Button';
 import DecisionPanel, { undoLabel } from '../components/DecisionPanel';
 import EmptyState from '../components/EmptyState';
@@ -44,7 +44,9 @@ function ageOf(d: ApprovalDetail, now: number): string {
 }
 
 // me: the signed-in approver's name, for the panel's self-approval guard.
-export default function Details({ id, me = '' }: { id: string; me?: string }) {
+// cluster: where this decision lands. back: the screen this page was
+// opened from, for Esc and the back link (Activity or Waiting).
+export default function Details({ id, me = '', cluster = '', back = '#/waiting' }: { id: string; me?: string; cluster?: string; back?: string }) {
   // The router validates the id already; checked again so nothing that is
   // not an approval id is ever put into an API path.
   const valid = APPROVAL_ID.test(id);
@@ -57,7 +59,8 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
   const techId = useId();
   const affectedId = useId();
   const mainRef = useRef<HTMLDivElement>(null);
-  useEscapeBack('#/waiting');
+  useEscapeBack(back);
+  const backLabel = back === '#/activity' ? 'Back to Activity' : 'Back to Waiting';
 
   const load = useCallback(async () => {
     if (!valid) return;
@@ -75,7 +78,7 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
         setMissing(true);
         return;
       }
-      pending.current = got.status === 'pending';
+      pending.current = stillWaiting(got.status);
       setD(got);
       setError('');
       setMissing(false);
@@ -119,7 +122,7 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
   return (
     <div className="page page-wide details">
       <p className="details-back">
-        <a href="#/waiting">Back to Waiting</a>
+        <a href={back}>{backLabel}</a>
       </p>
       <h1 className="visually-hidden">Request details</h1>
 
@@ -144,6 +147,7 @@ export default function Details({ id, me = '' }: { id: string; me?: string }) {
               summary={d}
               detail={d}
               me={me}
+              cluster={cluster}
               onRetry={() => void load()}
               onDecided={onDecided}
               standalone

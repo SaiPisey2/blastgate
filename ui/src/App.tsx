@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { get, logout, onSignedOut, openStream, subscribe, whoami, type ApprovalSummary, type Me } from './api';
+import { clusterOf, get, logout, onSignedOut, openStream, subscribe, whoami, type Me } from './api';
 import { navigate, parseHash, useHash, type Route } from './router';
 import Shell from './components/Shell';
 import EmptyState from './components/EmptyState';
@@ -17,10 +17,21 @@ export default function App() {
   // undefined: still asking /api/me; null: signed out.
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [pending, setPending] = useState<number | null>(null);
+  // The cluster when /api/me's answer did not carry it (a sign-in's does
+  // not). Its own state, not merged into me: a new me would restart the
+  // stream and refetch the count.
+  const [fetchedCluster, setFetchedCluster] = useState('');
   // Where to go back to after signing in, so a 401 mid-task returns the
   // approver to the screen they were on.
   const returnTo = useRef('#/waiting');
   if (route.name !== 'login' && route.name !== 'notfound' && hash) returnTo.current = hash;
+  // The last screen before a details page, so Esc there goes back to it:
+  // Activity when the approver came from Activity, Waiting otherwise and
+  // on a direct load. Read during render, like returnTo: on the details
+  // page's first render it still holds the screen before it.
+  const before = useRef<Route['name']>('waiting');
+  if (route.name !== 'approval' && route.name !== 'login' && route.name !== 'notfound') before.current = route.name;
+  const back = before.current === 'activity' ? '#/activity' : '#/waiting';
 
   useEffect(() => {
     const off = onSignedOut(() => setMe(null));
@@ -29,6 +40,20 @@ export default function App() {
       off();
     };
   }, []);
+
+  useEffect(() => {
+    if (!me || me.cluster !== undefined) return;
+    let live = true;
+    clusterOf().then(
+      (c) => {
+        if (live) setFetchedCluster(c);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [me]);
 
   useEffect(() => {
     if (!me) return;
@@ -41,9 +66,10 @@ export default function App() {
       setPending(ev.count);
     });
     const close = openStream();
-    get<ApprovalSummary[]>('/api/approvals?status=pending').then(
-      (list) => {
-        if (!heard) setPending((list ?? []).length);
+    // The true count, not the length of a list the server caps at 500.
+    get<{ count?: unknown }>('/api/approvals/count').then(
+      (r) => {
+        if (!heard && r && typeof r.count === 'number' && Number.isFinite(r.count)) setPending(r.count);
       },
       () => {},
     );
@@ -55,10 +81,11 @@ export default function App() {
 
   if (me === undefined) return <div className="boot" aria-busy="true" />;
   if (me === null) return <SignIn onSignedIn={setMe} />;
+  const cluster = me.cluster ?? fetchedCluster;
 
   return (
-    <Shell route={route} pending={pending} me={me} onSignOut={() => void logout().catch(() => {})}>
-      <Screen route={route} me={me.name} />
+    <Shell route={route} pending={pending} me={{ ...me, cluster }} onSignOut={() => void logout().catch(() => {})}>
+      <Screen route={route} me={me.name} cluster={cluster} back={back} />
     </Shell>
   );
 }
@@ -66,13 +93,13 @@ export default function App() {
 // Screen maps a route to its view. Until the new screens land, each new
 // route mounts the old view that does the same job, so nothing an
 // approver can reach today goes missing in between.
-function Screen({ route, me }: { route: Route; me: string }) {
+function Screen({ route, me, cluster, back }: { route: Route; me: string; cluster: string; back: string }) {
   switch (route.name) {
     case 'waiting':
     // login: signed in but still on #/login for the moment before the
     // effect above sends the approver back to where they were.
     case 'login':
-      return <Waiting me={me} />;
+      return <Waiting me={me} cluster={cluster} />;
     case 'activity':
       return <Activity />;
     case 'outside':
@@ -82,7 +109,7 @@ function Screen({ route, me }: { route: Route; me: string }) {
     case 'policy':
       return <Policy />;
     case 'approval':
-      return <Details id={route.id} me={me} />;
+      return <Details id={route.id} me={me} cluster={cluster} back={back} />;
     case 'notfound':
       return (
         <div className="page">

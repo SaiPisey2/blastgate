@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Policy from './Policy';
+import Shell from '../components/Shell';
+import { renderWithMotion } from '../test/motion';
 import { setCSRF, type ReplayResult } from '../api';
+import type { Route } from '../router';
 import { mockFetch } from '../test/fetch';
 
 const EVIL = '<img src=x onerror=alert(1)>';
@@ -342,5 +345,75 @@ describe('Policy', () => {
     await userEvent.click(screen.getByRole('button', { name: /^replay over the last/i }));
     expect(await screen.findByText(/larger than 64 KiB/i)).toBeTruthy();
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+});
+
+describe('Policy rule stats and announcements', () => {
+  it('rule stats render and flag rubber-stamped rules', async () => {
+    const calls = mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'GET /api/policy/stats': {
+        body: {
+          since_hours: 168,
+          rules: [
+            { rule: 'hold-writes', held: 10, approved: 19, denied: 1, expired: 0, approve_rate: 0.95 },
+            { rule: 'hold-deletes', held: 9, approved: 9, denied: 0, expired: 0, approve_rate: 1 },
+            { rule: 'hold-exec', held: 12, approved: 6, denied: 6, expired: 0, approve_rate: 0.5 },
+            { rule: EVIL, held: 3, approved: 0, denied: 0, expired: 3, approve_rate: null },
+          ],
+        },
+      },
+    });
+    const { container } = render(<Policy />);
+    const section = await screen.findByRole('region', { name: 'How each rule is used' });
+    expect(calls.some((c) => c.url.startsWith('/api/policy/stats'))).toBe(true);
+    const table = within(section).getByRole('table');
+    const heads = within(table)
+      .getAllByRole('columnheader')
+      .map((th) => th.textContent);
+    expect(heads).toEqual(['Rule', 'Held', 'Approved', 'Denied', 'Expired', 'Rate']);
+    const rows = await within(table).findAllByRole('row');
+    const body = rows.slice(1);
+    expect(body).toHaveLength(4);
+    const rowOf = (name: string) => body.find((r) => r.querySelector('.policy-stats-rule')?.textContent === name)!;
+    const FLAG = 'Almost always approved — consider allowing it';
+
+    // 10 holds approved 95% of the time: flagged, as a caution tag with
+    // its glyph and its words.
+    const flagged = rowOf('hold-writes');
+    const tag = within(flagged).getByText(FLAG).closest('.tag')!;
+    expect(tag.classList.contains('tag-caution')).toBe(true);
+    expect(tag.querySelector('.tag-glyph')!.textContent).toBe('◆');
+    expect(within(flagged).getByText('95%')).toBeTruthy();
+    // 9 holds is too few to say, even at 100%.
+    expect(within(rowOf('hold-deletes')).queryByText(FLAG)).toBeNull();
+    expect(within(rowOf('hold-deletes')).getByText('100%')).toBeTruthy();
+    // Half approved: not flagged.
+    expect(within(rowOf('hold-exec')).queryByText(FLAG)).toBeNull();
+    // Nothing decided: no rate, a dash, never 0%.
+    const none = rowOf(EVIL);
+    expect(within(none).getByText('—')).toBeTruthy();
+    expect(within(none).queryByText(FLAG)).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
+    // Each cell carries its column name for the stacked phone layout.
+    expect(Array.from(flagged.querySelectorAll('td')).map((td) => td.getAttribute('data-label'))).toEqual(heads);
+  });
+
+  it('replay result is announced', async () => {
+    mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'POST /api/policy/replay': { body: RESULT },
+    });
+    const route: Route = { name: 'policy' };
+    renderWithMotion(
+      <Shell route={route} pending={null} me={{ name: 'bob', csrf: 'c', cluster: 'c1' }} onSignOut={() => {}}>
+        <Policy />
+      </Shell>,
+    );
+    const candidate = screen.getByLabelText(/candidate policy/i) as HTMLTextAreaElement;
+    await waitFor(() => expect(candidate.value).toBe(LOADED));
+    await userEvent.click(screen.getByRole('button', { name: /^Replay over/ }));
+    await screen.findByRole('region', { name: 'Replay result' });
+    await waitFor(() => expect(document.getElementById('announcer')!.textContent).toBe('2 of 412 decisions would change'));
   });
 });
