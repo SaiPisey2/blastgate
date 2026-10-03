@@ -73,9 +73,23 @@ var (
 // an empty class, or a class it does not know all need two -- because
 // guessing "one" for an access grant whose impact row was damaged or
 // written by a newer version would let a single person grant power.
+//
+// impact_json is not signed, so the class is trusted only when the
+// impact digests to the row's impact_digest, the value the token binds:
+// a database writer who rewrites an access grant's class to REVERSIBLE
+// without also changing the digest gets two approvers, and one who
+// changes the digest too gets a token no retry will ever match. A row
+// already partially approved needs two whatever it now says, so an edit
+// after the first approval cannot turn the second into a lone release.
 func NeedsTwo(a store.Approval) bool {
+	if a.Status == "partially_approved" {
+		return true
+	}
 	var imp engine.Impact
 	if err := json.Unmarshal(a.ImpactJSON, &imp); err != nil {
+		return true
+	}
+	if imp.Digest() != a.ImpactDigest {
 		return true
 	}
 	switch imp.Class {
@@ -197,8 +211,11 @@ func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Ap
 			return s.Store.ApprovalByID(ctx, id)
 		}
 		// An empty id cannot be told apart from anyone, so it is never
-		// the second person.
-		if by.ID == "" || by.ID == a.FirstApproverID {
+		// the second person. The name is compared as well as the id:
+		// revoking an approver and creating it again under the same name
+		// gives the same person a new id, and the id alone would let them
+		// approve twice.
+		if by.ID == "" || by.ID == a.FirstApproverID || by.Name == a.FirstApproverName {
 			return store.Approval{}, ErrNeedsSecondApprover
 		}
 	}

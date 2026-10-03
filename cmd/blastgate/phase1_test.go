@@ -44,13 +44,14 @@ func withStore(t *testing.T, dir string, f func(*store.Store)) {
 func seedPending(t *testing.T, dir string) string {
 	t.Helper()
 	id := "0123456789abcdef0123456789abcdef"
-	imp, _ := json.Marshal(engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"})
+	impact := engine.Impact{Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none"}
+	imp, _ := json.Marshal(impact)
 	act, _ := json.Marshal(normalize.Action{Verb: "delete", Resource: "persistentvolumeclaims", Namespace: "demo", Name: "data"})
 	withStore(t, dir, func(st *store.Store) {
 		now := time.Now().UTC()
 		if err := st.CreateApproval(context.Background(), store.Approval{
 			ID: id, Session: "sess-1", Human: "alice", Agent: "coding-agent",
-			RequestDigest: "req", ImpactDigest: "imp", ActionJSON: act, ImpactJSON: imp,
+			RequestDigest: "req", ImpactDigest: impact.Digest(), ActionJSON: act, ImpactJSON: imp,
 			Rule: "data-destruction", Status: "pending", Created: now, Expires: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
@@ -425,12 +426,13 @@ func TestReplaySaysWhenTheListIsCut(t *testing.T) {
 func TestCLIApproveRulesOnAnAccessGrant(t *testing.T) {
 	dir, env := cliEnv(t)
 	id := "fedcba9876543210fedcba9876543210"
-	imp, _ := json.Marshal(engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})
+	impact := engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"}
+	imp, _ := json.Marshal(impact)
 	withStore(t, dir, func(st *store.Store) {
 		now := time.Now().UTC()
 		if err := st.CreateApproval(context.Background(), store.Approval{
 			ID: id, Session: "sess-1", Human: "alice", Agent: "coding-agent",
-			RequestDigest: "req", ImpactDigest: "imp", ActionJSON: []byte(`{}`), ImpactJSON: imp,
+			RequestDigest: "req", ImpactDigest: impact.Digest(), ActionJSON: []byte(`{}`), ImpactJSON: imp,
 			Rule: "access-grant", Status: "pending", Created: now, Expires: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)

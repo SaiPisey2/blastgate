@@ -278,14 +278,20 @@ func (f *apiFixture) pending(t *testing.T, id string) store.Approval {
 }
 
 func pendingApproval(id string, now time.Time) store.Approval {
-	imp, _ := json.Marshal(engine.Impact{
+	return approvalWithImpact(id, now, engine.Impact{
 		Class: engine.ClassTerminal, Measured: true, DataDestroyed: 1, Undo: "none",
 		Effects:       []engine.Effect{{Kind: "deleted", Object: "PersistentVolumeClaim/demo/data"}},
 		EndpointsLeft: map[string]int{"demo/web": 0}, PDBViolations: []string{"demo/web-pdb"},
 	})
+}
+
+// approvalWithImpact stores the impact beside its real digest, as the gate
+// does: the approval rules trust a stored class only when it matches.
+func approvalWithImpact(id string, now time.Time, impact engine.Impact) store.Approval {
+	imp, _ := json.Marshal(impact)
 	act, _ := json.Marshal(normalize.Action{Verb: "delete", Resource: "persistentvolumeclaims", Namespace: "demo", Name: "data"})
 	return store.Approval{ID: id, Session: "0123456789abcdef", Human: "alice", Agent: "coding-agent",
-		RequestDigest: "req-" + id, ImpactDigest: "imp", ActionJSON: act, ImpactJSON: imp,
+		RequestDigest: "req-" + id, ImpactDigest: impact.Digest(), ActionJSON: act, ImpactJSON: imp,
 		Rule: "data-destruction", Status: "pending", Created: now.Add(-90 * time.Second), Expires: now.Add(time.Hour)}
 }
 
@@ -1176,5 +1182,70 @@ func TestSessionsListIsBounded(t *testing.T) {
 	code, body := c.post(t, "/api/sessions/"+oldest+"/revoke", "")
 	if d := decode[SessionRow](t, body); code != 200 || d.ID != oldest || d.State != "revoked" {
 		t.Errorf("revoking a session beyond the first page: %d %s", code, body)
+	}
+}
+
+// An access grant approved through real browser sessions: the API, not a
+// test double, supplies who approved, when they signed in and from which
+// channel. A stale sign-in is refused, one account cannot be both people,
+// and two fresh accounts release it with one token. Until the API maps the
+// rule refusals to 403/409 they answer as errors; what matters here is
+// that none of them approves or stores a token.
+func TestAccessGrantNeedsTwoFreshBrowserSessions(t *testing.T) {
+	f := newAPIFixture(t)
+	if err := f.st.CreateApproval(context.Background(), approvalWithImpact(approvalID, f.clock.Now(),
+		engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/approvals/" + approvalID + "/approve"
+	rowNow := func() store.Approval {
+		r, err := f.st.ApprovalByID(context.Background(), approvalID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// bob signed in longer ago than the reauth window (15m by default).
+	bob := f.signIn(t, "bob")
+	f.clock.Add(15*time.Minute + time.Second)
+	if code, body := bob.post(t, path, ""); code == 200 {
+		t.Fatalf("a stale session approved an access grant: %s", body)
+	}
+	if r := rowNow(); r.Status != "pending" || r.Token != "" || r.FirstApproverID != "" {
+		t.Fatalf("after the stale session: %+v", r)
+	}
+
+	carol := f.signIn(t, "carol")
+	code, body := carol.post(t, path, "")
+	if code != 200 || decode[map[string]any](t, body)["status"] != "partially_approved" {
+		t.Fatalf("first fresh approval: %d %s", code, body)
+	}
+	if r := rowNow(); r.Status != "partially_approved" || r.Token != "" || r.FirstApproverID != "ap-carol" || r.FirstApproverName != "carol" {
+		t.Fatalf("after the first approval: %+v", r)
+	}
+	if code, body := carol.post(t, path, ""); code == 200 {
+		t.Fatalf("the same session approved twice: %s", body)
+	}
+	if r := rowNow(); r.Status != "partially_approved" || r.Token != "" {
+		t.Fatalf("after the same session again: %+v", r)
+	}
+
+	dave := f.signIn(t, "dave")
+	if code, body := dave.post(t, path, ""); code != 200 || decode[map[string]any](t, body)["status"] != "approved" {
+		t.Fatalf("second fresh approval: %d %s", code, body)
+	}
+	released := rowNow()
+	if released.Status != "approved" || released.Token == "" || released.Nonce == "" || released.DecidedBy != "dave" || released.FirstApproverName != "carol" {
+		t.Fatalf("after the second approval: %+v", released)
+	}
+	// The token is minted once: a third person finds it decided, and the
+	// stored token and nonce do not move.
+	erin := f.signIn(t, "erin")
+	if code, _ := erin.post(t, path, ""); code != 409 {
+		t.Errorf("third approval: %d, want 409", code)
+	}
+	if r := rowNow(); r.Token != released.Token || r.Nonce != released.Nonce || r.DecidedBy != "dave" {
+		t.Errorf("token changed after release: %+v", r)
 	}
 }

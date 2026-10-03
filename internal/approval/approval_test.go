@@ -9,8 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SaiPisey2/blastgate/internal/engine"
 	"github.com/SaiPisey2/blastgate/internal/store"
 )
+
+// impact1 is the real digest of the impact pending() stores. A made-up
+// digest would no longer match the stored impact, and NeedsTwo treats an
+// impact that does not match its digest as an access grant.
+var impact1 = engine.Impact{Class: engine.ClassTerminal}.Digest()
 
 var key = []byte("3f9a1c07d24be85f6a0913c7e2d84b5f70a6c31e9d28f4b1")
 
@@ -27,7 +33,7 @@ func svc(t *testing.T, now *time.Time) (*Service, *store.Store, string) {
 }
 
 func pending(t *testing.T, st *store.Store, now time.Time) store.Approval {
-	a := store.Approval{ID: NewID(), Session: "s1", Human: "alice", Agent: "coding-agent", RequestDigest: "rd", ImpactDigest: "impact-1",
+	a := store.Approval{ID: NewID(), Session: "s1", Human: "alice", Agent: "coding-agent", RequestDigest: "rd", ImpactDigest: impact1,
 		ActionJSON: []byte(`{}`), ImpactJSON: []byte(`{"class":"TERMINAL"}`), Rule: "data-destruction", Status: "pending", Created: now, Expires: now.Add(time.Hour)}
 	if err := st.CreateApproval(context.Background(), a); err != nil {
 		t.Fatal(err)
@@ -67,11 +73,11 @@ func TestApprovedRetryWithSameImpactIsReleasedOnce(t *testing.T) {
 	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+	o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 	if err != nil || o != Release {
 		t.Fatalf("first check = %v, %v", o, err)
 	}
-	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
+	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != None {
 		t.Errorf("second check = %v, want None (token already spent)", o)
 	}
 }
@@ -99,7 +105,7 @@ func TestAnotherAgentCannotUseTheApproval(t *testing.T) {
 	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if o, _, err := s.Check(context.Background(), "s1", "alice", "other-agent", "rd", "impact-1"); err != nil || o != Void {
+	if o, _, err := s.Check(context.Background(), "s1", "alice", "other-agent", "rd", impact1); err != nil || o != Void {
 		t.Errorf("check as another agent = %v, %v, want Void", o, err)
 	}
 }
@@ -110,7 +116,7 @@ func TestExpiredTokenIsNotReleased(t *testing.T) {
 	a := pending(t, st, now)
 	s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"})
 	now = now.Add(16 * time.Minute)
-	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
+	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != None {
 		t.Errorf("check after expiry = %v", o)
 	}
 }
@@ -119,15 +125,15 @@ func TestPendingAndDenied(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
-	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != Pending {
+	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != Pending {
 		t.Errorf("pending check = %v", o)
 	}
 	s.Deny(context.Background(), a.ID, "bob")
-	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != Denied {
+	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != Denied {
 		t.Errorf("denied check = %v", o)
 	}
 	now = now.Add(2 * time.Hour)
-	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
+	if o, _, _ := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != None {
 		t.Errorf("stale denial still blocks: %v", o)
 	}
 }
@@ -182,7 +188,7 @@ func TestStalePendingExpires(t *testing.T) {
 	s, st, _ := svc(t, &now)
 	a := pending(t, st, now)
 	now = now.Add(time.Hour + time.Millisecond)
-	if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != None {
+	if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); err != nil || o != None {
 		t.Fatalf("check on stale pending = %v, %v", o, err)
 	}
 	if row, _ := st.ApprovalByID(context.Background(), a.ID); row.Status != "expired" {
@@ -229,7 +235,7 @@ func TestEmptyKeyFailsClosed(t *testing.T) {
 	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err == nil {
 		t.Error("approved with no signing key")
 	}
-	if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); err == nil || o == Release {
+	if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); err == nil || o == Release {
 		t.Errorf("check with no signing key = %v, %v", o, err)
 	}
 }
@@ -247,7 +253,7 @@ func TestApprovalMovedToAnotherSessionIsVoid(t *testing.T) {
 	if err := tamper(path, a.ID, "session_id", "s2"); err != nil {
 		t.Fatal(err)
 	}
-	if o, _, err := s.Check(context.Background(), "s2", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Void {
+	if o, _, err := s.Check(context.Background(), "s2", "alice", "coding-agent", "rd", impact1); err != nil || o != Void {
 		t.Errorf("check in the session the row was moved to = %v, %v, want Void", o, err)
 	}
 }
@@ -260,7 +266,7 @@ func TestAnotherHumanCannotUseTheApproval(t *testing.T) {
 	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if o, _, err := s.Check(context.Background(), "s1", "mallory", "coding-agent", "rd", "impact-1"); err != nil || o != Void {
+	if o, _, err := s.Check(context.Background(), "s1", "mallory", "coding-agent", "rd", impact1); err != nil || o != Void {
 		t.Errorf("check as another human = %v, %v, want Void", o, err)
 	}
 }
@@ -292,7 +298,7 @@ func TestTamperedExpiryOrNonceIsVoid(t *testing.T) {
 			if tc.column == "expires_at" {
 				now = now.Add(16 * time.Minute)
 			}
-			if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Void {
+			if o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); err != nil || o != Void {
 				t.Errorf("check after tampering %s = %v, %v, want Void", tc.column, o, err)
 			}
 		})
@@ -316,7 +322,7 @@ func TestConcurrentChecksReleaseOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+			o, _, err := s.Check(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -346,7 +352,7 @@ func TestVerifyDoesNotSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 		if err != nil || o != Verified || got.ID != a.ID {
 			t.Fatalf("verify %d = %v, %v", i, o, err)
 		}
@@ -354,7 +360,7 @@ func TestVerifyDoesNotSpend(t *testing.T) {
 	if row, _ := st.ApprovalByID(context.Background(), a.ID); row.Status != "approved" {
 		t.Errorf("status after verify = %s, want approved", row.Status)
 	}
-	o, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+	o, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 	if o != Verified {
 		t.Fatal(o)
 	}
@@ -364,7 +370,7 @@ func TestVerifyDoesNotSpend(t *testing.T) {
 	if err := s.Consume(context.Background(), got); !errors.Is(err, store.ErrConflict) {
 		t.Errorf("second consume = %v, want ErrConflict", err)
 	}
-	if o, _, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1"); o != None {
+	if o, _, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", impact1); o != None {
 		t.Errorf("verify after consume = %v, want None", o)
 	}
 }
@@ -380,7 +386,7 @@ func TestConcurrentVerifyThenConsumeReleasesOnce(t *testing.T) {
 	}
 	var verified []store.Approval
 	for i := 0; i < 10; i++ {
-		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+		o, got, err := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 		if err != nil || o != Verified {
 			t.Fatalf("verify = %v, %v", o, err)
 		}
@@ -421,7 +427,7 @@ func TestConsumeRefusesALapsedToken(t *testing.T) {
 	if _, err := s.Approve(context.Background(), a.ID, Approver{Name: "bob", Channel: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	_, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", "impact-1")
+	_, got, _ := s.Verify(context.Background(), "s1", "alice", "coding-agent", "rd", impact1)
 	now = now.Add(16 * time.Minute)
 	if err := s.Consume(context.Background(), got); !errors.Is(err, store.ErrConflict) {
 		t.Errorf("consume of a lapsed token = %v, want ErrConflict", err)

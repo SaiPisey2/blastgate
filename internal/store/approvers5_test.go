@@ -246,3 +246,36 @@ func TestMarkPartiallyApprovedIsSingleUseUnderConcurrency(t *testing.T) {
 		t.Errorf("approval.partial events = %d, %v; want 1", events, err)
 	}
 }
+
+// The partial event names the first approver: an outbox reader sees both
+// people of an access grant without reading the row back, and the other
+// events keep their shape.
+func TestPartialOutboxEventNamesTheFirstApprover(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if err := s.CreateApproval(ctx, appr("a1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkPartiallyApproved(ctx, "a1", "ap1", "bob", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	payloads := map[string]string{}
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, payload FROM outbox`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k, p string
+		if err := rows.Scan(&k, &p); err != nil {
+			t.Fatal(err)
+		}
+		payloads[k] = p
+	}
+	if got, want := payloads["approval.partial"], `{"approval_id":"a1","status":"partially_approved","first_approver_name":"bob"}`; got != want {
+		t.Errorf("partial payload = %s, want %s", got, want)
+	}
+	if got, want := payloads["approval.pending"], `{"approval_id":"a1","status":"pending"}`; got != want {
+		t.Errorf("pending payload = %s, want %s", got, want)
+	}
+}

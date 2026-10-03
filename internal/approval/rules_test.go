@@ -2,19 +2,33 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/SaiPisey2/blastgate/internal/engine"
 	"github.com/SaiPisey2/blastgate/internal/store"
 )
 
+// digestOf is the digest the gate would have stored beside impactJSON.
+// For JSON that does not decode as an impact there is no such digest, and
+// a placeholder stands in.
+func digestOf(impactJSON string) string {
+	var imp engine.Impact
+	if json.Unmarshal([]byte(impactJSON), &imp) != nil {
+		return "no-digest"
+	}
+	return imp.Digest()
+}
+
 // held creates a pending approval for alice whose stored impact is
-// impactJSON, so a test picks the class the rules read.
+// impactJSON, with its real digest, so a test picks the class the rules
+// read.
 func held(t *testing.T, st *store.Store, now time.Time, impactJSON string) store.Approval {
 	t.Helper()
-	a := store.Approval{ID: NewID(), Session: "s1", Human: "alice", Agent: "coding-agent", RequestDigest: "rd", ImpactDigest: "impact-1",
+	a := store.Approval{ID: NewID(), Session: "s1", Human: "alice", Agent: "coding-agent", RequestDigest: "rd", ImpactDigest: digestOf(impactJSON),
 		ActionJSON: []byte(`{}`), ImpactJSON: []byte(impactJSON), Rule: "access-grant", Status: "pending", Created: now, Expires: now.Add(time.Hour)}
 	if err := st.CreateApproval(context.Background(), a); err != nil {
 		t.Fatal(err)
@@ -110,10 +124,17 @@ func TestTwoPeople(t *testing.T) {
 		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
 			t.Fatalf("same account again: %v, want ErrNeedsSecondApprover", err)
 		}
-		// A second account under the same display name is still the same
-		// person only if the id matches; the id is what is compared.
+		// The second person must differ by id and by name: an empty id,
+		// the same id, or another account under the first approver's name
+		// are all the same person as far as the rule can tell.
 		if _, err := s.Approve(ctx, a.ID, browser("", "carol", now)); !errors.Is(err, ErrNeedsSecondApprover) {
 			t.Fatalf("an approver with no id: %v, want ErrNeedsSecondApprover", err)
+		}
+		if _, err := s.Approve(ctx, a.ID, browser("ap7", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
+			t.Fatalf("another account named bob: %v, want ErrNeedsSecondApprover", err)
+		}
+		if _, err := s.Approve(ctx, a.ID, browser("ap1", "robert", now)); !errors.Is(err, ErrNeedsSecondApprover) {
+			t.Fatalf("bob's account under another name: %v, want ErrNeedsSecondApprover", err)
 		}
 		if r := row(t, st, a.ID); r.Status != "partially_approved" || r.Token != "" {
 			t.Fatalf("refused second approvals moved the row: %+v", r)
@@ -126,7 +147,7 @@ func TestTwoPeople(t *testing.T) {
 			second.FirstApproverName != "bob" {
 			t.Fatalf("after the second approval: %+v", second)
 		}
-		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Release {
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Release {
 			t.Fatalf("check after two approvals = %v, %v, want Release", o, err)
 		}
 	})
@@ -203,7 +224,7 @@ func TestTwoPeople(t *testing.T) {
 		if _, err := s.Approve(ctx, a.ID, browser("ap2", "dave", now)); !errors.Is(err, ErrNotPending) {
 			t.Fatalf("approving a denied grant: %v, want ErrNotPending", err)
 		}
-		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Denied {
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Denied {
 			t.Fatalf("check after deny = %v, %v, want Denied", o, err)
 		}
 	})
@@ -223,7 +244,7 @@ func TestTwoPeople(t *testing.T) {
 			}
 		}
 		for _, imp := range []string{reversible, `{"class":"READ"}`, `{"class":"COMPENSABLE"}`, `{"class":"TERMINAL"}`} {
-			if NeedsTwo(store.Approval{ImpactJSON: []byte(imp)}) {
+			if NeedsTwo(store.Approval{Status: "pending", ImpactJSON: []byte(imp), ImpactDigest: digestOf(imp)}) {
 				t.Errorf("NeedsTwo(%q) = true, want false", imp)
 			}
 		}
@@ -251,6 +272,15 @@ func TestTwoPeople(t *testing.T) {
 		// again under it cannot supply the second approval.
 		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
 			t.Fatalf("first approver again after revocation: %v, want ErrNeedsSecondApprover", err)
+		}
+		// Nor can bob re-created under a new id: names are unique only
+		// among live approvers, so revoke-and-recreate is a new account
+		// for the same person.
+		if err := st.CreateApprover(ctx, store.Approver{ID: "ap9", Name: "bob", Created: now}, []byte("bob-again-token-hash")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Approve(ctx, a.ID, browser("ap9", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
+			t.Fatalf("bob re-created with a new id: %v, want ErrNeedsSecondApprover", err)
 		}
 		if r, err := s.Approve(ctx, a.ID, browser("ap2", "carol", now)); err != nil || r.Status != "approved" || r.Token == "" {
 			t.Fatalf("second approver: %+v, %v", r, err)
@@ -312,6 +342,52 @@ func TestTwoPeople(t *testing.T) {
 	})
 }
 
+func TestNeedsTwoTrustsOnlyADigestedImpact(t *testing.T) {
+	ctx := context.Background()
+	t.Run("tampered impact json needs two approvers", func(t *testing.T) {
+		now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+		s, st, path := svc(t, &now)
+		a := held(t, st, now, authority)
+		// A database writer rewrites the access grant as reversible but
+		// cannot produce a matching digest without voiding the token.
+		if err := tamper(path, a.ID, "impact_json", []byte(reversible)); err != nil {
+			t.Fatal(err)
+		}
+		r := row(t, st, a.ID)
+		if !NeedsTwo(r) {
+			t.Fatal("NeedsTwo trusted a class whose impact does not match the stored digest")
+		}
+		if _, err := s.Approve(ctx, a.ID, cli("bob")); !errors.Is(err, ErrChannelNotAllowed) {
+			t.Fatalf("cli approve of a tampered grant: %v, want ErrChannelNotAllowed", err)
+		}
+	})
+	t.Run("a partial approval always needs two", func(t *testing.T) {
+		r := store.Approval{Status: "partially_approved", ImpactJSON: []byte(reversible), ImpactDigest: digestOf(reversible)}
+		if !NeedsTwo(r) {
+			t.Fatal("a partially approved row with a single-approver impact did not need two")
+		}
+	})
+	t.Run("a stored impact still matches its digest", func(t *testing.T) {
+		// What the gate stores: json.Marshal of the impact beside its
+		// Digest. Every field that can be empty or unordered is filled, so
+		// a round trip that changed the digest -- and silently made every
+		// held request need two people -- fails here.
+		imp := engine.Impact{Class: engine.ClassTerminal, Measured: true, Reason: "r",
+			Effects:       []engine.Effect{{Kind: "deleted", Object: "v1/Pod/demo/b"}, {Kind: "deleted", Object: "v1/Pod/demo/a", Explanation: "x"}},
+			DataDestroyed: 2, EndpointsLeft: map[string]int{"demo/web": 0, "demo/api": 1}, PDBViolations: []string{"z", "a"},
+			SQLDetected: true, Undo: "none", Elapsed: time.Second}
+		b, _ := json.Marshal(imp)
+		if NeedsTwo(store.Approval{Status: "pending", ImpactJSON: b, ImpactDigest: imp.Digest()}) {
+			t.Fatal("a stored TERMINAL impact needs two approvers after a JSON round trip")
+		}
+		empty := engine.Impact{Class: engine.ClassReversible, EndpointsLeft: map[string]int{}, Effects: []engine.Effect{}}
+		b, _ = json.Marshal(empty)
+		if NeedsTwo(store.Approval{Status: "pending", ImpactJSON: b, ImpactDigest: empty.Digest()}) {
+			t.Fatal("empty-but-non-nil collections changed the digest across a round trip")
+		}
+	})
+}
+
 func TestWaitingState(t *testing.T) {
 	ctx := context.Background()
 	t.Run("partial expires like pending", func(t *testing.T) {
@@ -333,7 +409,7 @@ func TestWaitingState(t *testing.T) {
 		if r := row(t, st, a.ID); r.Token != "" {
 			t.Fatalf("an expired partial was minted: %+v", r)
 		}
-		o, got, err := s.Verify(ctx, "s1", "alice", "coding-agent", "rd", "impact-1")
+		o, got, err := s.Verify(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest)
 		if err != nil || o != None || got.Status != "expired" {
 			t.Fatalf("verify of an expired partial = %v, %s, %v, want None, expired", o, got.Status, err)
 		}
@@ -348,11 +424,11 @@ func TestWaitingState(t *testing.T) {
 		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); err != nil {
 			t.Fatal(err)
 		}
-		o, got, err := s.Verify(ctx, "s1", "alice", "coding-agent", "rd", "impact-1")
+		o, got, err := s.Verify(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest)
 		if err != nil || o != Pending || got.ID != a.ID {
 			t.Fatalf("verify of a partial = %v, %v, want Pending", o, err)
 		}
-		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Pending {
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Pending {
 			t.Fatalf("check of a partial = %v, %v, want Pending", o, err)
 		}
 		if r := row(t, st, a.ID); r.Status != "partially_approved" {
@@ -376,7 +452,7 @@ func TestSingleApprover(t *testing.T) {
 		if r.Status != "approved" || r.Token == "" || r.Nonce == "" || r.DecidedBy != "bob" || r.FirstApproverID != "" {
 			t.Fatalf("after one cli approval: %+v", r)
 		}
-		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", "impact-1"); err != nil || o != Release {
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Release {
 			t.Fatalf("check = %v, %v, want Release", o, err)
 		}
 		b := held(t, st, now, reversible)

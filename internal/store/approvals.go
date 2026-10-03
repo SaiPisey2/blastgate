@@ -78,10 +78,17 @@ func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 type outboxEvent struct {
 	ApprovalID string `json:"approval_id"`
 	Status     string `json:"status"`
+	// FirstApproverName is set on "approval.partial" only, so the event
+	// itself names the first of the two people, not just the row.
+	FirstApproverName string `json:"first_approver_name,omitempty"`
 }
 
 func insertOutbox(ctx context.Context, tx *sql.Tx, kind, approvalID, status string, at time.Time) error {
-	payload, err := json.Marshal(outboxEvent{ApprovalID: approvalID, Status: status})
+	return insertOutboxEvent(ctx, tx, kind, outboxEvent{ApprovalID: approvalID, Status: status}, at)
+}
+
+func insertOutboxEvent(ctx context.Context, tx *sql.Tx, kind string, ev outboxEvent, at time.Time) error {
+	payload, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
@@ -281,7 +288,7 @@ func (s *Store) MarkPartiallyApproved(ctx context.Context, id, approverID, appro
 		}
 		return ErrConflict
 	}
-	if err := insertOutbox(ctx, tx, "approval.partial", id, "partially_approved", at); err != nil {
+	if err := insertOutboxEvent(ctx, tx, "approval.partial", outboxEvent{ApprovalID: id, Status: "partially_approved", FirstApproverName: approverName}, at); err != nil {
 		return err
 	}
 	return tx.Commit()
