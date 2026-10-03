@@ -256,11 +256,17 @@ describe('Auth', () => {
         await gate;
         return { body: [] };
       },
+      // The count endpoint is what sets the first badge: held until after
+      // the stream event, then answering an older, smaller count.
+      'GET /api/approvals/count': async () => {
+        await gate;
+        return { body: { count: 1 } };
+      },
     });
     window.location.hash = '#/activity';
     renderWithMotion(<App />);
     await screen.findByText('bob');
-    await waitFor(() => expect(calls.some((c) => c.url.startsWith('/api/approvals'))).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/approvals/count')).toBe(true));
     act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     // The slower fetch answers with an empty list: it must not undo the

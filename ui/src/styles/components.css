@@ -91,6 +91,7 @@
   /* Gives way long before the brand does: "b…" beside a half-shown
      cluster would name neither. */
   flex: 0 100 auto;
+  position: relative;
   min-width: 0;
   max-width: 24ch;
   overflow: hidden;

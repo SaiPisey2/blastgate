@@ -17,8 +17,8 @@ export default function App() {
   // undefined: still asking /api/me; null: signed out.
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [pending, setPending] = useState<number | null>(null);
-  // The cluster when /api/me's answer did not carry it (a sign-in's does
-  // not). Its own state, not merged into me: a new me would restart the
+  // The cluster when the answer that signed us in did not carry it (a
+  // server older than this console). Its own state, not merged into me: a new me would restart the
   // stream and refetch the count.
   const [fetchedCluster, setFetchedCluster] = useState('');
   // Where to go back to after signing in, so a 401 mid-task returns the
@@ -42,7 +42,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!me || me.cluster !== undefined) return;
+    if (!me || typeof me.cluster === 'string') return;
     let live = true;
     clusterOf().then(
       (c) => {
@@ -81,7 +81,8 @@ export default function App() {
 
   if (me === undefined) return <div className="boot" aria-busy="true" />;
   if (me === null) return <SignIn onSignedIn={setMe} />;
-  const cluster = me.cluster ?? fetchedCluster;
+  // Type-checked: a cluster that is not a string is no cluster at all.
+  const cluster = typeof me.cluster === 'string' ? me.cluster : fetchedCluster;
 
   return (
     <Shell route={route} pending={pending} me={{ ...me, cluster }} onSignOut={() => void logout().catch(() => {})}>

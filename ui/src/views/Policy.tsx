@@ -35,14 +35,25 @@ function decisionWord(d: string): string {
 const STAMP_MIN_HELD = 10;
 const STAMP_MIN_RATE = 0.95;
 
+// percent is the rate as the whole percentage the table shows, or null.
+// The flag is decided on this same number, so a row that reads 95% is
+// flagged and one that reads 94% never is, whatever the third decimal.
+function percent(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? Math.round(v * 100) : null;
+}
+
 export function rubberStamped(r: Pick<RuleStat, 'held' | 'approve_rate'>): boolean {
-  return r.held >= STAMP_MIN_HELD && typeof r.approve_rate === 'number' && r.approve_rate >= STAMP_MIN_RATE;
+  const p = percent(r.approve_rate);
+  return typeof r.held === 'number' && Number.isFinite(r.held) && r.held >= STAMP_MIN_HELD && p !== null && p >= STAMP_MIN_RATE * 100;
 }
 
 // rate reads as a whole percentage; no decision is a dash, never 0%.
-function rate(v: number | null): string {
-  return typeof v === 'number' && Number.isFinite(v) ? `${Math.round(v * 100)}%` : '—';
+function rate(v: unknown): string {
+  const p = percent(v);
+  return p === null ? '—' : `${p}%`;
 }
+
+const STAT_COLUMNS = ['Rule', 'Held', 'Approved', 'Denied', 'Expired', 'Rate'];
 
 // count shows a count as text, and anything that is not one as a dash: a
 // value from the server is rendered, never trusted to be renderable.
@@ -107,7 +118,10 @@ export default function Policy() {
       setResult(r);
       // Said once through the shell's one alert region, so a screen reader
       // hears the count when a replay finishes rather than only finding it.
-      if (r && typeof r === 'object') announce(`${r.changed} of ${r.evaluated} decisions would change`);
+      // Only real counts are said: "undefined of NaN" helps nobody.
+      if (r && typeof r === 'object' && Number.isFinite(r.changed) && Number.isFinite(r.evaluated)) {
+        announce(`${r.changed} of ${r.evaluated} decisions would change`);
+      }
     } catch (e) {
       // 400: the candidate did not parse. The parser's own message says
       // exactly where, so it is shown exactly, never paraphrased. 429:
@@ -275,21 +289,23 @@ function Stats() {
           {rules.length === 0 ? (
             <p className="policy-empty">No rule held a request in this time.</p>
           ) : (
-            <table className="policy-stats-table">
-              <thead>
-                <tr>
-                  <th scope="col">Rule</th>
-                  <th scope="col">Held</th>
-                  <th scope="col">Approved</th>
-                  <th scope="col">Denied</th>
-                  <th scope="col">Expired</th>
-                  <th scope="col">Rate</th>
+            // The roles are spelled out: the stacked phone layout sets
+            // display: block on these elements, and some browsers then drop
+            // the table semantics a screen reader navigates by.
+            <table className="policy-stats-table" role="table" aria-labelledby={titleId}>
+              <thead role="rowgroup">
+                <tr role="row">
+                  {STAT_COLUMNS.map((c) => (
+                    <th key={c} scope="col" role="columnheader">
+                      {c}
+                    </th>
+                  ))}
                 </tr>
               </thead>
-              <tbody>
+              <tbody role="rowgroup">
                 {rules.map((r, i) => (
-                  <tr key={`${r.rule}-${i}`}>
-                    <td data-label="Rule">
+                  <tr key={`${r.rule}-${i}`} role="row">
+                    <td role="cell" data-label="Rule">
                       <span className="mono policy-stats-rule">{typeof r.rule === 'string' ? r.rule : ''}</span>
                       {rubberStamped(r) && (
                         <span className="policy-stats-flag">
@@ -297,11 +313,11 @@ function Stats() {
                         </span>
                       )}
                     </td>
-                    <td data-label="Held">{count(r.held)}</td>
-                    <td data-label="Approved">{count(r.approved)}</td>
-                    <td data-label="Denied">{count(r.denied)}</td>
-                    <td data-label="Expired">{count(r.expired)}</td>
-                    <td data-label="Rate">{rate(r.approve_rate)}</td>
+                    <td role="cell" data-label="Held">{count(r.held)}</td>
+                    <td role="cell" data-label="Approved">{count(r.approved)}</td>
+                    <td role="cell" data-label="Denied">{count(r.denied)}</td>
+                    <td role="cell" data-label="Expired">{count(r.expired)}</td>
+                    <td role="cell" data-label="Rate">{rate(r.approve_rate)}</td>
                   </tr>
                 ))}
               </tbody>

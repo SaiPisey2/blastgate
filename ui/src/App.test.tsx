@@ -43,10 +43,16 @@ describe('App', () => {
         await gate;
         return { body: [] };
       },
+      // The count endpoint is what sets the first badge: held until after
+      // the stream event, then answering an older, smaller count.
+      'GET /api/approvals/count': async () => {
+        await gate;
+        return { body: { count: 1 } };
+      },
     });
     render(<App />);
     await screen.findByText('bob');
-    await waitFor(() => expect(calls.some((c) => c.url.startsWith('/api/approvals'))).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.url === '/api/approvals/count')).toBe(true));
     act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     await act(async () => release());
@@ -135,23 +141,31 @@ describe('App server rules', () => {
     return componentsCSS.slice(at, componentsCSS.indexOf('}', at));
   };
   const CLUSTER = 'kind-blastgate-fixture-with-a-rather-long-name';
+  const EVIL = '<img src=x onerror=alert(1)>';
   const plain = summary({ class: 'REVERSIBLE', data_destroyed: 0, verb: 'patch', resource: 'deployments', name: 'web', summary: 'REVERSIBLE, 1 object' });
   const plainImpact = impact({ class: 'REVERSIBLE', dataDestroyed: 0, undo: 'objects', effects: [{ kind: 'changed', object: 'apps/Deployment/demo/web' }] });
 
   it('cluster shows in the header and under the question', async () => {
-    for (const hash of ['#/waiting', `#/approvals/${ID1}`]) {
+    for (const [hash, cluster] of [
+      ['#/waiting', CLUSTER],
+      [`#/approvals/${ID1}`, CLUSTER],
+      ['#/waiting', EVIL],
+      [`#/approvals/${ID1}`, EVIL],
+    ]) {
       window.location.hash = hash;
       mockFetch({
-        'GET /api/me': { body: { name: 'bob', csrf: 'c', cluster: CLUSTER } },
+        'GET /api/me': { body: { name: 'bob', csrf: 'c', cluster } },
         'GET /api/approvals/count': { body: { count: 1 } },
         'GET /api/approvals?status=pending': { body: [plain] },
         [`GET /api/approvals/${ID1}`]: { body: detail(plain, plainImpact) },
       });
-      const { unmount } = renderWithMotion(<App />);
+      const { unmount, container } = renderWithMotion(<App />);
       const header = await screen.findByRole('banner');
       const name = header.querySelector('.shell-cluster')!;
-      expect(name.textContent).toBe(CLUSTER);
-      expect(name.getAttribute('title')).toBe(CLUSTER);
+      // A screen reader hears what the name is; the eye sees the name.
+      expect(name.textContent).toBe(`Cluster ${cluster}`);
+      expect(name.querySelector('.visually-hidden')!.textContent).toBe('Cluster ');
+      expect(name.getAttribute('title')).toBe(cluster);
       expect(name.classList.contains('mono')).toBe(true);
       // Right after the brand.
       expect(header.querySelector('.shell-brand')!.nextElementSibling).toBe(name);
@@ -159,8 +173,10 @@ describe('App server rules', () => {
       const card = await screen.findByRole('article');
       const q = within(card).getByRole('heading', { level: 2 });
       const line = q.nextElementSibling!;
-      expect(line.textContent).toBe(`On cluster ${CLUSTER}`);
-      expect(line.querySelector('.mono')!.textContent).toBe(CLUSTER);
+      expect(line.textContent).toBe(`On cluster ${cluster}`);
+      expect(line.querySelector('.mono')!.textContent).toBe(cluster);
+      // Text, never markup.
+      expect(container.querySelector('img')).toBeNull();
       unmount();
     }
     // Cut short at 24ch with an ellipsis; the full name is in its title.
@@ -205,8 +221,8 @@ describe('App server rules', () => {
       },
       'POST /api/login': () => {
         signedIn = true;
-        // As the server answers a sign-in: no cluster in it.
-        return { body: { name: 'bob', csrf: 'c2' } };
+        // As the server answers a sign-in: the cluster is in it.
+        return { body: { name: 'bob', csrf: 'c2', cluster: 'c1' } };
       },
     });
     renderWithMotion(<App />);
@@ -224,8 +240,35 @@ describe('App server rules', () => {
     await userEvent.type(field, 'bga_again{Enter}');
     await waitFor(() => expect(window.location.hash).toBe(hash));
     expect(await screen.findByRole('article')).toBeTruthy();
-    // The cluster is read again after the sign-in.
-    await waitFor(() => expect(screen.getByRole('banner').querySelector('.shell-cluster')?.textContent).toBe('c1'));
+    // The cluster comes back with the sign-in itself.
+    await waitFor(() => expect(screen.getByRole('banner').querySelector('.shell-cluster')?.getAttribute('title')).toBe('c1'));
+  });
+
+  it('a sign-in answer without a cluster falls back to /api/me, and a non-string cluster is none', async () => {
+    window.location.hash = '#/activity';
+    let me: unknown = { name: 'bob', csrf: 'c', cluster: { evil: true } };
+    mockFetch({
+      'GET /api/me': () => ({ body: me }),
+      'GET /api/feed': { body: [] },
+      'GET /api/approvals/count': { body: { count: 0 } },
+    });
+    const { unmount } = renderWithMotion(<App />);
+    await screen.findByRole('heading', { level: 1, name: 'Activity' });
+    // An object where a name should be is not rendered (and does not crash).
+    expect(screen.getByRole('banner').querySelector('.shell-cluster')).toBeNull();
+    unmount();
+
+    // An older server: a /api/me without a cluster at first load, then the
+    // fallback read finds it.
+    let reads = 0;
+    me = undefined;
+    mockFetch({
+      'GET /api/me': () => (reads++ === 0 ? { body: { name: 'bob', csrf: 'c' } } : { body: { name: 'bob', csrf: 'c', cluster: 'c9' } }),
+      'GET /api/feed': { body: [] },
+      'GET /api/approvals/count': { body: { count: 0 } },
+    });
+    renderWithMotion(<App />);
+    await waitFor(() => expect(screen.getByRole('banner').querySelector('.shell-cluster')?.getAttribute('title')).toBe('c9'));
   });
 
   it('esc from details returns to activity when that is where you came from', async () => {

@@ -243,9 +243,8 @@ export async function whoami(): Promise<Me> {
   return me;
 }
 
-// clusterOf reads the cluster name alone. Sign-in answers with the name
-// and the CSRF value but not the cluster, so after a sign-in the console
-// asks /api/me for it. Best effort: without it the header and the panel
+// clusterOf reads the cluster name alone, for when the sign-in answer did
+// not carry it (a server older than this console). Best effort: without it the header and the panel
 // leave the line out, which is no reason to sign anyone out.
 export async function clusterOf(): Promise<string> {
   const me = await request<Partial<Me> | undefined>('GET', '/api/me', undefined, { quiet401: true });

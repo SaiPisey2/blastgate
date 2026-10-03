@@ -92,8 +92,12 @@ export default function Shell({ route, pending, me, onSignOut, children }: Props
             <a className="shell-brand" href="#/waiting">
               blastgate
             </a>
-            {me.cluster && (
+            {typeof me.cluster === 'string' && me.cluster !== '' && (
               <span className="shell-cluster mono" title={me.cluster}>
+                {/* Heard, not seen: a screen reader otherwise reads a bare
+                    name after the brand, and at phone width the name is
+                    for screen readers alone. */}
+                <span className="visually-hidden">Cluster </span>
                 {me.cluster}
               </span>
             )}

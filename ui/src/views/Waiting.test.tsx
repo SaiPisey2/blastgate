@@ -673,3 +673,39 @@ describe('Waiting, v0.4.0', () => {
     expect(await screen.findByText(/^Approved by alice at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
   });
 });
+
+describe('Waiting, v0.4.0 fix round 1', () => {
+  // Ruling E-R12: a first approval of two keeps the request in this
+  // approver's list, re-read, in its partial state, Approve shut for them.
+  for (const wide of [true, false]) {
+    it(`a first approval keeps the request in the list, re-read as partial (${wide ? 'wide' : 'narrow'})`, async () => {
+      setMedia(WIDE, wide);
+      const grant = summary({ verb: 'create', resource: 'rolebindings', name: 'admin-binding', class: 'AUTHORITY', data_destroyed: 0, summary: 'AUTHORITY, 1 object', needs_approvers: 2 });
+      const grantImpact = impact({ class: 'AUTHORITY', dataDestroyed: 0, undo: 'objects', effects: [] });
+      let list: ApprovalSummary[] = [grant];
+      const calls = mockFetch({
+        'GET /api/approvals?status=pending': () => ({ body: list }),
+        [`GET /api/approvals/${ID1}`]: () => ({ body: detail(list[0], grantImpact) }),
+        [`POST /api/approvals/${ID1}/approve`]: () => {
+          list = [{ ...grant, status: 'partially_approved', first_approver: 'bob', first_approved: new Date().toISOString() }];
+          return { body: detail(list[0], grantImpact) };
+        },
+      });
+      renderWithMotion(<Waiting me="bob" />);
+      const field = (await screen.findByLabelText(/to approve, type/i)) as HTMLInputElement;
+      await userEvent.type(field, 'demo/admin-binding');
+      await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+      // Re-read: the list is fetched again, and the row is still there.
+      await waitFor(() => expect(calls.filter((c) => c.url === '/api/approvals?status=pending').length).toBeGreaterThanOrEqual(2));
+      if (wide) expect(options()).toHaveLength(1);
+      const card = screen.getByRole('article');
+      expect(within(card).getByText(/^Approved by you at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
+      expect((within(card).getByRole('button', { name: /^approve$/i }) as HTMLButtonElement).disabled).toBe(true);
+      expect(within(card).getByText('You already approved this; it needs a second person')).toBeTruthy();
+      expect(within(card).getByRole('button', { name: /^deny$/i })).toBeTruthy();
+      expect(screen.queryByText('Nothing is waiting for you.')).toBeNull();
+      expect(screen.queryByText(/the agent can go ahead/)).toBeNull();
+      expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    });
+  }
+});

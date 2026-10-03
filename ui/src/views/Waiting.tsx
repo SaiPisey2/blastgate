@@ -18,7 +18,8 @@ export const WIDE = '(min-width: 900px)';
 
 const NOTES: Record<Outcome, string> = {
   approved: 'Approved. The agent can go ahead.',
-  partial: 'Approved. It needs one more approver before the agent can go ahead.',
+  // Not shown: a partial approval stays on screen, and its panel says it.
+  partial: '',
   denied: 'Denied. The agent was refused.',
   gone: 'That request was already decided or has expired.',
 };
@@ -225,6 +226,17 @@ export default function Waiting({ me = '', cluster = '' }: { me?: string; cluste
   });
 
   function onDecided(id: string, outcome: Outcome) {
+    // A first approval of two (ruling E-R12): the request is still waiting,
+    // for someone else, so it stays in the list and on screen. Re-read the
+    // list and its detail, so the row shows who approved it; the panel
+    // has already shut Approve for this approver and said so itself.
+    if (outcome === 'partial') {
+      lastDecision = new Date();
+      setNote('');
+      void load();
+      fetchDetail(id);
+      return;
+    }
     decided.current.add(id);
     const list = live.current;
     const i = list.findIndex((r) => r.id === id);

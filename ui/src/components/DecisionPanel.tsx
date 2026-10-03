@@ -10,7 +10,9 @@ import Tag from './Tag';
 import TypedConfirm from './TypedConfirm';
 
 // partial: this approver gave the first of the two approvals an access
-// grant needs. The request still waits, for someone else.
+// grant needs. The request still waits, for someone else, and stays on
+// screen (ruling E-R12): the panel shows the partial state with Approve
+// shut for this approver, and Deny still there.
 export type Outcome = 'approved' | 'partial' | 'denied' | 'gone';
 
 export type DecisionPanelProps = {
@@ -47,11 +49,8 @@ export const FIRST_APPROVER_REASON = 'You already approved this; it needs a seco
 export const REAUTH_TEXT = 'Sign in again to approve access grants';
 export const GONE_TEXT = 'This request is no longer waiting.';
 
-const DONE_TEXT: Record<Exclude<Outcome, 'gone'>, string> = {
+const DONE_TEXT: Record<Exclude<Outcome, 'gone' | 'partial'>, string> = {
   approved: 'Approved. The agent can go ahead.',
-  // Never "the agent can go ahead": it cannot, until a second person
-  // approves too.
-  partial: 'Approved. It needs one more approver before the agent can go ahead.',
   denied: 'Denied. The agent was refused.',
 };
 
@@ -77,10 +76,11 @@ function refusalOf(e: unknown): Refusal | null {
   return r.status === e.status ? r.refusal : null;
 }
 
-// partialText is "Approved by alice at 14:02 · needs one more approver".
-// A name or a time that is missing is left out, never made up.
-function partialText(by: string | undefined, at: string | undefined): string {
-  const name = typeof by === 'string' && by !== '' ? ` by ${by}` : '';
+// partialText is "Approved by alice at 14:02 · needs one more approver",
+// or "Approved by you ..." for the signed-in approver's own first
+// approval. A name or a time that is missing is left out, never made up.
+function partialText(by: string | undefined, at: string | undefined, me: string): string {
+  const name = typeof by === 'string' && by !== '' ? (by === me ? ' by you' : ` by ${by}`) : '';
   const t = typeof at === 'string' && at !== '' ? Date.parse(at) : NaN;
   const when = Number.isNaN(t) ? '' : ` at ${hhmm(new Date(t))}`;
   return `Approved${name}${when} · needs one more approver`;
@@ -229,6 +229,10 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
   // rules. Approve stays shut after it: pressing again would only be
   // refused again. Deny is never affected.
   const [refusal, setRefusal] = useState<Refusal | null>(null);
+  // approvedAt: when this approver gave the first of two approvals, from
+  // this panel. It shuts Approve at once, before the list or the detail
+  // is re-read and says the same thing from the server.
+  const [approvedAt, setApprovedAt] = useState('');
 
   // A detail for some other request (a late answer after the selection
   // moved) is no detail at all: it must never enable Approve here.
@@ -257,7 +261,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
   // firstBlocked: this approver gave the first approval and cannot give
   // the second. Exact match, as the server compares names; the server
   // also refuses by account, so this only says early what it would say.
-  const firstBlocked = partial && me !== '' && me === s.first_approver;
+  const firstBlocked = (partial && me !== '' && me === s.first_approver) || approvedAt !== '';
 
   // open: Approve can be pressed at all. ready: this press may send.
   // Both are computed here and checked again inside decide(), so no path
@@ -387,8 +391,16 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
       // of two: saying "the agent can go ahead" would be false.
       const outcome: Outcome =
         action === 'deny' ? 'denied' : got && typeof got === 'object' && got.status === 'partially_approved' ? 'partial' : 'approved';
-      live.current.result = outcome;
-      setResult(outcome);
+      if (outcome === 'partial') {
+        // Still waiting, so result stays null: Deny is still on offer.
+        // Approve is shut by approvedAt; ready is cleared here too, so
+        // nothing read before the next render can approve again.
+        live.current.ready = false;
+        setApprovedAt(new Date().toISOString());
+      } else {
+        live.current.result = outcome;
+        setResult(outcome);
+      }
       onDecided(s.id, outcome);
     } catch (e) {
       // One of the server's approval rules said no: not yours to approve,
@@ -482,7 +494,19 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
           On cluster <span className="mono">{cluster}</span>
         </p>
       )}
-      {partial && <p className="decision-partial">{partialText(s.first_approver, s.first_approved)}</p>}
+      {partial ? (
+        <p className="decision-partial" role={approvedAt ? 'status' : undefined}>
+          {partialText(s.first_approver, s.first_approved, me)}
+        </p>
+      ) : (
+        approvedAt && (
+          // Just approved here, before the re-read lands: a status, so
+          // the approver hears that it still needs someone else.
+          <p className="decision-partial" role="status">
+            {partialText(me, approvedAt, me)}
+          </p>
+        )
+      )}
       <p className="decision-why">{friction.why}</p>
       {hasBody ? body : <Facts items={facts} />}
       {detail && !hasBody && commandShown && (
@@ -528,7 +552,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
         </p>
       ) : result !== null ? (
         <p className="decision-done" role="status">
-          {result === 'gone' ? GONE_TEXT : DONE_TEXT[result]}
+          {result === 'gone' || result === 'partial' ? GONE_TEXT : DONE_TEXT[result]}
         </p>
       ) : (
         <div className={needsTyping ? 'decision-controls has-typed' : 'decision-controls'}>

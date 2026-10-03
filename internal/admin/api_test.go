@@ -1499,6 +1499,31 @@ func TestNewEndpoints(t *testing.T) {
 		}
 	})
 
+	// A console that has just signed in names its cluster from the login
+	// answer alone, without a second request.
+	t.Run("login carries the cluster name", func(t *testing.T) {
+		f := newAPIFixture(t)
+		tok, h := NewLoginToken()
+		if err := f.st.CreateApprover(context.Background(), store.Approver{ID: "ap-dana", Name: "dana", Created: f.clock.Now()}, h); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]string{"token": tok})
+		req, _ := http.NewRequest("POST", f.srv.URL+"/api/login", strings.NewReader(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := f.httpClient().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var m map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 || m["name"] != "dana" || m["csrf"] == "" || m["cluster"] != "kind-blastgate-fixture" || len(m) != 3 {
+			t.Errorf("login: %d %v", resp.StatusCode, m)
+		}
+	})
+
 	t.Run("count is the true pending count past 500", func(t *testing.T) {
 		fastStream(t, 10*time.Millisecond, time.Minute)
 		f := newAPIFixture(t)

@@ -132,7 +132,7 @@ func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) *api {
 		log = slog.New(slog.DiscardHandler)
 	}
 	h := &api{auth: a, d: d, st: st, log: log, replaySlot: make(chan struct{}, 1), slots: &streamSlots{per: map[string]int{}}}
-	mux.HandleFunc("POST /api/login", a.Login)
+	mux.HandleFunc("POST /api/login", a.loginFor(d.Cluster))
 	// Logout sits behind Require (the UI sends the CSRF header on it) so
 	// that every /api route but login answers 401 without a live session;
 	// a stale cookie is still cleared, by Require itself.

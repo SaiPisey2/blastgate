@@ -360,6 +360,12 @@ describe('Policy rule stats and announcements', () => {
             { rule: 'hold-deletes', held: 9, approved: 9, denied: 0, expired: 0, approve_rate: 1 },
             { rule: 'hold-exec', held: 12, approved: 6, denied: 6, expired: 0, approve_rate: 0.5 },
             { rule: EVIL, held: 3, approved: 0, denied: 0, expired: 3, approve_rate: null },
+            // Shown as 95%, so flagged: the flag reads the number shown.
+            { rule: 'hold-scale', held: 12, approved: 11, denied: 1, expired: 0, approve_rate: 0.949 },
+            // Shown as 94%: not flagged.
+            { rule: 'hold-patch', held: 12, approved: 11, denied: 1, expired: 0, approve_rate: 0.944 },
+            // A held count that is not a number is never enough.
+            { rule: 'hold-odd', held: '50', approved: 50, denied: 0, expired: 0, approve_rate: 1 },
           ],
         },
       },
@@ -367,14 +373,22 @@ describe('Policy rule stats and announcements', () => {
     const { container } = render(<Policy />);
     const section = await screen.findByRole('region', { name: 'How each rule is used' });
     expect(calls.some((c) => c.url.startsWith('/api/policy/stats'))).toBe(true);
-    const table = within(section).getByRole('table');
+    // Named by the section title, and a table to assistive tech even when
+    // the phone layout stacks it.
+    const table = within(section).getByRole('table', { name: 'How each rule is used' });
+    expect(table.getAttribute('role')).toBe('table');
+    expect(table.querySelectorAll('[role="columnheader"]')).toHaveLength(6);
     const heads = within(table)
       .getAllByRole('columnheader')
       .map((th) => th.textContent);
     expect(heads).toEqual(['Rule', 'Held', 'Approved', 'Denied', 'Expired', 'Rate']);
     const rows = await within(table).findAllByRole('row');
     const body = rows.slice(1);
-    expect(body).toHaveLength(4);
+    expect(body).toHaveLength(7);
+    for (const r of body) {
+      expect(r.getAttribute('role')).toBe('row');
+      expect(Array.from(r.querySelectorAll('td')).every((td) => td.getAttribute('role') === 'cell')).toBe(true);
+    }
     const rowOf = (name: string) => body.find((r) => r.querySelector('.policy-stats-rule')?.textContent === name)!;
     const FLAG = 'Almost always approved — consider allowing it';
 
@@ -395,6 +409,12 @@ describe('Policy rule stats and announcements', () => {
     expect(within(none).getByText('—')).toBeTruthy();
     expect(within(none).queryByText(FLAG)).toBeNull();
     expect(container.querySelector('img')).toBeNull();
+    expect(within(rowOf('hold-scale')).getByText('95%')).toBeTruthy();
+    expect(within(rowOf('hold-scale')).getByText(FLAG)).toBeTruthy();
+    expect(within(rowOf('hold-patch')).getByText('94%')).toBeTruthy();
+    expect(within(rowOf('hold-patch')).queryByText(FLAG)).toBeNull();
+    expect(within(rowOf('hold-odd')).queryByText(FLAG)).toBeNull();
+    expect(within(rowOf('hold-odd')).getByText('—')).toBeTruthy();
     // Each cell carries its column name for the stacked phone layout.
     expect(Array.from(flagged.querySelectorAll('td')).map((td) => td.getAttribute('data-label'))).toEqual(heads);
   });
@@ -415,5 +435,23 @@ describe('Policy rule stats and announcements', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Replay over/ }));
     await screen.findByRole('region', { name: 'Replay result' });
     await waitFor(() => expect(document.getElementById('announcer')!.textContent).toBe('2 of 412 decisions would change'));
+  });
+
+  it('a replay result without real counts is not announced', async () => {
+    mockFetch({
+      'GET /api/policy': { body: { source: 'built-in', text: LOADED } },
+      'POST /api/policy/replay': { body: { ...RESULT, changed: 'lots', evaluated: null } },
+    });
+    renderWithMotion(
+      <Shell route={{ name: 'policy' }} pending={null} me={{ name: 'bob', csrf: 'c', cluster: 'c1' }} onSignOut={() => {}}>
+        <Policy />
+      </Shell>,
+    );
+    const candidate = screen.getByLabelText(/candidate policy/i) as HTMLTextAreaElement;
+    await waitFor(() => expect(candidate.value).toBe(LOADED));
+    await userEvent.click(screen.getByRole('button', { name: /^Replay over/ }));
+    await screen.findByRole('region', { name: 'Replay result' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(document.getElementById('announcer')!.textContent).toBe('');
   });
 });

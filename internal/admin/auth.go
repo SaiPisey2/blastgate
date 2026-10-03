@@ -112,7 +112,16 @@ func remoteHost(r *http.Request) string {
 // Login is POST /api/login {"token": "bga_..."}. Success sets the session
 // cookie and returns {"name","csrf"}; the browser keeps the CSRF value in
 // memory and echoes it on every state-changing call.
-func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
+func (a *Auth) Login(w http.ResponseWriter, r *http.Request) { a.login(w, r, "") }
+
+// loginFor is Login answering with the cluster name too, as /api/me does,
+// so a console that has just signed in can say which cluster it decides
+// for without asking again. routes mounts this one.
+func (a *Auth) loginFor(cluster string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { a.login(w, r, cluster) }
+}
+
+func (a *Auth) login(w http.ResponseWriter, r *http.Request, cluster string) {
 	host := remoteHost(r)
 	// Before reading the body, let alone a lookup: a limited address costs
 	// nothing and learns nothing, even when it finally sends a good token.
@@ -172,7 +181,11 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, sessionCookie(id, int(SessionTTL/time.Second)))
-	out, _ := json.Marshal(map[string]string{"name": ap.Name, "csrf": csrf})
+	body := map[string]string{"name": ap.Name, "csrf": csrf}
+	if cluster != "" {
+		body["cluster"] = cluster
+	}
+	out, _ := json.Marshal(body)
 	a.Log.Info("login", "remote", host, "approver", ap.Name)
 	writeJSON(w, http.StatusOK, string(out))
 }

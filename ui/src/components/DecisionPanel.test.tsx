@@ -992,14 +992,30 @@ describe('DecisionPanel two-person approvals', () => {
     expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
   });
 
-  it('a first approval says it needs one more person, never that the agent can go ahead', async () => {
-    routes({ body: detail({ ...grant, status: 'partially_approved', first_approver: 'bob' }, grantImpact) });
+  it('a first approval stays on screen as partial, Approve shut for this approver, never "the agent can go ahead"', async () => {
+    const calls = routes({ body: detail({ ...grant, status: 'partially_approved', first_approver: 'bob' }, grantImpact) });
     const pendingGrant = { ...grant, status: 'pending', first_approver: '', first_approved: '' };
     const { onDecided } = renderPanel({ ...withDetail(pendingGrant, grantImpact), me: 'bob' });
     await userEvent.type(typedField(), 'demo/admin-binding');
     await userEvent.click(approveButton());
     await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'partial'));
-    expect(screen.getByRole('status').textContent).toBe('Approved. It needs one more approver before the agent can go ahead.');
+    const status = screen.getByRole('status');
+    expect(status.textContent).toMatch(/^Approved by you at \d\d:\d\d · needs one more approver$/);
+    expect(screen.queryByText(/the agent can go ahead/)).toBeNull();
+    // Still waiting: the buttons stay, Approve shut with its reason, Deny open.
+    expect(approveButton().disabled).toBe(true);
+    expect(screen.getByText(FIRST_REASON)).toBeTruthy();
+    expect(denyButton().disabled).toBe(false);
+    // A second chord or Enter cannot approve again.
+    typedField().focus();
+    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+  });
+
+  it('the re-read summary says who approved, "you" for the signed-in approver', () => {
+    renderPanel({ ...withDetail(grant, grantImpact), me: 'alice' });
+    expect(screen.getByText(/^Approved by you at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
   });
 
   it('the first approver cannot approve again', async () => {
@@ -1028,7 +1044,7 @@ describe('DecisionPanel two-person approvals', () => {
       [409, 'you already approved this; it needs a second person', FIRST_REASON],
       [403, "you can't approve a request made on your behalf", SELF_REASON],
     ] as const) {
-      routes({ status, body: { error } });
+      const calls = routes({ status, body: { error } });
       const { onDecided, unmount } = renderPanel(withDetail(reversible, reversibleImpact));
       await userEvent.click(approveButton());
       const confirm = screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement;
@@ -1044,7 +1060,59 @@ describe('DecisionPanel two-person approvals', () => {
       const described = approveButton().getAttribute('aria-describedby') ?? '';
       expect(described.split(' ').map((id) => document.getElementById(id)?.textContent).join(' ')).toContain(shown);
       expect(denyButton().disabled).toBe(false);
+      // The refusal is part of the live gate: the step closes, and a
+      // Confirm still on screen (its exit) cannot send a second POST,
+      // even after it would have armed.
+      await waitFor(() => expect(screen.queryByRole('button', { name: /confirm approval/i })).toBeNull());
+      await new Promise((r) => setTimeout(r, ARM_MS + 50));
+      const late = screen.queryByRole('button', { name: /confirm approval/i });
+      if (late) fireEvent.click(late);
+      await userEvent.click(approveButton());
+      expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
       unmount();
     }
+  });
+
+  it('after a refusal the confirm step cannot approve, even clicked in its exit window', async () => {
+    const calls = routes({ status: 409, body: { error: 'you already approved this; it needs a second person' } });
+    renderPanel(withDetail(reversible, reversibleImpact));
+    await userEvent.click(approveButton());
+    const confirm = screen.getByRole('button', { name: /confirm approval/i }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await userEvent.click(confirm);
+    await screen.findByText(FIRST_REASON);
+    // Whatever is left of the step, it is inert or disabled.
+    fireEvent.click(confirm);
+    await new Promise((r) => setTimeout(r, ARM_MS + 50));
+    fireEvent.click(confirm);
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+  });
+
+  for (const [status, error] of [
+    [409, 'you already approved this; it needs a second person'],
+    [403, "you can't approve a request made on your behalf"],
+    [403, 'sign in again to approve access grants'],
+  ] as const) {
+    it(`after a ${status} refusal at the typed level the chord cannot approve again (${error})`, async () => {
+      const calls = routes({ status, body: { error } });
+      renderPanel(withDetail(summary()));
+      await userEvent.type(typedField(), 'demo/data');
+      await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+      await waitFor(() => expect(posts(calls)).toHaveLength(1));
+      await waitFor(() => expect(approveButton().disabled).toBe(true));
+      typedField().focus();
+      await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+      await userEvent.keyboard('{Control>}{Enter}{/Control}');
+      await userEvent.keyboard('{Enter}');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    });
+  }
+
+  it('the summary alone words a database command, before any detail', () => {
+    const s = summary({ verb: 'create', resource: 'pods/exec', name: 'db-0', class: 'TERMINAL', measured: false, data_destroyed: 0, summary: 'not measured', sql_detected: true });
+    renderPanel({ summary: s });
+    const q = screen.getByRole('heading', { level: 2 });
+    expect(q.textContent).toBe('coding-agent wants to run a database command in demo/db-0');
   });
 });
