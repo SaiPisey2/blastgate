@@ -148,7 +148,7 @@ func (s *Store) LatestApproval(ctx context.Context, session, requestDigest strin
 
 // ListApprovals returns approvals newest first; status == "" returns
 // every status, for the operator-facing "what's pending / what happened"
-// views.
+// views. "pending" includes partially_approved: both are still waiting.
 func (s *Store) ListApprovals(ctx context.Context, status string) ([]Approval, error) {
 	return s.listApprovals(ctx, status, 0)
 }
@@ -193,7 +193,14 @@ func (s *Store) CountPendingApprovals(ctx context.Context, now time.Time) (int, 
 func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]Approval, error) {
 	q := `SELECT ` + approvalCols + ` FROM approvals`
 	var args []any
-	if status != "" {
+	switch status {
+	case "":
+	case "pending":
+		// A partially approved row is still waiting (on its second
+		// person); a "pending" list without it would hide exactly the
+		// access grants half-way through being approved (ruling E-R2).
+		q += ` WHERE status IN ('pending', 'partially_approved')`
+	default:
 		q += ` WHERE status = ?`
 		args = append(args, status)
 	}

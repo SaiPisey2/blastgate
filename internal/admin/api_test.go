@@ -90,6 +90,18 @@ func (c *countingStore) ListPendingApprovals(ctx context.Context, now time.Time,
 	c.lastLimit.Store(int64(limit))
 	return c.Store.ListPendingApprovals(ctx, now, limit)
 }
+func (c *countingStore) CountPendingApprovals(ctx context.Context, now time.Time) (int, error) {
+	c.n.Add(1)
+	return c.Store.CountPendingApprovals(ctx, now)
+}
+func (c *countingStore) PolicyStats(ctx context.Context, since time.Time) ([]store.RuleStats, error) {
+	c.n.Add(1)
+	return c.Store.PolicyStats(ctx, since)
+}
+func (c *countingStore) ApproverHumans(ctx context.Context, approverID string) ([]string, error) {
+	c.n.Add(1)
+	return c.Store.ApproverHumans(ctx, approverID)
+}
 func (c *countingStore) ApprovalByID(ctx context.Context, id string) (store.Approval, error) {
 	c.n.Add(1)
 	return c.Store.ApprovalByID(ctx, id)
@@ -179,7 +191,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		TokenTTL: 10 * time.Minute, PendingTTL: time.Hour, Now: f.clock.Now}
 	mux := http.NewServeMux()
 	f.api = routes(mux, f.auth, Deps{Store: st, Approvals: f.svc, PolicySource: "/etc/blastgate/policy.yaml",
-		PolicyText: []byte(testPolicyText), Log: log}, f.cs)
+		PolicyText: []byte(testPolicyText), Cluster: "kind-blastgate-fixture", Log: log}, f.cs)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -418,7 +430,8 @@ func TestApprovalDetailHasImpactButNoSecrets(t *testing.T) {
 	}
 	d := decode[map[string]any](t, body)
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
-		"class", "data_destroyed", "measured", "age_seconds", "created", "expires", "action", "impact", "decided_by", "decided")
+		"class", "data_destroyed", "measured", "age_seconds", "created", "expires", "action", "impact", "decided_by", "decided",
+		"needs_approvers", "first_approver", "first_approved", "sql_detected")
 	if got := keysOf(d); !slices.Equal(got, wantKeys) {
 		t.Errorf("detail keys %v\nwant %v", got, wantKeys)
 	}
@@ -457,7 +470,8 @@ func TestApprovalListShapeAndStatusFilter(t *testing.T) {
 		t.Fatalf("pending list: %s", body)
 	}
 	wantKeys := sorted("id", "status", "rule", "human", "agent", "verb", "resource", "namespace", "name", "summary",
-		"class", "data_destroyed", "measured", "age_seconds", "created", "expires")
+		"class", "data_destroyed", "measured", "age_seconds", "created", "expires",
+		"needs_approvers", "first_approver", "first_approved", "sql_detected")
 	if got := keysOf(l[0]); !slices.Equal(got, wantKeys) {
 		t.Errorf("summary keys %v\nwant %v", got, wantKeys)
 	}
@@ -765,7 +779,7 @@ func TestPolicyAndMe(t *testing.T) {
 		t.Errorf("policy: %s", body)
 	}
 	_, body = c.get(t, "/api/me")
-	if m := decode[map[string]string](t, body); m["name"] != "carol" || m["csrf"] != c.csrf || len(m) != 2 {
+	if m := decode[map[string]string](t, body); m["name"] != "carol" || m["csrf"] != c.csrf || m["cluster"] != "kind-blastgate-fixture" || len(m) != 3 {
 		t.Errorf("me: %s", body)
 	}
 }
@@ -866,17 +880,31 @@ func TestEveryAPIRouteNeedsASession(t *testing.T) {
 		{"GET", "/api/feed"},
 		{"GET", "/api/approvals"},
 		{"GET", "/api/approvals/" + approvalID},
+		{"GET", "/api/approvals/count"},
 		{"POST", "/api/approvals/" + approvalID + "/approve"},
 		{"POST", "/api/approvals/" + approvalID + "/deny"},
 		{"GET", "/api/sessions"},
 		{"POST", "/api/sessions/0123456789abcdef/revoke"},
 		{"GET", "/api/policy"},
 		{"POST", "/api/policy/replay"},
+		{"GET", "/api/policy/stats"},
+		{"GET", "/api/policy/stats?since_hours=1"},
 		{"GET", "/api/bypass"},
 		{"GET", "/api/stream"},
 		{"GET", "/api/no-such-route"},
 	}
 	stale := &client{f: f, cookie: "not-a-session", csrf: "x"}
+	// The v0.4.0 routes are in the table above; named here as well so a
+	// route added without Require fails a test that says which one.
+	t.Run("every new route needs a session", func(t *testing.T) {
+		for _, p := range []string{"/api/approvals/count", "/api/policy/stats", "/api/policy/stats?since_hours=1"} {
+			for name, c := range map[string]*client{"no cookie": nil, "unknown cookie": stale} {
+				if code, body := c.call(t, "GET", p, "", false, f); code != 401 || body != `{"error":"unauthenticated"}` {
+					t.Errorf("GET %s (%s): %d %s", p, name, code, body)
+				}
+			}
+		}
+	})
 	for _, rt := range routes {
 		for name, c := range map[string]*client{"no cookie": nil, "unknown cookie": stale} {
 			code, body := c.call(t, rt.method, rt.path, `{"policy":"default: allow\n","since_hours":1}`, false, f)
@@ -1188,9 +1216,8 @@ func TestSessionsListIsBounded(t *testing.T) {
 // An access grant approved through real browser sessions: the API, not a
 // test double, supplies who approved, when they signed in and from which
 // channel. A stale sign-in is refused, one account cannot be both people,
-// and two fresh accounts release it with one token. Until the API maps the
-// rule refusals to 403/409 they answer as errors; what matters here is
-// that none of them approves or stores a token.
+// and two fresh accounts release it with one token. Each refusal answers
+// with its own status and fixed text, and none approves or stores a token.
 func TestAccessGrantNeedsTwoFreshBrowserSessions(t *testing.T) {
 	f := newAPIFixture(t)
 	if err := f.st.CreateApproval(context.Background(), approvalWithImpact(approvalID, f.clock.Now(),
@@ -1209,8 +1236,8 @@ func TestAccessGrantNeedsTwoFreshBrowserSessions(t *testing.T) {
 	// bob signed in longer ago than the reauth window (15m by default).
 	bob := f.signIn(t, "bob")
 	f.clock.Add(15*time.Minute + time.Second)
-	if code, body := bob.post(t, path, ""); code == 200 {
-		t.Fatalf("a stale session approved an access grant: %s", body)
+	if code, body := bob.post(t, path, ""); code != 403 || body != `{"error":"sign in again to approve access grants"}` {
+		t.Fatalf("a stale session approving an access grant: %d %s", code, body)
 	}
 	if r := rowNow(); r.Status != "pending" || r.Token != "" || r.FirstApproverID != "" {
 		t.Fatalf("after the stale session: %+v", r)
@@ -1224,8 +1251,8 @@ func TestAccessGrantNeedsTwoFreshBrowserSessions(t *testing.T) {
 	if r := rowNow(); r.Status != "partially_approved" || r.Token != "" || r.FirstApproverID != "ap-carol" || r.FirstApproverName != "carol" {
 		t.Fatalf("after the first approval: %+v", r)
 	}
-	if code, body := carol.post(t, path, ""); code == 200 {
-		t.Fatalf("the same session approved twice: %s", body)
+	if code, body := carol.post(t, path, ""); code != 409 || body != `{"error":"you already approved this; it needs a second person"}` {
+		t.Fatalf("the same session approving twice: %d %s", code, body)
 	}
 	if r := rowNow(); r.Status != "partially_approved" || r.Token != "" {
 		t.Fatalf("after the same session again: %+v", r)
@@ -1248,4 +1275,256 @@ func TestAccessGrantNeedsTwoFreshBrowserSessions(t *testing.T) {
 	if r := rowNow(); r.Token != released.Token || r.Nonce != released.Nonce || r.DecidedBy != "dave" {
 		t.Errorf("token changed after release: %+v", r)
 	}
+}
+
+// TestApprovalRulesThroughTheAPI drives the v0.4.0 approval rules through
+// real UI sessions: the API supplies who is approving (with their linked
+// humans), and maps each refusal to its status and fixed text.
+func TestApprovalRulesThroughTheAPI(t *testing.T) {
+	authority := func(t *testing.T, f *apiFixture) string {
+		t.Helper()
+		if err := f.st.CreateApproval(context.Background(), approvalWithImpact(approvalID, f.clock.Now(),
+			engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"})); err != nil {
+			t.Fatal(err)
+		}
+		return "/api/approvals/" + approvalID + "/approve"
+	}
+
+	t.Run("self approval is refused with 403 and the fixed text", func(t *testing.T) {
+		f := newAPIFixture(t)
+		f.pending(t, approvalID) // made on alice's behalf
+		// bob is not alice by name; only his link to alice makes this his
+		// own request. Without the link the API hands the service, the
+		// approval would go through.
+		bob := f.signIn(t, "bob")
+		if err := f.st.AddApproverHumans(context.Background(), "ap-bob", []string{"alice"}); err != nil {
+			t.Fatal(err)
+		}
+		code, body := bob.post(t, "/api/approvals/"+approvalID+"/approve", "")
+		if code != 403 || body != `{"error":"you can't approve a request made on your behalf"}` {
+			t.Errorf("self approval: %d %s", code, body)
+		}
+		if r, _ := f.st.ApprovalByID(context.Background(), approvalID); r.Status != "pending" || r.Token != "" {
+			t.Errorf("refused approval changed the row: %+v", r)
+		}
+		// Deny is never blocked by the rule.
+		if code, body := bob.post(t, "/api/approvals/"+approvalID+"/deny", ""); code != 200 {
+			t.Errorf("deny of own request: %d %s", code, body)
+		}
+	})
+
+	t.Run("an access grant needs a second approver", func(t *testing.T) {
+		f := newAPIFixture(t)
+		path := authority(t, f)
+		bob := f.signIn(t, "bob")
+		code, body := bob.post(t, path, "")
+		d := decode[map[string]any](t, body)
+		if code != 200 || d["status"] != "partially_approved" || d["needs_approvers"] != 2.0 || d["first_approver"] != "bob" ||
+			d["first_approved"] != rfc3339(f.clock.Now()) {
+			t.Fatalf("first approval: %d %s", code, body)
+		}
+		code, body = bob.post(t, path, "")
+		if code != 409 || body != `{"error":"you already approved this; it needs a second person"}` {
+			t.Errorf("same account twice: %d %s", code, body)
+		}
+		carol := f.signIn(t, "carol")
+		code, body = carol.post(t, path, "")
+		if d := decode[map[string]any](t, body); code != 200 || d["status"] != "approved" || d["decided_by"] != "carol" || d["first_approver"] != "bob" {
+			t.Fatalf("second approval: %d %s", code, body)
+		}
+		r, _ := f.st.ApprovalByID(context.Background(), approvalID)
+		if r.Token == "" || r.Nonce == "" {
+			t.Fatalf("no token minted: %+v", r)
+		}
+		// The raw bytes, not a decoded view: a secret under any key, or in
+		// any field, must not be in the answer.
+		for _, secret := range []string{r.Token, r.Nonce, `"token"`, `"nonce"`} {
+			if strings.Contains(body, secret) {
+				t.Errorf("approve response carries %q:\n%s", secret, body)
+			}
+		}
+	})
+
+	t.Run("a stale sign-in cannot approve an access grant", func(t *testing.T) {
+		f := newAPIFixture(t)
+		path := authority(t, f)
+		bob := f.signIn(t, "bob")
+		f.clock.Add(15*time.Minute + time.Second)
+		code, body := bob.post(t, path, "")
+		if code != 403 || body != `{"error":"sign in again to approve access grants"}` {
+			t.Errorf("stale sign-in: %d %s", code, body)
+		}
+		if r, _ := f.st.ApprovalByID(context.Background(), approvalID); r.Status != "pending" || r.FirstApproverID != "" {
+			t.Errorf("refused approval changed the row: %+v", r)
+		}
+	})
+
+	t.Run("summaries carry sql_detected and needs_approvers", func(t *testing.T) {
+		f := newAPIFixture(t)
+		ctx := context.Background()
+		now := f.clock.Now()
+		const terminal, sqlExec, grant, forged, half, lapsed = "11111111111111111111111111111111", "22222222222222222222222222222222",
+			"33333333333333333333333333333333", "44444444444444444444444444444444", "55555555555555555555555555555555", "66666666666666666666666666666666"
+		rows := []store.Approval{
+			pendingApproval(terminal, now),
+			approvalWithImpact(sqlExec, now, engine.Impact{Class: engine.ClassTerminal, SQLDetected: true, Undo: "none"}),
+			approvalWithImpact(grant, now, engine.Impact{Class: engine.ClassAuthority, Measured: true, Undo: "none"}),
+		}
+		// The stored class says TERMINAL but the impact no longer digests
+		// to what the token binds: needs_approvers must follow the
+		// approval rules (two), not read the class off the row (one).
+		fg := pendingApproval(forged, now)
+		fg.ImpactDigest = "not-the-digest"
+		h := pendingApproval(half, now)
+		h.Status, h.FirstApproverID, h.FirstApproverName, h.FirstApproved = "partially_approved", "ap-bob", "bob", now.Add(-time.Minute)
+		// A partial approval past its expiry can only answer 409 now.
+		l := pendingApproval(lapsed, now)
+		l.Status, l.FirstApproverID, l.FirstApproverName, l.FirstApproved = "partially_approved", "ap-bob", "bob", now.Add(-2*time.Hour)
+		l.Created, l.Expires = now.Add(-3*time.Hour), now.Add(-time.Hour)
+		for _, a := range append(rows, fg, h, l) {
+			if err := f.st.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c := f.signIn(t, "carol")
+		_, body := c.get(t, "/api/approvals")
+		got := map[string]map[string]any{}
+		for _, s := range decode[[]map[string]any](t, body) {
+			got[s["id"].(string)] = s
+		}
+		for id, want := range map[string]struct {
+			needs  float64
+			sql    bool
+			status string
+			first  string
+		}{
+			terminal: {1, false, "pending", ""}, sqlExec: {1, true, "pending", ""}, grant: {2, false, "pending", ""},
+			forged: {2, false, "pending", ""}, half: {2, false, "partially_approved", "bob"}, lapsed: {2, false, "expired", "bob"},
+		} {
+			s := got[id]
+			if s["needs_approvers"] != want.needs || s["sql_detected"] != want.sql || s["status"] != want.status || s["first_approver"] != want.first {
+				t.Errorf("%s: %v, want %+v", id, s, want)
+			}
+		}
+		if got[half]["first_approved"] != rfc3339(now.Add(-time.Minute)) || got[terminal]["first_approved"] != "" {
+			t.Errorf("first_approved: %v / %v", got[half]["first_approved"], got[terminal]["first_approved"])
+		}
+		// The queue holds the live partial beside the pending ones.
+		_, body = c.get(t, "/api/approvals?status=pending")
+		if len(decode[[]map[string]any](t, body)) != 5 {
+			t.Errorf("pending queue: %s", body)
+		}
+		_, body = c.get(t, "/api/approvals/"+sqlExec)
+		if d := decode[map[string]any](t, body); d["sql_detected"] != true || d["needs_approvers"] != 1.0 {
+			t.Errorf("detail: %s", body)
+		}
+	})
+}
+
+func TestNewEndpoints(t *testing.T) {
+	t.Run("me carries the cluster name", func(t *testing.T) {
+		f := newAPIFixture(t)
+		c := f.signIn(t, "carol")
+		_, body := c.get(t, "/api/me")
+		m := decode[map[string]string](t, body)
+		if m["name"] != "carol" || m["csrf"] != c.csrf || m["cluster"] != "kind-blastgate-fixture" || len(m) != 3 {
+			t.Errorf("me: %s", body)
+		}
+	})
+
+	t.Run("count is the true pending count past 500", func(t *testing.T) {
+		fastStream(t, 10*time.Millisecond, time.Minute)
+		f := newAPIFixture(t)
+		ctx := context.Background()
+		now := f.clock.Now()
+		for i := range 615 {
+			a := pendingApproval(fmt.Sprintf("%032x", i+1), now)
+			if i >= 612 {
+				a.Status, a.FirstApproverID, a.FirstApproverName, a.FirstApproved = "partially_approved", "ap-bob", "bob", now
+			}
+			if err := f.st.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A lapsed one is not waiting on anybody.
+		gone := pendingApproval(fmt.Sprintf("%032x", 9999), now)
+		gone.Expires = now.Add(-time.Second)
+		if err := f.st.CreateApproval(ctx, gone); err != nil {
+			t.Fatal(err)
+		}
+		c := f.signIn(t, "carol")
+		code, body := c.get(t, "/api/approvals/count")
+		if code != 200 || body != `{"count":615}` {
+			t.Errorf("count: %d %s", code, body)
+		}
+		_, ch := openStream(t, c)
+		next(t, ch, 3*time.Second) // hello
+		ap := next(t, ch, 3*time.Second)
+		ev := decode[pendingEvent](t, ap.data)
+		if ap.name != "approvals" || ev.Count != 615 || len(ev.IDs) != 500 {
+			t.Errorf("stream approvals: %s count %d ids %d", ap.name, ev.Count, len(ev.IDs))
+		}
+		// One more past the cap leaves the 500 oldest ids as they were;
+		// the count alone changed, and the badge must still hear of it.
+		if err := f.st.CreateApproval(ctx, pendingApproval(fmt.Sprintf("%032x", 700), now.Add(time.Minute))); err != nil {
+			t.Fatal(err)
+		}
+		ap = next(t, ch, 3*time.Second)
+		if ev2 := decode[pendingEvent](t, ap.data); ap.name != "approvals" || ev2.Count != 616 || !slices.Equal(ev2.IDs, ev.IDs) {
+			t.Errorf("after one more past the cap: %s count %d ids %d", ap.name, ev2.Count, len(ev2.IDs))
+		}
+	})
+
+	t.Run("policy stats validate and compute the rate", func(t *testing.T) {
+		f := newAPIFixture(t)
+		ctx := context.Background()
+		now := f.clock.Now()
+		n := 0
+		seed := func(rule, status string, created time.Time) {
+			n++
+			a := pendingApproval(fmt.Sprintf("%032x", n), now)
+			a.Rule, a.Status, a.Created = rule, status, created
+			if err := f.st.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		recent := now.Add(-30 * time.Minute)
+		for _, s := range []string{"approved", "consumed", "denied", "pending"} {
+			seed("deletes", s, recent)
+		}
+		seed("scale", "expired", recent)
+		seed("scale", "partially_approved", recent)
+		seed("deletes", "approved", now.Add(-2*time.Hour)) // outside a 1-hour window
+		c := f.signIn(t, "carol")
+
+		code, body := c.get(t, "/api/policy/stats?since_hours=1")
+		want := `{"since_hours":1,"rules":[` +
+			`{"rule":"deletes","held":4,"approved":2,"denied":1,"expired":0,"approve_rate":0.667},` +
+			`{"rule":"scale","held":2,"approved":0,"denied":0,"expired":1,"approve_rate":null}]}`
+		if code != 200 || body != want {
+			t.Errorf("stats:\n got %d %s\nwant %s", code, body, want)
+		}
+		code, body = c.get(t, "/api/policy/stats")
+		res := decode[struct {
+			SinceHours int `json:"since_hours"`
+			Rules      []struct {
+				Rule string
+				Held int
+			}
+		}](t, body)
+		// The default window (168h) reaches the row two hours back.
+		if code != 200 || res.SinceHours != 168 || len(res.Rules) != 2 || res.Rules[0].Rule != "deletes" || res.Rules[0].Held != 5 {
+			t.Errorf("default window: %d %s", code, body)
+		}
+		for _, q := range []string{"0", "721", "-1", "x", "1.5", "99999999999999999999"} {
+			if code, body := c.get(t, "/api/policy/stats?since_hours="+q); code != 400 || body != `{"error":"since_hours must be between 1 and 720"}` {
+				t.Errorf("since_hours=%s: %d %s", q, code, body)
+			}
+		}
+		// An empty window is an empty list, not null.
+		f.clock.Add(1000 * time.Hour)
+		if _, body := f.signIn(t, "dave").get(t, "/api/policy/stats?since_hours=1"); body != `{"since_hours":1,"rules":[]}` {
+			t.Errorf("empty window: %s", body)
+		}
+	})
 }

@@ -26,7 +26,7 @@ const pendingTTL = time.Hour
 func approvalsCmd(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("approvals", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	status := fs.String("status", "", "only approvals in this state (pending, approved, denied, consumed, superseded, expired)")
+	status := fs.String("status", "", "only approvals in this state (pending, partially_approved, approved, denied, consumed, superseded, expired); pending includes partially_approved")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

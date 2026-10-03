@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -25,14 +26,16 @@ import (
 )
 
 // Deps is what serve hands the API: the store, the approval service that
-// signs decisions, and the policy it loaded (with its text and where the
-// text came from, for the policy view).
+// signs decisions, the policy it loaded (with its text and where the
+// text came from, for the policy view), and the name of the cluster the
+// gateway fronts, so an approver always sees where a decision lands.
 type Deps struct {
 	Store        *store.Store
 	Approvals    *approval.Service
 	Policy       *policy.Policy
 	PolicySource string
 	PolicyText   []byte
+	Cluster      string
 	Log          *slog.Logger
 }
 
@@ -46,6 +49,7 @@ const (
 	listLimitMax   = 500
 	bypassLimit    = 100
 	bypassSince    = 24
+	statsSince     = 168
 )
 
 // replayRowCap bounds how many decision rows one replay loads and
@@ -66,6 +70,11 @@ const (
 	errPolicySize = "policy larger than 64 KiB"
 	errBadStatus  = "unknown approval status"
 	errBusy       = "a replay is already running; try again when it finishes"
+
+	errSelfApproval   = "you can't approve a request made on your behalf"
+	errSecondApprover = "you already approved this; it needs a second person"
+	errReauth         = "sign in again to approve access grants"
+	errChannel        = "access grants need two approvers in the browser"
 )
 
 // Ids are checked against their exact shape before any lookup: a path
@@ -76,7 +85,7 @@ var (
 	sessionIDPattern  = regexp.MustCompile(`^[0-9a-f]{16}$`)
 )
 
-var approvalStatuses = map[string]bool{"": true, "pending": true, "approved": true, "denied": true,
+var approvalStatuses = map[string]bool{"": true, "pending": true, "partially_approved": true, "approved": true, "denied": true,
 	"consumed": true, "superseded": true, "expired": true}
 
 // apiStore is the slice of *store.Store the API reads and writes. It is an
@@ -88,6 +97,9 @@ type apiStore interface {
 	AuditSinceLimit(ctx context.Context, since time.Time, kind string, limit int) ([]store.AuditRow, error)
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
+	CountPendingApprovals(ctx context.Context, now time.Time) (int, error)
+	PolicyStats(ctx context.Context, since time.Time) ([]store.RuleStats, error)
+	ApproverHumans(ctx context.Context, approverID string) ([]string, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	ListSessionsLimit(ctx context.Context, limit int) ([]store.Session, error)
 	SessionByID(ctx context.Context, id string) (store.Session, error)
@@ -126,6 +138,9 @@ func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) *api {
 	mux.Handle("GET /api/me", a.Require(h.me))
 	mux.Handle("GET /api/feed", a.Require(h.feed))
 	mux.Handle("GET /api/approvals", a.Require(h.approvals))
+	// More specific than {id}, so the mux picks it for /count; "count" is
+	// not an id either way (ids are 32 hex characters).
+	mux.Handle("GET /api/approvals/count", a.Require(h.approvalCount))
 	mux.Handle("GET /api/approvals/{id}", a.Require(h.approval))
 	mux.Handle("POST /api/approvals/{id}/approve", a.Require(h.decide("approve")))
 	mux.Handle("POST /api/approvals/{id}/deny", a.Require(h.decide("deny")))
@@ -133,6 +148,7 @@ func routes(mux *http.ServeMux, a *Auth, d Deps, st apiStore) *api {
 	mux.Handle("POST /api/sessions/{id}/revoke", a.Require(h.revoke))
 	mux.Handle("GET /api/policy", a.Require(h.policy))
 	mux.Handle("POST /api/policy/replay", a.Require(h.replay))
+	mux.Handle("GET /api/policy/stats", a.Require(h.policyStats))
 	mux.Handle("GET /api/bypass", a.Require(h.bypass))
 	mux.Handle("GET /api/stream", a.Require(h.stream))
 	// Anything else under /api is a 401 without a session too, so probing
@@ -175,7 +191,7 @@ func rfc3339(t time.Time) string {
 }
 
 func (h *api) me(w http.ResponseWriter, r *http.Request, u store.UISession) {
-	reply(w, http.StatusOK, map[string]string{"name": u.ApproverName, "csrf": u.CSRF})
+	reply(w, http.StatusOK, map[string]string{"name": u.ApproverName, "csrf": u.CSRF, "cluster": h.d.Cluster})
 }
 
 // ---- feed ----
@@ -317,6 +333,16 @@ type ApprovalSummary struct {
 	AgeSeconds int64  `json:"age_seconds"`
 	Created    string `json:"created"`
 	Expires    string `json:"expires"`
+	// NeedsApprovers is 2 when the approval rules want two people, from
+	// approval.NeedsTwo and never from the stored class: the class alone
+	// would say 1 for a row whose impact no longer matches its digest,
+	// and the UI would then offer a lone Approve that the server refuses.
+	NeedsApprovers int    `json:"needs_approvers"`
+	FirstApprover  string `json:"first_approver"`
+	FirstApproved  string `json:"first_approved"`
+	// SQLDetected lets the queue word an exec running a database client
+	// without fetching each detail.
+	SQLDetected bool `json:"sql_detected"`
 }
 
 // ApprovalDetail is everything the human is deciding on. It is built
@@ -344,15 +370,21 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 		ID: a.ID, Status: a.Status, Rule: a.Rule, Human: a.Human, Agent: a.Agent,
 		Verb: act.Verb, Resource: resource, Namespace: act.Namespace, Name: act.Name,
 		Summary: "unknown impact", Created: rfc3339(a.Created), Expires: rfc3339(a.Expires),
+		NeedsApprovers: 1, FirstApprover: a.FirstApproverName, FirstApproved: rfc3339(a.FirstApproved),
+	}
+	if approval.NeedsTwo(a) {
+		s.NeedsApprovers = 2
 	}
 	var imp engine.Impact
 	if json.Unmarshal(a.ImpactJSON, &imp) == nil {
 		s.Summary, s.Class, s.DataDestroyed, s.Measured = imp.Summary(), imp.Class, imp.DataDestroyed, imp.Measured
+		s.SQLDetected = imp.SQLDetected
 	}
 	// Nothing moves a lapsed pending approval to expired until the agent
 	// retries, and it usually never does. Shown as pending, it would offer
-	// Approve and Deny that can only ever answer 409.
-	if a.Status == "pending" && now.After(a.Expires) {
+	// Approve and Deny that can only ever answer 409. A partial approval
+	// lapses the same way, waiting on a second person who came too late.
+	if (a.Status == "pending" || a.Status == "partially_approved") && now.After(a.Expires) {
 		s.Status = "expired"
 	}
 	if age := now.Sub(a.Created); age > 0 {
@@ -385,8 +417,9 @@ func (h *api) approvals(w http.ResponseWriter, r *http.Request, _ store.UISessio
 	}
 	def := int64(approvalsLimit)
 	if status == "pending" {
-		// The queue reaches as far as the stream's pending count, so the
-		// badge never counts cards the queue does not show.
+		// The queue reaches as far as the stream's pending ids, so every
+		// id the stream names is a card the queue shows. The count can go
+		// past it: past 500 the badge says how many, the queue the oldest.
 		def = streamPendingLimit
 	}
 	limit, ok := listLimit(r, def)
@@ -412,6 +445,18 @@ func (h *api) approvals(w http.ResponseWriter, r *http.Request, _ store.UISessio
 		out = append(out, summarize(a, now))
 	}
 	reply(w, http.StatusOK, out)
+}
+
+// approvalCount is the true size of the queue, for the badge before the
+// stream's first event: the pending list stops at its limit, and its
+// length would stop counting there too.
+func (h *api) approvalCount(w http.ResponseWriter, r *http.Request, _ store.UISession) {
+	n, err := h.st.CountPendingApprovals(r.Context(), h.auth.Now())
+	if err != nil {
+		h.internal(w, "count approvals", err)
+		return
+	}
+	reply(w, http.StatusOK, map[string]int{"count": n})
 }
 
 func (h *api) approval(w http.ResponseWriter, r *http.Request, _ store.UISession) {
@@ -445,7 +490,17 @@ func (h *api) decide(verb string) func(http.ResponseWriter, *http.Request, store
 		var a store.Approval
 		var err error
 		if verb == "approve" {
-			a, err = h.d.Approvals.Approve(r.Context(), id, approval.Approver{Name: u.ApproverName, ID: u.ApproverID, SignedIn: u.Created, Channel: "ui"})
+			// The humans linked to this account are read at decision time,
+			// from the store, never from the request: they are what makes
+			// "bob approving alice's request" bob's own request when bob is
+			// alice's account.
+			humans, herr := h.st.ApproverHumans(r.Context(), u.ApproverID)
+			if herr != nil {
+				h.internal(w, "approver humans", herr)
+				return
+			}
+			a, err = h.d.Approvals.Approve(r.Context(), id, approval.Approver{Name: u.ApproverName, ID: u.ApproverID,
+				Humans: humans, SignedIn: u.Created, Channel: "ui"})
 		} else {
 			a, err = h.d.Approvals.Deny(r.Context(), id, u.ApproverName)
 		}
@@ -457,6 +512,24 @@ func (h *api) decide(verb string) func(http.ResponseWriter, *http.Request, store
 		// approver it is the same as finding it already decided.
 		case errors.Is(err, approval.ErrNotPending), errors.Is(err, store.ErrConflict):
 			fail(w, http.StatusConflict, errNotPending)
+			return
+		// The rule refusals are told apart so the UI can say why: not
+		// yours to approve, sign in again, or wait for a second person.
+		// Their texts are fixed constants, so nothing about the request
+		// is echoed back.
+		case errors.Is(err, approval.ErrSelfApproval):
+			fail(w, http.StatusForbidden, errSelfApproval)
+			return
+		case errors.Is(err, approval.ErrReauthRequired):
+			fail(w, http.StatusForbidden, errReauth)
+			return
+		// Unreachable from here (this channel is always "ui"); mapped so a
+		// later change cannot turn it into a 500.
+		case errors.Is(err, approval.ErrChannelNotAllowed):
+			fail(w, http.StatusForbidden, errChannel)
+			return
+		case errors.Is(err, approval.ErrNeedsSecondApprover):
+			fail(w, http.StatusConflict, errSecondApprover)
 			return
 		case err != nil:
 			h.internal(w, verb, err)
@@ -549,6 +622,48 @@ func (h *api) revoke(w http.ResponseWriter, r *http.Request, u store.UISession) 
 
 func (h *api) policy(w http.ResponseWriter, r *http.Request, _ store.UISession) {
 	reply(w, http.StatusOK, map[string]string{"source": h.d.PolicySource, "text": string(h.d.PolicyText)})
+}
+
+// RuleStatsRow is one rule's line in "How each rule is used".
+// ApproveRate is approved/(approved+denied) to three decimals, and null
+// when nothing was decided: 0 would read as "always denied".
+type RuleStatsRow struct {
+	Rule        string   `json:"rule"`
+	Held        int      `json:"held"`
+	Approved    int      `json:"approved"`
+	Denied      int      `json:"denied"`
+	Expired     int      `json:"expired"`
+	ApproveRate *float64 `json:"approve_rate"`
+}
+
+type policyStatsReply struct {
+	SinceHours int64          `json:"since_hours"`
+	Rules      []RuleStatsRow `json:"rules"`
+}
+
+// policyStats is how each rule's holds ended over the last since_hours,
+// so the operator can see a rule people approve every time.
+func (h *api) policyStats(w http.ResponseWriter, r *http.Request, _ store.UISession) {
+	since, ok := queryInt(r, "since_hours", statsSince, maxSinceHours)
+	if !ok {
+		fail(w, http.StatusBadRequest, errSince)
+		return
+	}
+	l, err := h.st.PolicyStats(r.Context(), h.auth.Now().Add(-time.Duration(since)*time.Hour))
+	if err != nil {
+		h.internal(w, "policy stats", err)
+		return
+	}
+	out := policyStatsReply{SinceHours: since, Rules: make([]RuleStatsRow, 0, len(l))}
+	for _, s := range l {
+		row := RuleStatsRow{Rule: s.Rule, Held: s.Held, Approved: s.Approved, Denied: s.Denied, Expired: s.Expired}
+		if d := s.Approved + s.Denied; d > 0 {
+			rate := math.Round(float64(s.Approved)/float64(d)*1000) / 1000
+			row.ApproveRate = &rate
+		}
+		out.Rules = append(out.Rules, row)
+	}
+	reply(w, http.StatusOK, out)
 }
 
 type replayRequest struct {

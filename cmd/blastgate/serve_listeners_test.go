@@ -499,3 +499,43 @@ func TestServeShutdownEndsOpenStreams(t *testing.T) {
 		})
 	}
 }
+
+// TestServeWiresClusterNameAndReauth: the operator's cluster name reaches
+// /api/me through the running server, and the reauth window reaches the
+// approval service serve builds (a real wait on the 1m minimum would be a
+// minute-long test, so the service is checked where serve makes it).
+func TestServeWiresClusterNameAndReauth(t *testing.T) {
+	env, a := listenerEnv(t, false, map[string]string{"BLASTGATE_CLUSTER_NAME": "prod-east-1"})
+	startServe(t, env)
+	waitListening(t, a["admin"])
+	tok := approverNewToken(t, env, "bob")
+	c := caClient(t, a["data"])
+	base := "https://" + a["admin"]
+	b, _ := json.Marshal(map[string]string{"token": tok})
+	resp, err := c.Post(base+"/api/login", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || len(resp.Cookies()) == 0 {
+		t.Fatalf("login: %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequest("GET", base+"/api/me", nil)
+	req.AddCookie(resp.Cookies()[0])
+	mr, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Body.Close()
+	var me struct{ Name, Cluster string }
+	if err := json.NewDecoder(mr.Body).Decode(&me); err != nil || mr.StatusCode != 200 {
+		t.Fatalf("me: %d %v", mr.StatusCode, err)
+	}
+	if me.Name != "bob" || me.Cluster != "prod-east-1" {
+		t.Errorf("me = %+v", me)
+	}
+
+	if svc := newApprovalService(config.Config{AuthorityReauth: 7 * time.Minute}, nil); svc.Reauth != 7*time.Minute {
+		t.Errorf("approval service reauth = %v, want the configured 7m", svc.Reauth)
+	}
+}

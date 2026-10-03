@@ -138,6 +138,29 @@ func TestPartialApprovalsArePendingForTheQueueAndTheCount(t *testing.T) {
 	if n, err := s.CountPendingApprovals(ctx, now); err != nil || n != 2 {
 		t.Errorf("count = %d, %v; want 2", n, err)
 	}
+	// The CLI's `approvals --status pending` and the admin list read
+	// ListApprovals: a row waiting on its second approver is still
+	// waiting, and must not vanish from them (ruling E-R2).
+	for name, list := range map[string]func() ([]Approval, error){
+		"ListApprovals":      func() ([]Approval, error) { return s.ListApprovals(ctx, "pending") },
+		"ListApprovalsLimit": func() ([]Approval, error) { return s.ListApprovalsLimit(ctx, "pending", 10) },
+	} {
+		l, err := list()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, a := range l {
+			got = append(got, a.ID)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, []string{"half", "p"}) {
+			t.Errorf("%s(pending) = %v", name, got)
+		}
+	}
+	if l, _ := s.ListApprovals(ctx, "partially_approved"); len(l) != 1 || l[0].ID != "half" {
+		t.Errorf("ListApprovals(partially_approved) = %v", l)
+	}
 }
 
 func TestCountIgnoresExpired(t *testing.T) {

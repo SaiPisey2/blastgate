@@ -38,6 +38,15 @@ import (
 	"github.com/SaiPisey2/blastgate/ui"
 )
 
+// newApprovalService is the one approval service serve runs, for the
+// gate and the approver UI alike. Reauth comes from the operator's
+// BLASTGATE_AUTHORITY_REAUTH: left unset here, the service would fall
+// back to its built-in 15 minutes whatever the operator configured.
+func newApprovalService(cfg config.Config, st *store.Store) *approval.Service {
+	return &approval.Service{Store: st, Key: cfg.SigningKey, TokenTTL: cfg.ApprovalTTL, PendingTTL: pendingTTL,
+		Reauth: cfg.AuthorityReauth, Now: time.Now}
+}
+
 // serveCmd wires config, store, TLS, upstream and proxy into a running
 // HTTPS server, beside the admin listener (the approver UI) and, when
 // configured, the observe webhook, and shuts them all down cleanly when
@@ -91,7 +100,7 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 	}
 	auth := &session.Authenticator{Store: st, Now: time.Now}
 	eng := engine.New(up, cfg.ScoreBudget)
-	svc := &approval.Service{Store: st, Key: cfg.SigningKey, TokenTTL: cfg.ApprovalTTL, PendingTTL: pendingTTL, Now: time.Now}
+	svc := newApprovalService(cfg, st)
 	g := &gate.Gate{
 		Engine:    eng,
 		Policy:    pol,
@@ -128,7 +137,8 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 	}
 	adminSrv := &http.Server{
 		Handler: admin.NewServer(admin.NewAuth(st, log), admin.Deps{
-			Store: st, Approvals: svc, Policy: pol, PolicySource: policySource, PolicyText: policyText, Log: log,
+			Store: st, Approvals: svc, Policy: pol, PolicySource: policySource, PolicyText: policyText,
+			Cluster: cfg.ClusterName, Log: log,
 		}, ui.FS()),
 		ReadHeaderTimeout: adminReadHeaderTimeout,
 		ReadTimeout:       adminReadTimeout,

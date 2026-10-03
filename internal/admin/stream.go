@@ -51,9 +51,9 @@ const (
 	// gateway do per second.
 	maxStreamsPerSession = 4
 	maxStreams           = 32
-	// streamPendingLimit bounds the pending list read each poll. Past it
-	// the count shown is the limit: a queue that long is a fire whose
-	// exact size does not change what the approver does next.
+	// streamPendingLimit bounds the pending ids read each poll. The count
+	// is not bounded by it: it comes from its own COUNT query, so a badge
+	// over a long queue says how long, not "500".
 	streamPendingLimit = 500
 
 	errStreams = "too many live streams"
@@ -261,6 +261,7 @@ type streamState struct {
 	idHash  []byte
 	lastID  int64
 	pending []string
+	count   int
 	sent    bool // whether an approvals event has been sent yet
 }
 
@@ -282,20 +283,27 @@ func (st *streamState) poll(ctx context.Context) bool {
 
 	// Read at each poll's own time, so an approval that lapses while the
 	// stream is open leaves the count without anything else changing.
-	l, err := h.st.ListPendingApprovals(ctx, h.auth.Now(), streamPendingLimit)
+	now := h.auth.Now()
+	l, err := h.st.ListPendingApprovals(ctx, now, streamPendingLimit)
 	if err != nil {
 		return st.failed(ctx, "stream pending approvals", err)
+	}
+	count, err := h.st.CountPendingApprovals(ctx, now)
+	if err != nil {
+		return st.failed(ctx, "stream pending count", err)
 	}
 	ids := make([]string, 0, len(l))
 	for _, a := range l {
 		ids = append(ids, a.ID)
 	}
 	slices.Sort(ids)
-	if !st.sent || !slices.Equal(ids, st.pending) {
-		if st.s.event("approvals", "", pendingEvent{Count: len(ids), IDs: ids}) != nil {
+	// The count is compared too: past the id cap a new row can change it
+	// while the oldest 500 ids stay the same.
+	if !st.sent || count != st.count || !slices.Equal(ids, st.pending) {
+		if st.s.event("approvals", "", pendingEvent{Count: count, IDs: ids}) != nil {
 			return false
 		}
-		st.pending, st.sent = ids, true
+		st.pending, st.count, st.sent = ids, count, true
 	}
 
 	for n := 0; n < streamCatchUp; {
