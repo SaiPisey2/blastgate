@@ -617,8 +617,17 @@
   color: var(--text);
 }
 
+/* What an access grant grants: the role and who it goes to. Body text,
+   not muted: it is the one line that says what approving hands out. */
+.decision-grant {
+  margin: 0 0 var(--s-3);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
 /* An access grant one person has approved: who, when, and that it waits
-   for someone else. */
+   for someone else. Before anyone has, that it needs two. */
+.decision-needs,
 .decision-partial {
   margin: 0 0 var(--s-3);
   color: var(--text);

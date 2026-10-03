@@ -53,7 +53,7 @@ describe('App', () => {
     render(<App />);
     await screen.findByText('bob');
     await waitFor(() => expect(calls.some((c) => c.url === '/api/approvals/count')).toBe(true));
-    act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
+    act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)], partial: {} }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     await act(async () => release());
     await new Promise((r) => setTimeout(r, 20));
@@ -201,7 +201,7 @@ describe('App server rules', () => {
     expect(await screen.findByRole('link', { name: 'Waiting, 742 requests' })).toBeTruthy();
     expect(calls.some((c) => c.url === '/api/approvals/count')).toBe(true);
     // The stream keeps it current from there.
-    act(() => emit('approvals', { count: 743, ids: [] }));
+    act(() => emit('approvals', { count: 743, ids: [], partial: {} }));
     expect(screen.getByRole('link', { name: 'Waiting, 743 requests' })).toBeTruthy();
   });
 

@@ -85,6 +85,13 @@ export type ApprovalSummary = {
   // fails safe (an exec-like request it cannot vouch for reads true), so
   // the list can word its rows without fetching each detail.
   sql_detected?: boolean;
+  // target_name and grant name what an access grant grants, from its
+  // measured impact: the object ("namespace/name", or "name" when
+  // cluster-scoped) and what it does ("binds ClusterRole/view to User
+  // coding-agent"). Empty for anything else, and optional because an
+  // older server does not send them.
+  target_name?: string;
+  grant?: string;
 };
 
 // stillWaiting: a status that can still be decided. A partial approval
@@ -261,7 +268,10 @@ export async function logout(): Promise<void> {
 
 // --- live stream -------------------------------------------------------
 
-export type PendingEvent = { count: number; ids: string[] };
+// partial: each partially approved id among ids, with its first
+// approver's name. A first approval leaves the id where it was, so
+// without this a page showing that request could not tell it changed.
+export type PendingEvent = { count: number; ids: string[]; partial: Record<string, string> };
 type StreamEvents = { audit: FeedRow; approvals: PendingEvent };
 type Listener<K extends keyof StreamEvents> = (data: StreamEvents[K]) => void;
 
@@ -301,6 +311,18 @@ export function onStreamStatus(fn: (s: StreamStatus) => void): () => void {
 export function setStreamStatus(s: StreamStatus) {
   status = s;
   statusListeners.forEach((fn) => fn(s));
+}
+
+// partialOf keeps only string-to-string entries, in an object with no
+// prototype: a key such as "__proto__" or "toString" from the wire then
+// reads as itself, never as something inherited.
+export function partialOf(v: unknown): Record<string, string> {
+  const out: Record<string, string> = Object.create(null);
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, name] of Object.entries(v)) {
+    if (typeof name === 'string') out[k] = name;
+  }
+  return out;
 }
 
 function parse(ev: MessageEvent): unknown {
@@ -375,7 +397,7 @@ function listen(onOpen: () => void, onRefused: () => void): EventSource {
     const d = parse(ev as MessageEvent) as Partial<PendingEvent> | undefined;
     if (!d) return;
     const ids = Array.isArray(d.ids) ? d.ids.map(String) : [];
-    emit('approvals', { count: typeof d.count === 'number' ? d.count : ids.length, ids });
+    emit('approvals', { count: typeof d.count === 'number' ? d.count : ids.length, ids, partial: partialOf(d.partial) });
   });
   es.addEventListener('expired', () => {
     es.close();

@@ -54,6 +54,9 @@ export default function Details({ id, me = '', cluster = '', back = '#/waiting' 
   const [error, setError] = useState('');
   const [missing, setMissing] = useState(!valid);
   const pending = useRef(false);
+  // firstShown: the first approver the page shows, or null when the
+  // request is not partially approved, to compare with the stream's.
+  const firstShown = useRef<string | null>(null);
   const seq = useRef(0);
   const now = useNow();
   const techId = useId();
@@ -79,6 +82,7 @@ export default function Details({ id, me = '', cluster = '', back = '#/waiting' 
         return;
       }
       pending.current = stillWaiting(got.status);
+      firstShown.current = got.status === 'partially_approved' ? (typeof got.first_approver === 'string' ? got.first_approver : '') : null;
       setD(got);
       setError('');
       setMissing(false);
@@ -102,10 +106,16 @@ export default function Details({ id, me = '', cluster = '', back = '#/waiting' 
     setError('');
     setMissing(!valid);
     pending.current = false;
+    firstShown.current = null;
     // Decided elsewhere (another approver, or it expired): it leaves the
-    // pending set on the stream, and this page shows the new state.
+    // pending set on the stream, and this page shows the new state. A
+    // first approval, or a new first approver, keeps it in the set but
+    // changes its partial entry; that is re-read too, so the page never
+    // offers the first approver a second Approve or names the wrong one.
     const off = subscribe('approvals', (ev) => {
-      if (pending.current && !ev.ids.includes(id)) void load();
+      if (!pending.current) return;
+      const first = Object.hasOwn(ev.partial ?? {}, id) ? ev.partial[id] : null;
+      if (!ev.ids.includes(id) || first !== firstShown.current) void load();
     });
     void load();
     return off;

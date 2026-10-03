@@ -132,7 +132,7 @@ const panel = () => screen.getByRole('article');
 const heading = () => within(panel()).getByRole('heading', { level: 2 });
 
 async function stream(ids: string[]) {
-  await act(async () => emit('approvals', { count: ids.length, ids }));
+  await act(async () => emit('approvals', { count: ids.length, ids, partial: {} }));
 }
 
 describe('Waiting', () => {
@@ -705,6 +705,59 @@ describe('Waiting, v0.4.0 fix round 1', () => {
       expect(within(card).getByRole('button', { name: /^deny$/i })).toBeTruthy();
       expect(screen.queryByText('Nothing is waiting for you.')).toBeNull();
       expect(screen.queryByText(/the agent can go ahead/)).toBeNull();
+      expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    });
+  }
+});
+
+describe('Waiting, final fix wave', () => {
+  // M1: an access grant nobody has approved says it needs two people, on
+  // its row and in its panel; one with a first approval says one more.
+  it('rows say how many approvers an access grant still needs', async () => {
+    setMedia(WIDE, true);
+    const grant = summary({ id: ID1, created: at(200), verb: 'create', resource: 'rolebindings', name: 'b', class: 'AUTHORITY', data_destroyed: 0, needs_approvers: 2 });
+    const half = summary({ id: ID2, created: at(100), verb: 'create', resource: 'rolebindings', name: 'c', class: 'AUTHORITY', data_destroyed: 0, needs_approvers: 2, status: 'partially_approved', first_approver: 'alice', first_approved: new Date().toISOString() });
+    const one = summary({ id: ID3, created: at(50), needs_approvers: 1 });
+    server([grant, half, one]);
+    renderWithMotion(<Waiting me="bob" />);
+    await waitFor(() => expect(options()).toHaveLength(3));
+    const meta = (row: HTMLElement) => row.querySelector('.waiting-meta')!.textContent ?? '';
+    expect(meta(options()[0])).toMatch(/ · Needs two approvers$/);
+    expect(meta(options()[1])).toMatch(/ · Needs one more approver$/);
+    expect(meta(options()[2])).not.toMatch(/approver/);
+    expect(within(panel()).getByText('Needs two approvers')).toBeTruthy();
+  });
+
+  // M3: losing the race for the first of two approvals answers 409, but
+  // the request still waits -- for exactly the second person this
+  // approver can be. It must not be dropped from the list.
+  for (const wide of [true, false]) {
+    it(`a 409 on a request still waiting keeps it listed (${wide ? 'wide' : 'narrow'})`, async () => {
+      setMedia(WIDE, wide);
+      const grant = summary({ verb: 'create', resource: 'rolebindings', name: 'admin-binding', class: 'AUTHORITY', data_destroyed: 0, needs_approvers: 2 });
+      const grantImpact = impact({ class: 'AUTHORITY', dataDestroyed: 0, undo: 'none', effects: [] });
+      let list: ApprovalSummary[] = [grant];
+      const calls = mockFetch({
+        'GET /api/approvals?status=pending': () => ({ body: list }),
+        [`GET /api/approvals/${ID1}`]: () => ({ body: detail(list[0], grantImpact) }),
+        [`POST /api/approvals/${ID1}/approve`]: () => {
+          // carol's first approval landed a moment earlier.
+          list = [{ ...grant, status: 'partially_approved', first_approver: 'carol', first_approved: new Date().toISOString() }];
+          return { status: 409, body: { error: 'approval is not pending' } };
+        },
+      });
+      renderWithMotion(<Waiting me="bob" />);
+      const field = (await screen.findByLabelText(/to approve, type/i)) as HTMLInputElement;
+      await userEvent.type(field, 'demo/admin-binding');
+      await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+      expect(await screen.findByText('Someone else approved this first. It still needs one more approver.')).toBeTruthy();
+      await stream([ID1]);
+      await waitFor(() => expect(screen.getByText(/^Approved by carol at \d\d:\d\d · needs one more approver$/)).toBeTruthy());
+      if (wide) expect(options()).toHaveLength(1);
+      expect(screen.queryByText('That request was already decided or has expired.')).toBeNull();
+      expect(screen.queryByText('Nothing is waiting for you.')).toBeNull();
+      // bob can still be the second person.
+      expect(within(panel()).getByRole('button', { name: /^deny$/i })).toBeTruthy();
       expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
     });
   }

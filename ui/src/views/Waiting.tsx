@@ -10,7 +10,7 @@ import { useListKeys } from '../hooks/useListKeys';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { describe } from '../lib/describe';
 import { ago, hhmm, useNow } from '../lib/format';
-import { frictionOf } from '../lib/friction';
+import { frictionOf, shownName } from '../lib/friction';
 import { AnimatePresence, DUR, EASE, m, useIsPresent } from '../motion';
 
 const PENDING = '/api/approvals?status=pending';
@@ -52,7 +52,15 @@ export function resetLastDecision() {
 // describeSummary words a list entry from the summary alone, the SQL flag
 // included: the list never waits on a detail to say what a row does.
 function describeSummary(s: ApprovalSummary) {
-  return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name, sqlDetected: s.sql_detected === true });
+  return describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: shownName(s), sqlDetected: s.sql_detected === true });
+}
+
+// approversNote: how many more people an access grant still needs, for
+// its row. needs_approvers is exactly 2 or it says nothing.
+export function approversNote(s: ApprovalSummary): string {
+  if (s.needs_approvers !== 2) return '';
+  if (s.status === 'partially_approved') return 'Needs one more approver';
+  return s.status === 'pending' ? 'Needs two approvers' : '';
 }
 
 function sentenceOf(s: ApprovalSummary): string {
@@ -361,6 +369,7 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
   const impact = detail && detail.id === s.id ? detail.impact : undefined;
   const f = frictionOf(s, impact);
   const d = describeSummary(s);
+  const note = approversNote(s);
   return (
     <m.li
       id={id}
@@ -379,11 +388,12 @@ function Row({ id, s, detail, now, selected, onChoose }: RowProps) {
       <span className="waiting-row-text">
         {/* The identifier in mono, as in the panel and every other list. */}
         <span className="waiting-sentence waiting-wrap">
-          <Sentence sentence={d.sentence} target={d.target} name={s.name} identClass="waiting-ident" />
+          <Sentence sentence={d.sentence} target={d.target} name={shownName(s)} identClass="waiting-ident" />
         </span>
         <span className="visually-hidden">{`, ${f.tag}, `}</span>
         <span className="waiting-meta waiting-wrap">
           {s.human || 'Unknown'} · {ageOf(s, now)}
+          {note && ` · ${note}`}
         </span>
       </span>
     </m.li>
@@ -400,9 +410,10 @@ function Gone({ summary: s }: { summary: ApprovalSummary }) {
   // name is untrusted.
   let words = d.sentence;
   let ident = '';
-  if (s.name && words.endsWith(s.name)) {
-    words = words.slice(0, words.length - s.name.length);
-    ident = d.target || s.name;
+  const name = shownName(s);
+  if (name && words.endsWith(name)) {
+    words = words.slice(0, words.length - name.length);
+    ident = d.target || name;
   }
   words = words.charAt(0).toLowerCase() + words.slice(1);
   return (

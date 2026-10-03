@@ -1116,3 +1116,132 @@ describe('DecisionPanel two-person approvals', () => {
     expect(q.textContent).toBe('coding-agent wants to run a database command in demo/db-0');
   });
 });
+
+describe('DecisionPanel access grants name what they grant', () => {
+  // A cluster role binding created with its name only in the body: the
+  // path has no name, so without target_name the approver would type
+  // "clusterrolebindings" and never see which binding, or to whom.
+  const created = summary({
+    rule: 'hold-authority',
+    verb: 'create',
+    resource: 'clusterrolebindings',
+    namespace: '',
+    name: '',
+    summary: 'AUTHORITY, 1 object',
+    class: 'AUTHORITY',
+    data_destroyed: 0,
+    needs_approvers: 2,
+    target_name: 'agent-view',
+    grant: 'binds ClusterRole/view to User coding-agent',
+  });
+  const createdImpact = impact({ class: 'AUTHORITY', dataDestroyed: 0, undo: 'none', effects: [{ kind: 'grants', object: 'rbac.authorization.k8s.io/ClusterRoleBinding//agent-view', explanation: 'binds ClusterRole/view to User coding-agent' }] });
+
+  it('shows the role and subjects, needs two approvers, and types the binding name', async () => {
+    const calls = routes({ body: { ...created, status: 'partially_approved', first_approver: 'bob' } });
+    const { onDecided } = renderPanel({ ...withDetail(created, createdImpact), me: 'bob' });
+    expect(screen.getByText('Grants ClusterRole/view to User coding-agent')).toBeTruthy();
+    expect(screen.getByText('Needs two approvers')).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toContain('agent-view');
+    // The bare resource never arms it.
+    await userEvent.type(typedField(), 'clusterrolebindings');
+    expect(approveButton().disabled).toBe(true);
+    await userEvent.clear(typedField());
+    await userEvent.type(typedField(), 'agent-view');
+    expect(approveButton().disabled).toBe(false);
+    await userEvent.click(approveButton());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'partial'));
+    expect(posts(calls)).toEqual([`/api/approvals/${ID1}/approve`]);
+    // After the first approval the partial line takes over.
+    expect(screen.queryByText('Needs two approvers')).toBeNull();
+  });
+
+  it('a namespaced binding is typed as namespace/name', async () => {
+    routes();
+    const s = { ...created, resource: 'rolebindings', namespace: 'demo', target_name: 'demo/edit', grant: 'binds Role/editor to Group devs' };
+    renderPanel({ ...withDetail(s, createdImpact), me: 'bob' });
+    expect(screen.getByText('Grants Role/editor to Group devs')).toBeTruthy();
+    await userEvent.type(typedField(), 'demo/edit');
+    expect(approveButton().disabled).toBe(false);
+  });
+
+  it('a grant that changes under a typed confirmation clears it', async () => {
+    routes();
+    const { rerender, props } = renderPanel({ ...withDetail(created, createdImpact), me: 'bob' });
+    await userEvent.type(typedField(), 'agent-view');
+    expect(approveButton().disabled).toBe(false);
+    const changed = { ...created, grant: 'binds ClusterRole/cluster-admin to User coding-agent' };
+    rerender(<DecisionPanel {...props} summary={changed} detail={detail(changed, createdImpact)} />);
+    expect(typedField().value).toBe('');
+    expect(approveButton().disabled).toBe(true);
+  });
+
+  it('no grant line, and no "needs two", for a single-approver request', () => {
+    routes();
+    const { container } = renderPanel(withDetail(reversible, reversibleImpact));
+    expect(container.querySelector('.decision-grant')).toBeNull();
+    expect(screen.queryByText('Needs two approvers')).toBeNull();
+  });
+
+  it('a grant value that is not a string is left out', () => {
+    routes();
+    const { container } = renderPanel({ ...withDetail({ ...created, grant: 7 as unknown as string }, createdImpact), me: 'bob' });
+    expect(container.querySelector('.decision-grant')).toBeNull();
+  });
+});
+
+describe('DecisionPanel losing the first-approval race', () => {
+  const grant = summary({
+    verb: 'create',
+    resource: 'rolebindings',
+    namespace: 'demo',
+    name: 'admin-binding',
+    class: 'AUTHORITY',
+    data_destroyed: 0,
+    needs_approvers: 2,
+  });
+  const grantImpact = impact({ class: 'AUTHORITY', dataDestroyed: 0, undo: 'none' });
+
+  it('a 409 for a request still waiting keeps it, says why, and refreshes it', async () => {
+    const calls = mockFetch({
+      [`POST /api/approvals/${ID1}/approve`]: { status: 409, body: { error: 'approval is not pending' } },
+      [`GET /api/approvals/${ID1}`]: { body: { ...grant, status: 'partially_approved', first_approver: 'carol' } },
+    });
+    const { onDecided, onRetry } = renderPanel({ ...withDetail(grant, grantImpact), me: 'bob' });
+    await userEvent.type(typedField(), 'demo/admin-binding');
+    await userEvent.click(approveButton());
+    expect(await screen.findByText('Someone else approved this first. It still needs one more approver.')).toBeTruthy();
+    expect(onDecided).not.toHaveBeenCalled();
+    expect(onRetry).toHaveBeenCalled();
+    expect(screen.queryByText(GONE)).toBeNull();
+    expect(denyButton()).toBeTruthy();
+    expect(calls.filter((c) => c.method === 'GET').map((c) => c.url)).toEqual([`/api/approvals/${ID1}`]);
+  });
+
+  for (const [what, reply] of [
+    ['decided', { body: { ...grant, status: 'approved' } }],
+    ['unreadable', { status: 500, body: { error: 'x' } }],
+    ['another id', { body: { ...grant, id: ID2, status: 'pending' } }],
+  ] as const) {
+    it(`a 409 for a request that is ${what} on re-read is gone`, async () => {
+      mockFetch({
+        [`POST /api/approvals/${ID1}/approve`]: { status: 409, body: { error: 'approval is not pending' } },
+        [`GET /api/approvals/${ID1}`]: reply,
+      });
+      const { onDecided } = renderPanel({ ...withDetail(grant, grantImpact), me: 'bob' });
+      await userEvent.type(typedField(), 'demo/admin-binding');
+      await userEvent.click(approveButton());
+      await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'gone'));
+    });
+  }
+
+  it('a 409 to a deny is gone without a re-read', async () => {
+    const calls = mockFetch({
+      [`POST /api/approvals/${ID1}/deny`]: { status: 409, body: { error: 'approval is not pending' } },
+      [`GET /api/approvals/${ID1}`]: { body: { ...grant, status: 'pending' } },
+    });
+    const { onDecided } = renderPanel({ ...withDetail(grant, grantImpact), me: 'bob' });
+    await userEvent.click(denyButton());
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith(ID1, 'gone'));
+    expect(calls.filter((c) => c.method === 'GET')).toEqual([]);
+  });
+});

@@ -1,9 +1,9 @@
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Details from './Details';
-import { setCSRF, type ApprovalDetail } from '../api';
+import { emit, setCSRF, type ApprovalDetail } from '../api';
 import { mockFetch } from '../test/fetch';
 import { renderWithMotion } from '../test/motion';
 import { deploymentImpact, detail, ID1, impact, summary } from '../test/fixtures';
@@ -405,5 +405,46 @@ describe('Details, v0.4.0', () => {
     expect(within(card).getByRole('button', { name: /^deny$/i })).toBeTruthy();
     expect(within(card).getByText(/^Approved by alice at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Back to Activity' }).getAttribute('href')).toBe('#/activity');
+  });
+});
+
+describe('Details, final fix wave', () => {
+  // M2: a first approval keeps the id in the stream's set, so "re-read
+  // when it leaves the set" never fired; the partial entry changing does.
+  it('re-reads when its partial state changes on the stream, and not otherwise', async () => {
+    const grant = summary({ verb: 'create', resource: 'rolebindings', namespace: 'demo', name: 'b', class: 'AUTHORITY', data_destroyed: 0, needs_approvers: 2 });
+    let current: ApprovalDetail = detail(grant, impact({ class: 'AUTHORITY', dataDestroyed: 0 }));
+    const calls = mockFetch({ [`GET /api/approvals/${ID1}`]: () => ({ body: current }) });
+    const gets = () => calls.filter((c) => c.method === 'GET' && c.url === `/api/approvals/${ID1}`).length;
+    renderWithMotion(<Details id={ID1} me="alice" />);
+    await screen.findByRole('article');
+    expect(screen.getByText('Needs two approvers')).toBeTruthy();
+    expect(gets()).toBe(1);
+    // Nothing about this request changed: no re-read.
+    act(() => emit('approvals', { count: 2, ids: [ID1, 'f'.repeat(32)], partial: {} }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(gets()).toBe(1);
+    // bob gave the first approval elsewhere.
+    current = { ...current, status: 'partially_approved', first_approver: 'bob', first_approved: new Date().toISOString() };
+    act(() => emit('approvals', { count: 2, ids: [ID1, 'f'.repeat(32)], partial: { [ID1]: 'bob' } }));
+    await waitFor(() => expect(gets()).toBe(2));
+    expect(await screen.findByText(/^Approved by bob at \d\d:\d\d · needs one more approver$/)).toBeTruthy();
+    // The same partial state again: no re-read.
+    act(() => emit('approvals', { count: 1, ids: [ID1], partial: { [ID1]: 'bob' } }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(gets()).toBe(2);
+    // bob was revoked and carol's approval replaced his.
+    current = { ...current, first_approver: 'carol' };
+    act(() => emit('approvals', { count: 1, ids: [ID1], partial: { [ID1]: 'carol' } }));
+    await waitFor(() => expect(gets()).toBe(3));
+    expect(await screen.findByText(/^Approved by carol at/)).toBeTruthy();
+  });
+
+  it('shows what an access grant grants', async () => {
+    const s = summary({ verb: 'create', resource: 'clusterrolebindings', namespace: '', name: '', class: 'AUTHORITY', data_destroyed: 0, needs_approvers: 2, target_name: 'agent-view', grant: 'binds ClusterRole/view to User coding-agent' });
+    mockFetch({ [`GET /api/approvals/${ID1}`]: { body: detail(s, impact({ class: 'AUTHORITY', dataDestroyed: 0 })) } });
+    renderWithMotion(<Details id={ID1} me="bob" />);
+    expect(await screen.findByText('Grants ClusterRole/view to User coding-agent')).toBeTruthy();
+    expect(screen.getAllByRole('heading', { level: 2 })[0].textContent).toContain('agent-view');
   });
 });

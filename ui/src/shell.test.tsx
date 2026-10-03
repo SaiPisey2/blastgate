@@ -267,7 +267,7 @@ describe('Auth', () => {
     renderWithMotion(<App />);
     await screen.findByText('bob');
     await waitFor(() => expect(calls.some((c) => c.url === '/api/approvals/count')).toBe(true));
-    act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)] }));
+    act(() => emit('approvals', { count: 2, ids: ['a'.repeat(32), 'b'.repeat(32)], partial: {} }));
     expect(screen.getByRole('link', { name: 'Waiting, 2 requests' })).toBeTruthy();
     // The slower fetch answers with an empty list: it must not undo the
     // count the stream already gave.

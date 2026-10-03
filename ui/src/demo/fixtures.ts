@@ -77,6 +77,8 @@ const pending: ApprovalSummary[] = [
     class: 'AUTHORITY',
     data_destroyed: 0,
     needs_approvers: 2,
+    target_name: 'ci-deployer-admin',
+    grant: 'binds ClusterRole/cluster-admin to ServiceAccount ci/deployer',
     human: 'demo',
     age_seconds: 12,
     created: ago(12),
@@ -130,11 +132,11 @@ const impacts: Record<string, Impact> = {
   [id('d')]: {
     class: 'AUTHORITY',
     measured: true,
-    effects: [{ kind: 'grants', object: 'rbac.authorization.k8s.io/ClusterRoleBinding//ci-deployer-admin', explanation: 'binds cluster-admin to serviceaccount ci/deployer' }],
+    effects: [{ kind: 'grants', object: 'rbac.authorization.k8s.io/ClusterRoleBinding//ci-deployer-admin', explanation: 'binds ClusterRole/cluster-admin to ServiceAccount ci/deployer' }],
     dataDestroyed: 0,
     sqlDetected: false,
     dryRunRejected: false,
-    undo: 'objects',
+    undo: 'none',
   },
 };
 

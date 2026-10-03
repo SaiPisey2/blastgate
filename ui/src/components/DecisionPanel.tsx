@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ApiError, logout, post, stillWaiting, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
-import { ARM_MS, canSelfApprove, frictionOf, typedTarget } from '../lib/friction';
+import { ApiError, get, logout, post, stillWaiting, type ApprovalDetail, type ApprovalSummary, type Impact } from '../api';
+import { ARM_MS, canSelfApprove, frictionOf, grantText, shownName, typedTarget } from '../lib/friction';
 import { describe } from '../lib/describe';
 import { actionText, ago, clock, hhmm, plural, useNow } from '../lib/format';
 import { AnimatePresence, DUR, EASE, m, useIsPresent, useReducedMotion } from '../motion';
@@ -48,6 +48,8 @@ export const SELF_APPROVAL_REASON = "You can't approve a request made on your be
 export const FIRST_APPROVER_REASON = 'You already approved this; it needs a second person';
 export const REAUTH_TEXT = 'Sign in again to approve access grants';
 export const GONE_TEXT = 'This request is no longer waiting.';
+export const NEEDS_TWO_TEXT = 'Needs two approvers';
+export const RACED_TEXT = 'Someone else approved this first. It still needs one more approver.';
 
 const DONE_TEXT: Record<Exclude<Outcome, 'gone' | 'partial'>, string> = {
   approved: 'Approved. The agent can go ahead.',
@@ -184,6 +186,18 @@ function questionParts(sentence: string, target: string, name: string): { words:
   return { words, ident };
 }
 
+// waitingOnServer re-reads one approval and reports whether it can still
+// be decided. Any failure, or an answer about another id, reads as not
+// waiting: the caller then treats the request as gone, as before.
+async function waitingOnServer(id: string): Promise<boolean> {
+  try {
+    const d = await get<Partial<ApprovalSummary> | undefined>(`/api/approvals/${encodeURIComponent(id)}`);
+    return !!d && typeof d === 'object' && d.id === id && typeof d.status === 'string' && stillWaiting(d.status);
+  } catch {
+    return false;
+  }
+}
+
 // Keyed by id: nothing typed, armed or half-confirmed for one request may
 // ever carry over to the next one shown in the same place.
 export default function DecisionPanel(props: DecisionPanelProps) {
@@ -246,8 +260,19 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
   // enough: the summary's flag is the server's fail-safe reading, and the
   // list words its row from it before any detail has loaded.
   const runsSQL = impact?.sqlDetected === true || s.sql_detected === true;
-  const described = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name: s.name, sqlDetected: runsSQL });
-  const { words, ident } = questionParts(described.sentence, described.target, s.name);
+  // name: from the path, or for a create that names its object only in
+  // the body, from the server's target_name, so the question names the
+  // binding an access grant creates rather than only its resource.
+  const name = shownName(s);
+  const described = describe({ verb: s.verb, resource: s.resource, namespace: s.namespace, name, sqlDetected: runsSQL });
+  const { words, ident } = questionParts(described.sentence, described.target, name);
+  // grant: what an access grant grants, from the server's reading of the
+  // measured impact (role and subjects, or a role's rules).
+  const grant = grantText(s.grant);
+  // needsTwo: an access grant nobody has approved yet. Once one person
+  // has (here, before the re-read lands, or as the server says), the
+  // partial line below says who and that one more is needed.
+  const needsTwo = s.needs_approvers === 2 && s.status === 'pending' && approvedAt === '';
   // commandShown: for an unmeasured hold, or an exec-like request, the
   // command is the impact. It sits in view above the controls, as on the
   // details page, never behind "Show the command": an approver must not
@@ -277,7 +302,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
   // Without this, a detail flap (typed -> confirm -> typed) remounted the
   // typed field empty while an earlier match still counted, and an armed
   // confirm step came back armed without waiting ARM_MS again.
-  const typedKey = `${friction.level}\u0000${expected}`;
+  const typedKey = `${friction.level}\u0000${expected}\u0000${grant}`;
   const [seenTypedKey, setSeenTypedKey] = useState(typedKey);
   if (seenTypedKey !== typedKey) {
     setSeenTypedKey(typedKey);
@@ -292,7 +317,7 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
   const impactKey = impact
     ? [affects(impact), undoLabel(impact.undo, impact.dataDestroyed), undoStep(impact.undo), impact.measured, runsSQL].join('\u0000')
     : '';
-  const stepKey = `${friction.level}\u0000${decidable}\u0000${impactKey}`;
+  const stepKey = `${friction.level}\u0000${decidable}\u0000${impactKey}\u0000${grant}`;
   const [seenStepKey, setSeenStepKey] = useState(stepKey);
   if (seenStepKey !== stepKey) {
     setSeenStepKey(stepKey);
@@ -411,6 +436,17 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
         setRefusal(refused);
         return;
       }
+      // A 409 to an approval can be a lost race for the first of two
+      // approvals: someone else approved an access grant a moment before,
+      // and it still waits, now for exactly the second person this
+      // approver can be. Re-read it, and drop it only if it really is no
+      // longer waiting; otherwise say what happened and refresh it, with
+      // Approve still on offer for a fresh, deliberate press.
+      if (action === 'approve' && e instanceof ApiError && e.status === 409 && (await waitingOnServer(s.id))) {
+        setError(RACED_TEXT);
+        onRetry();
+        return;
+      }
       // 409: someone else decided it, or it expired, while this was open.
       // 404: it no longer exists. Either way it is not ours to decide.
       if (e instanceof ApiError && (e.status === 409 || e.status === 404)) {
@@ -507,6 +543,8 @@ function Panel({ summary: s, detail: rawDetail, detailError, me, cluster, onRetr
           </p>
         )
       )}
+      {needsTwo && <p className="decision-needs">{NEEDS_TWO_TEXT}</p>}
+      {grant && <p className="decision-grant">{grant}</p>}
       <p className="decision-why">{friction.why}</p>
       {hasBody ? body : <Facts items={facts} />}
       {detail && !hasBody && commandShown && (

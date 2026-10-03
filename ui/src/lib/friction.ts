@@ -74,19 +74,46 @@ export function frictionOf(
   }
 }
 
+// shownName: the object's name, from the request path, or for a create
+// that carries its name only in the body (an access grant's binding) from
+// the server's target_name. Plain lastIndexOf, never a pattern: the value
+// is untrusted.
+export function shownName(s: Pick<ApprovalSummary, 'name'> & { target_name?: unknown }): string {
+  if (s.name) return s.name;
+  const t = typeof s.target_name === 'string' ? s.target_name : '';
+  return t.slice(t.lastIndexOf('/') + 1);
+}
+
 // typedTarget: the string an approver must retype to arm a typed confirm.
-// Never '' — an empty target could be satisfied by an empty paste.
-export function typedTarget(s: Pick<ApprovalSummary, 'namespace' | 'name' | 'resource' | 'verb'>): string {
-  return (s.namespace && s.name ? `${s.namespace}/${s.name}` : s.name) || s.resource || s.verb || 'approve';
+// Never '' — an empty target could be satisfied by an empty paste. An
+// access grant is never confirmed by its bare resource ("rolebindings"
+// says nothing about which binding): with no name it falls back to the
+// namespace/resource, or the verb and resource when cluster-scoped.
+export function typedTarget(s: Pick<ApprovalSummary, 'namespace' | 'name' | 'resource' | 'verb'> & { class?: string; target_name?: unknown }): string {
+  const name = shownName(s);
+  if (name) return s.namespace ? `${s.namespace}/${name}` : name;
+  if (s.class === 'AUTHORITY' && s.resource) return s.namespace ? `${s.namespace}/${s.resource}` : `${s.verb || 'write'} ${s.resource}`;
+  return s.resource || s.verb || 'approve';
+}
+
+// grantText words the server's grant explanation for the panel: "binds
+// ClusterRole/view to User coding-agent" reads "Grants ClusterRole/view
+// to User coding-agent". Anything else is shown as it came, capitalised.
+// '' for a missing or wrong-typed value: the line is then left out.
+export function grantText(g: unknown): string {
+  if (typeof g !== 'string' || g.trim() === '') return '';
+  if (g.startsWith('binds ')) return `Grants ${g.slice('binds '.length)}`;
+  return g.charAt(0).toUpperCase() + g.slice(1);
 }
 
 // canSelfApprove: false only when the two names match exactly (trimmed,
-// case-sensitive, as the server records them). The server does not
-// enforce this itself — it is a UI-only guard (spec §6, §9) — so it
-// fails open rather than lock someone out over a rendering quirk. An
-// empty meName means /api/me has not answered yet, which only means the
-// UI cannot tell who "self" is yet; that never blocks by itself. human
-// may be missing from stored JSON; it then matches no one.
+// case-sensitive, as the server records them). The server refuses a
+// self-approval too, by name and by the humans linked to the account;
+// this guard only says early what it can see (the name), so it fails
+// open rather than lock someone out over a rendering quirk. An empty
+// meName means /api/me has not answered yet, which only means the UI
+// cannot tell who "self" is yet; that never blocks by itself. human may
+// be missing from stored JSON; it then matches no one.
 export function canSelfApprove(meName: string, human: string | undefined): boolean {
   const me = meName.trim();
   const h = (human ?? '').trim();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canSelfApprove, frictionOf, typedTarget } from './friction';
+import { canSelfApprove, frictionOf, grantText, shownName, typedTarget } from './friction';
 
 // Table-driven per the brief: class/measured/data_destroyed -> level/tag/tone.
 // unknownImpact is true exactly for the "Impact unknown" rows.
@@ -168,5 +168,45 @@ describe('canSelfApprove, carried from review', () => {
   it('a summary with no human at all never blocks', () => {
     expect(canSelfApprove('bob', undefined)).toBe(true);
     expect(canSelfApprove('', undefined)).toBe(true);
+  });
+});
+
+describe('typedTarget for access grants (I3)', () => {
+  it('uses target_name when the path has no name', () => {
+    expect(typedTarget({ namespace: '', name: '', resource: 'clusterrolebindings', verb: 'create', class: 'AUTHORITY', target_name: 'agent-view' })).toBe('agent-view');
+    expect(typedTarget({ namespace: 'demo', name: '', resource: 'rolebindings', verb: 'create', class: 'AUTHORITY', target_name: 'demo/edit' })).toBe('demo/edit');
+  });
+  it('the path name wins over target_name', () => {
+    expect(typedTarget({ namespace: 'demo', name: 'web', resource: 'rolebindings', verb: 'update', class: 'AUTHORITY', target_name: 'demo/other' })).toBe('demo/web');
+  });
+  it('is never the bare resource for an access grant', () => {
+    expect(typedTarget({ namespace: 'demo', name: '', resource: 'rolebindings', verb: 'create', class: 'AUTHORITY' })).toBe('demo/rolebindings');
+    expect(typedTarget({ namespace: '', name: '', resource: 'clusterrolebindings', verb: 'create', class: 'AUTHORITY' })).toBe('create clusterrolebindings');
+    expect(typedTarget({ namespace: '', name: '', resource: 'clusterrolebindings', verb: 'create', class: 'AUTHORITY', target_name: 7 })).toBe('create clusterrolebindings');
+    expect(typedTarget({ namespace: '', name: '', resource: 'clusterrolebindings', verb: 'create', class: 'AUTHORITY', target_name: '' })).not.toBe('clusterrolebindings');
+  });
+  it('other classes keep the resource fallback', () => {
+    expect(typedTarget({ namespace: '', name: '', resource: 'persistentvolumes', verb: 'delete', class: 'TERMINAL' })).toBe('persistentvolumes');
+  });
+});
+
+describe('shownName', () => {
+  it('reads the last segment of target_name, as a literal', () => {
+    expect(shownName({ name: '', target_name: 'demo/edit' })).toBe('edit');
+    expect(shownName({ name: '', target_name: 'agent-view' })).toBe('agent-view');
+    expect(shownName({ name: '', target_name: '.*' })).toBe('.*');
+    expect(shownName({ name: '', target_name: undefined })).toBe('');
+    expect(shownName({ name: '', target_name: { toString: () => 'x' } })).toBe('');
+  });
+});
+
+describe('grantText', () => {
+  it('words a binding as a grant and capitalises anything else', () => {
+    expect(grantText('binds ClusterRole/view to User coding-agent')).toBe('Grants ClusterRole/view to User coding-agent');
+    expect(grantText('allows get,list on pods')).toBe('Allows get,list on pods');
+    expect(grantText('')).toBe('');
+    expect(grantText('   ')).toBe('');
+    expect(grantText(null)).toBe('');
+    expect(grantText(['binds x'])).toBe('');
   });
 });

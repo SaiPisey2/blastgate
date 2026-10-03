@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { post, get, setCSRF, onSignedOut } from './api';
+import { post, get, setCSRF, onSignedOut, partialOf } from './api';
 import { mockFetch } from './test/fetch';
 
 afterEach(() => setCSRF(''));
@@ -42,5 +42,17 @@ describe('api', () => {
     expect(window.location.hash).toBe('#/login');
     await post('/api/logout').catch(() => {});
     expect(calls[1].headers['x-blastgate-csrf']).toBeUndefined();
+  });
+});
+
+describe('partialOf', () => {
+  it('keeps string entries only, in an object with no prototype', () => {
+    const p = partialOf(JSON.parse('{"a":"bob","b":7,"__proto__":"x","toString":"carol"}'));
+    expect(Object.getPrototypeOf(p)).toBeNull();
+    expect(p.a).toBe('bob');
+    expect(Object.hasOwn(p, 'b')).toBe(false);
+    expect(p.toString).toBe('carol');
+    expect(p.__proto__).toBe('x');
+    for (const v of [null, undefined, 'x', 3, ['bob']]) expect(Object.keys(partialOf(v))).toEqual([]);
   });
 });
