@@ -198,7 +198,10 @@ func serveCmd(ctx context.Context, getenv func(string) string, stderr io.Writer)
 		l.ln = ln
 	}
 	log.Info("listening", "addr", servers[0].ln.Addr().String(), "upstream", up.URL.Host, "policy", policyName, "hold", cfg.Hold.String())
-	log.Info("admin listening", "addr", servers[1].ln.Addr().String())
+	// The window in force, from the service itself: a wiring slip that
+	// left the operator's BLASTGATE_AUTHORITY_REAUTH out shows here as
+	// the 15m default.
+	log.Info("admin listening", "addr", servers[1].ln.Addr().String(), "authority_reauth", svc.ReauthWindow().String())
 	if len(servers) > 2 {
 		log.Info("webhook listening", "addr", servers[2].ln.Addr().String(), "client_cert", webhookCAs != nil)
 	}

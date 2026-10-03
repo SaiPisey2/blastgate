@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,9 @@ type countingStore struct {
 	// onAuditAfter runs once inside AuditAfter before it forwards, so a
 	// test can land rows between the stream's hello and its first poll.
 	onAuditAfter func()
+	// onApproverHumans, when set, runs inside ApproverHumans before it
+	// forwards; an error it returns is the store failing the lookup.
+	onApproverHumans func() error
 }
 
 func (c *countingStore) hooks() (func(), func(context.Context, string)) {
@@ -94,12 +98,25 @@ func (c *countingStore) CountPendingApprovals(ctx context.Context, now time.Time
 	c.n.Add(1)
 	return c.Store.CountPendingApprovals(ctx, now)
 }
-func (c *countingStore) PolicyStats(ctx context.Context, since time.Time) ([]store.RuleStats, error) {
+func (c *countingStore) ListLivePartialApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error) {
 	c.n.Add(1)
-	return c.Store.PolicyStats(ctx, since)
+	c.lastLimit.Store(int64(limit))
+	return c.Store.ListLivePartialApprovals(ctx, now, limit)
+}
+func (c *countingStore) PolicyStats(ctx context.Context, since, now time.Time) ([]store.RuleStats, error) {
+	c.n.Add(1)
+	return c.Store.PolicyStats(ctx, since, now)
 }
 func (c *countingStore) ApproverHumans(ctx context.Context, approverID string) ([]string, error) {
 	c.n.Add(1)
+	c.mu.Lock()
+	hook := c.onApproverHumans
+	c.mu.Unlock()
+	if hook != nil {
+		if err := hook(); err != nil {
+			return nil, err
+		}
+	}
 	return c.Store.ApproverHumans(ctx, approverID)
 }
 func (c *countingStore) ApprovalByID(ctx context.Context, id string) (store.Approval, error) {
@@ -1313,6 +1330,27 @@ func TestApprovalRulesThroughTheAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("a failed linked-human lookup refuses the approval", func(t *testing.T) {
+		f := newAPIFixture(t)
+		f.pending(t, approvalID)
+		bob := f.signIn(t, "bob")
+		if err := f.st.AddApproverHumans(context.Background(), "ap-bob", []string{"alice"}); err != nil {
+			t.Fatal(err)
+		}
+		// Without the links the self-approval rule cannot see that this is
+		// bob's own request; going on without them would approve it.
+		f.cs.mu.Lock()
+		f.cs.onApproverHumans = func() error { return errors.New("disk I/O error") }
+		f.cs.mu.Unlock()
+		code, body := bob.post(t, "/api/approvals/"+approvalID+"/approve", "")
+		if code != 500 || body != `{"error":"internal error"}` {
+			t.Errorf("lookup failure: %d %s", code, body)
+		}
+		if r, _ := f.st.ApprovalByID(context.Background(), approvalID); r.Status != "pending" || r.Token != "" || r.Nonce != "" || r.DecidedBy != "" {
+			t.Errorf("a failed lookup changed the row: %+v", r)
+		}
+	})
+
 	t.Run("an access grant needs a second approver", func(t *testing.T) {
 		f := newAPIFixture(t)
 		path := authority(t, f)
@@ -1365,6 +1403,27 @@ func TestApprovalRulesThroughTheAPI(t *testing.T) {
 		now := f.clock.Now()
 		const terminal, sqlExec, grant, forged, half, lapsed = "11111111111111111111111111111111", "22222222222222222222222222222222",
 			"33333333333333333333333333333333", "44444444444444444444444444444444", "55555555555555555555555555555555", "66666666666666666666666666666666"
+		const truncExec, truncDelete, flipped, quietExec = "77777777777777777777777777777777", "88888888888888888888888888888888",
+			"99999999999999999999999999999999", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		execAction, _ := json.Marshal(normalize.Action{Verb: "create", Resource: "pods", Subresource: "exec", Namespace: "demo", Name: "db-0"})
+		// Truncated impact_json: nothing can be trusted. An exec reads as
+		// possibly running SQL; a plain delete does not.
+		te := pendingApproval(truncExec, now)
+		te.ActionJSON, te.ImpactJSON = execAction, []byte(`{"class":"TERMINAL","sqlDetected":tr`)
+		td := pendingApproval(truncDelete, now)
+		td.ImpactJSON = []byte(`{"class":"TERMINAL","sqlDetected":tr`)
+		// Digest-valid when written with sqlDetected true, then flipped to
+		// false in the database: the digest no longer matches, so the
+		// false is not believed for an exec.
+		sqlImpact := engine.Impact{Class: engine.ClassTerminal, SQLDetected: true, Undo: "none"}
+		fl := approvalWithImpact(flipped, now, sqlImpact)
+		fl.ActionJSON = execAction
+		quiet := sqlImpact
+		quiet.SQLDetected = false
+		fl.ImpactJSON, _ = json.Marshal(quiet)
+		// The same exec with a trusted impact saying no SQL: believed.
+		qe := approvalWithImpact(quietExec, now, quiet)
+		qe.ActionJSON = execAction
 		rows := []store.Approval{
 			pendingApproval(terminal, now),
 			approvalWithImpact(sqlExec, now, engine.Impact{Class: engine.ClassTerminal, SQLDetected: true, Undo: "none"}),
@@ -1381,7 +1440,7 @@ func TestApprovalRulesThroughTheAPI(t *testing.T) {
 		l := pendingApproval(lapsed, now)
 		l.Status, l.FirstApproverID, l.FirstApproverName, l.FirstApproved = "partially_approved", "ap-bob", "bob", now.Add(-2*time.Hour)
 		l.Created, l.Expires = now.Add(-3*time.Hour), now.Add(-time.Hour)
-		for _, a := range append(rows, fg, h, l) {
+		for _, a := range append(rows, fg, h, l, te, td, fl, qe) {
 			if err := f.st.CreateApproval(ctx, a); err != nil {
 				t.Fatal(err)
 			}
@@ -1400,6 +1459,8 @@ func TestApprovalRulesThroughTheAPI(t *testing.T) {
 		}{
 			terminal: {1, false, "pending", ""}, sqlExec: {1, true, "pending", ""}, grant: {2, false, "pending", ""},
 			forged: {2, false, "pending", ""}, half: {2, false, "partially_approved", "bob"}, lapsed: {2, false, "expired", "bob"},
+			truncExec: {2, true, "pending", ""}, truncDelete: {2, false, "pending", ""}, flipped: {2, true, "pending", ""},
+			quietExec: {1, false, "pending", ""},
 		} {
 			s := got[id]
 			if s["needs_approvers"] != want.needs || s["sql_detected"] != want.sql || s["status"] != want.status || s["first_approver"] != want.first {
@@ -1411,8 +1472,14 @@ func TestApprovalRulesThroughTheAPI(t *testing.T) {
 		}
 		// The queue holds the live partial beside the pending ones.
 		_, body = c.get(t, "/api/approvals?status=pending")
-		if len(decode[[]map[string]any](t, body)) != 5 {
+		if len(decode[[]map[string]any](t, body)) != 9 {
 			t.Errorf("pending queue: %s", body)
+		}
+		// The partial filter lists the live partial only: the lapsed one
+		// would read "expired" under a "partially approved" heading.
+		_, body = c.get(t, "/api/approvals?status=partially_approved")
+		if l := decode[[]map[string]any](t, body); len(l) != 1 || l[0]["id"] != half || l[0]["status"] != "partially_approved" {
+			t.Errorf("partially_approved filter: %s", body)
 		}
 		_, body = c.get(t, "/api/approvals/"+sqlExec)
 		if d := decode[map[string]any](t, body); d["sql_detected"] != true || d["needs_approvers"] != 1.0 {
@@ -1494,13 +1561,21 @@ func TestNewEndpoints(t *testing.T) {
 		}
 		seed("scale", "expired", recent)
 		seed("scale", "partially_approved", recent)
+		// Still pending in the table but past its expiry: nobody answered
+		// it, so it counts as expired, not only as held.
+		n++
+		lapsed := pendingApproval(fmt.Sprintf("%032x", n), now)
+		lapsed.Rule, lapsed.Created, lapsed.Expires = "scale", recent, now.Add(-time.Minute)
+		if err := f.st.CreateApproval(ctx, lapsed); err != nil {
+			t.Fatal(err)
+		}
 		seed("deletes", "approved", now.Add(-2*time.Hour)) // outside a 1-hour window
 		c := f.signIn(t, "carol")
 
 		code, body := c.get(t, "/api/policy/stats?since_hours=1")
 		want := `{"since_hours":1,"rules":[` +
 			`{"rule":"deletes","held":4,"approved":2,"denied":1,"expired":0,"approve_rate":0.667},` +
-			`{"rule":"scale","held":2,"approved":0,"denied":0,"expired":1,"approve_rate":null}]}`
+			`{"rule":"scale","held":3,"approved":0,"denied":0,"expired":2,"approve_rate":null}]}`
 		if code != 200 || body != want {
 			t.Errorf("stats:\n got %d %s\nwant %s", code, body, want)
 		}
@@ -1527,4 +1602,32 @@ func TestNewEndpoints(t *testing.T) {
 			t.Errorf("empty window: %s", body)
 		}
 	})
+}
+
+// TestUntrustedSQLFlagFollowsTheRequest: with an impact that cannot be
+// trusted, sql_detected reads true for anything that runs or attaches to
+// a process in a container, and false for everything else.
+func TestUntrustedSQLFlagFollowsTheRequest(t *testing.T) {
+	for _, c := range []struct {
+		resource, sub string
+		want          bool
+	}{
+		{"pods", "exec", true}, {"pods", "attach", true}, {"pods", "ephemeralcontainers", true},
+		{"pods/exec", "", true}, {"pods/attach", "", true}, {"pods/ephemeralcontainers", "", true},
+		{"widgets.example.com/exec", "", true}, {"widgets.example.com", "attach", true}, {"widgets.example.com", "ephemeralcontainers", true},
+		{"pods", "log", false}, {"pods", "", false}, {"persistentvolumeclaims", "", false}, {"deployments", "scale", false},
+	} {
+		act := normalize.Action{Resource: c.resource, Subresource: c.sub}
+		joined := c.resource
+		if c.sub != "" {
+			joined += "/" + c.sub
+		}
+		if got := sqlDetected(false, engine.Impact{SQLDetected: !c.want}, act, joined); got != c.want {
+			t.Errorf("%s / %q: %v, want %v", c.resource, c.sub, got, c.want)
+		}
+	}
+	// Trusted, the impact's own flag wins either way.
+	if sqlDetected(true, engine.Impact{SQLDetected: false}, normalize.Action{Resource: "pods", Subresource: "exec"}, "pods/exec") {
+		t.Error("a trusted false was overridden")
+	}
 }

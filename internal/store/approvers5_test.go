@@ -161,6 +161,17 @@ func TestPartialApprovalsArePendingForTheQueueAndTheCount(t *testing.T) {
 	if l, _ := s.ListApprovals(ctx, "partially_approved"); len(l) != 1 || l[0].ID != "half" {
 		t.Errorf("ListApprovals(partially_approved) = %v", l)
 	}
+	// The live partial filter keeps it while it can be decided, and drops
+	// it once lapsed (expires_at < now), as the queue does.
+	if l, err := s.ListLivePartialApprovals(ctx, now, 10); err != nil || len(l) != 1 || l[0].ID != "half" {
+		t.Errorf("ListLivePartialApprovals(now) = %v, %v", l, err)
+	}
+	if l, err := s.ListLivePartialApprovals(ctx, t0.Add(time.Hour), 10); err != nil || len(l) != 1 {
+		t.Errorf("ListLivePartialApprovals(at expiry) = %v, %v", l, err)
+	}
+	if l, err := s.ListLivePartialApprovals(ctx, t0.Add(time.Hour+time.Millisecond), 10); err != nil || len(l) != 0 {
+		t.Errorf("ListLivePartialApprovals(lapsed) = %v, %v", l, err)
+	}
 }
 
 func TestCountIgnoresExpired(t *testing.T) {

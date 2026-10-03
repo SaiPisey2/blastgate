@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SaiPisey2/blastgate/internal/approval"
@@ -98,7 +99,8 @@ type apiStore interface {
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
 	CountPendingApprovals(ctx context.Context, now time.Time) (int, error)
-	PolicyStats(ctx context.Context, since time.Time) ([]store.RuleStats, error)
+	ListLivePartialApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
+	PolicyStats(ctx context.Context, since, now time.Time) ([]store.RuleStats, error)
 	ApproverHumans(ctx context.Context, approverID string) ([]string, error)
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	ListSessionsLimit(ctx context.Context, limit int) ([]store.Session, error)
@@ -341,7 +343,8 @@ type ApprovalSummary struct {
 	FirstApprover  string `json:"first_approver"`
 	FirstApproved  string `json:"first_approved"`
 	// SQLDetected lets the queue word an exec running a database client
-	// without fetching each detail.
+	// without fetching each detail. It is trusted from the impact only
+	// when the impact matches its digest; otherwise see sqlDetected.
 	SQLDetected bool `json:"sql_detected"`
 }
 
@@ -376,10 +379,11 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 		s.NeedsApprovers = 2
 	}
 	var imp engine.Impact
-	if json.Unmarshal(a.ImpactJSON, &imp) == nil {
+	decoded := json.Unmarshal(a.ImpactJSON, &imp) == nil
+	if decoded {
 		s.Summary, s.Class, s.DataDestroyed, s.Measured = imp.Summary(), imp.Class, imp.DataDestroyed, imp.Measured
-		s.SQLDetected = imp.SQLDetected
 	}
+	s.SQLDetected = sqlDetected(decoded && imp.Digest() == a.ImpactDigest, imp, act, resource)
 	// Nothing moves a lapsed pending approval to expired until the agent
 	// retries, and it usually never does. Shown as pending, it would offer
 	// Approve and Deny that can only ever answer 409. A partial approval
@@ -391,6 +395,26 @@ func summarize(a store.Approval, now time.Time) ApprovalSummary {
 		s.AgeSeconds = int64(age / time.Second)
 	}
 	return s
+}
+
+// execSubresources are the pod subresources that run or attach to a
+// process in a container: where a database client could be running.
+var execSubresources = map[string]bool{"exec": true, "attach": true, "ephemeralcontainers": true}
+
+// sqlDetected is the impact's own flag when the impact can be trusted
+// (it decodes and matches the digest the token binds). When it cannot,
+// a truncated row or one edited in the database, false would tell the
+// approver an exec is harmless; so an exec-like request reads true and
+// anything else false.
+func sqlDetected(trusted bool, imp engine.Impact, act normalize.Action, resource string) bool {
+	if trusted {
+		return imp.SQLDetected
+	}
+	switch resource {
+	case "pods/exec", "pods/attach", "pods/ephemeralcontainers":
+		return true
+	}
+	return execSubresources[act.Subresource] || strings.HasSuffix(resource, "/exec")
 }
 
 func detail(a store.Approval, now time.Time) ApprovalDetail {
@@ -430,10 +454,15 @@ func (h *api) approvals(w http.ResponseWriter, r *http.Request, _ store.UISessio
 	now := h.auth.Now()
 	var l []store.Approval
 	var err error
-	if status == "pending" {
+	switch status {
+	case "pending":
 		// The queue: only what can still be decided, oldest first.
 		l, err = h.st.ListPendingApprovals(r.Context(), now, limit)
-	} else {
+	case "partially_approved":
+		// Live ones only, like the queue: a lapsed partial would be listed
+		// under this filter only to read "expired".
+		l, err = h.st.ListLivePartialApprovals(r.Context(), now, limit)
+	default:
 		l, err = h.st.ListApprovalsLimit(r.Context(), status, limit)
 	}
 	if err != nil {
@@ -649,7 +678,8 @@ func (h *api) policyStats(w http.ResponseWriter, r *http.Request, _ store.UISess
 		fail(w, http.StatusBadRequest, errSince)
 		return
 	}
-	l, err := h.st.PolicyStats(r.Context(), h.auth.Now().Add(-time.Duration(since)*time.Hour))
+	now := h.auth.Now()
+	l, err := h.st.PolicyStats(r.Context(), now.Add(-time.Duration(since)*time.Hour), now)
 	if err != nil {
 		h.internal(w, "policy stats", err)
 		return

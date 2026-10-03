@@ -13,14 +13,18 @@ func TestStatsBucketEveryStatusAndRespectTheWindow(t *testing.T) {
 	ctx := context.Background()
 	since := t0
 	n := 0
-	seed := func(rule, status string, created time.Time) {
+	seedUntil := func(rule, status string, created, expires time.Time) {
 		t.Helper()
 		n++
 		a := appr(fmt.Sprintf("a%d", n))
-		a.RequestDigest, a.Rule, a.Status, a.Created = a.ID, rule, status, created
+		a.RequestDigest, a.Rule, a.Status, a.Created, a.Expires = a.ID, rule, status, created, expires
 		if err := s.CreateApproval(ctx, a); err != nil {
 			t.Fatal(err)
 		}
+	}
+	seed := func(rule, status string, created time.Time) {
+		t.Helper()
+		seedUntil(rule, status, created, created.Add(time.Hour))
 	}
 	in := t0.Add(time.Minute)
 	// rule "authority": every status once.
@@ -40,21 +44,29 @@ func TestStatsBucketEveryStatusAndRespectTheWindow(t *testing.T) {
 	// Before the window: counted nowhere, and its rule does not appear.
 	seed("authority", "approved", since.Add(-time.Millisecond))
 	seed("old-only", "denied", since.Add(-time.Hour))
+	// Still pending or partial, but past their expiry at now: nobody
+	// answered them, so they are expired, whatever the status column says.
+	// One expiring exactly at now is still live (expires_at >= now).
+	now := in.Add(30 * time.Minute)
+	seedUntil("lapsed", "pending", in, now.Add(-time.Millisecond))
+	seedUntil("lapsed", "partially_approved", in, now.Add(-time.Second))
+	seedUntil("lapsed", "pending", in, now)
 
-	got, err := s.PolicyStats(ctx, since)
+	got, err := s.PolicyStats(ctx, since, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []RuleStats{
 		{Rule: "data-destruction", Held: 8, Approved: 3, Denied: 3, Expired: 1},
 		{Rule: "authority", Held: 7, Approved: 3, Denied: 1, Expired: 1},
+		{Rule: "lapsed", Held: 3, Expired: 2},
 		{Rule: "quiet", Held: 2, Approved: 2},
 		{Rule: "zz-tie", Held: 2, Denied: 1, Expired: 1},
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("stats =\n%+v\nwant\n%+v", got, want)
 	}
-	if got, err := s.PolicyStats(ctx, t0.Add(time.Hour)); err != nil || len(got) != 0 {
+	if got, err := s.PolicyStats(ctx, t0.Add(time.Hour), now); err != nil || len(got) != 0 {
 		t.Errorf("an empty window = %+v, %v", got, err)
 	}
 }

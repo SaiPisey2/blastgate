@@ -180,6 +180,18 @@ func (s *Store) ListPendingApprovals(ctx context.Context, now time.Time, limit i
 		ORDER BY created_at ASC, id ASC LIMIT ?`, ms(now), limit)
 }
 
+// ListLivePartialApprovals is the partially approved rows that can still
+// be decided at now, oldest first, at most limit: the same live filter as
+// ListPendingApprovals. A lapsed one would come back only to be shown as
+// expired under a "partially approved" filter.
+func (s *Store) ListLivePartialApprovals(ctx context.Context, now time.Time, limit int) ([]Approval, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status = 'partially_approved' AND expires_at >= ?
+		ORDER BY created_at ASC, id ASC LIMIT ?`, ms(now), limit)
+}
+
 // CountPendingApprovals is the true size of the queue ListPendingApprovals
 // pages through, under the same filter: the badge used to be the length
 // of a capped list, so it stopped counting at the cap.

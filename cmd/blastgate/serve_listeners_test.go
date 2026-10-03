@@ -505,9 +505,17 @@ func TestServeShutdownEndsOpenStreams(t *testing.T) {
 // approval service serve builds (a real wait on the 1m minimum would be a
 // minute-long test, so the service is checked where serve makes it).
 func TestServeWiresClusterNameAndReauth(t *testing.T) {
-	env, a := listenerEnv(t, false, map[string]string{"BLASTGATE_CLUSTER_NAME": "prod-east-1"})
-	startServe(t, env)
+	env, a := listenerEnv(t, false, map[string]string{"BLASTGATE_CLUSTER_NAME": "prod-east-1", "BLASTGATE_AUTHORITY_REAUTH": "2m"})
+	logs := startServe(t, env)
 	waitListening(t, a["admin"])
+	// The window the running service applies, not the one configured: a
+	// serve that dropped the setting would log the 15m default.
+	for deadline := time.Now().Add(3 * time.Second); !strings.Contains(logs.String(), `"authority_reauth":"2m0s"`); {
+		if time.Now().After(deadline) {
+			t.Fatalf("start-up log lacks authority_reauth 2m0s:\n%s", logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	tok := approverNewToken(t, env, "bob")
 	c := caClient(t, a["data"])
 	base := "https://" + a["admin"]

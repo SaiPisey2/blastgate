@@ -74,8 +74,18 @@ func TestV030DatabaseMigratesAndKeepsItsRows(t *testing.T) {
 	}
 	defer s.Close()
 	var v int
-	if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 5 {
-		t.Fatalf("schema version = %d, %v; want 5", v, err)
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil || v != 6 {
+		t.Fatalf("schema version = %d, %v; want 6", v, err)
+	}
+	// Migration 6: the stats and queue indexes, on the columns named.
+	for name, want := range map[string]string{
+		"approvals_created": "CREATE INDEX approvals_created ON approvals(created_at, rule, status)",
+		"approvals_waiting": "CREATE INDEX approvals_waiting ON approvals(status, expires_at)",
+	} {
+		var sqlText string
+		if err := s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&sqlText); err != nil || sqlText != want {
+			t.Errorf("index %s = %q, %v; want %q", name, sqlText, err, want)
+		}
 	}
 	a, err := s.ApprovalByID(ctx, "a1")
 	if err != nil {

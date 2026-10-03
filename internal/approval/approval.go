@@ -167,6 +167,16 @@ func (s *Service) Token(a store.Approval, nonce string, expires time.Time) strin
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// ReauthWindow is the reauth window Approve applies: Reauth, or the
+// default when it is unset. serve logs it, so an operator can see the
+// window in force rather than the one they meant to set.
+func (s *Service) ReauthWindow() time.Duration {
+	if s.Reauth == 0 {
+		return defaultReauth
+	}
+	return s.Reauth
+}
+
 // Approve applies the approval rules and, when they are met, mints a
 // single-use token. Nobody approves a request made on their own behalf.
 // An access grant (NeedsTwo) needs two different approver accounts, both
@@ -195,10 +205,7 @@ func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Ap
 		if by.Channel != "ui" {
 			return store.Approval{}, ErrChannelNotAllowed
 		}
-		reauth := s.Reauth
-		if reauth == 0 {
-			reauth = defaultReauth
-		}
+		reauth := s.ReauthWindow()
 		// A sign-in time in the future is a clock or data fault, not a
 		// fresh sign-in; it must not open the window indefinitely.
 		if by.SignedIn.After(now) || now.Sub(by.SignedIn) > reauth {

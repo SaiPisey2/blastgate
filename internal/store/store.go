@@ -140,6 +140,12 @@ var migrations = []string{
 	ALTER TABLE approvals ADD COLUMN first_approver_id   TEXT NOT NULL DEFAULT '';
 	ALTER TABLE approvals ADD COLUMN first_approver_name TEXT NOT NULL DEFAULT '';
 	ALTER TABLE approvals ADD COLUMN first_approved_at   INTEGER;`,
+	// v0.4.0: policy stats range over created_at and group by rule and
+	// status; the queue and its count filter on status and expires_at.
+	// Both read the whole table without these, on every stats request
+	// and every stream poll.
+	`CREATE INDEX approvals_created ON approvals(created_at, rule, status);
+	CREATE INDEX approvals_waiting ON approvals(status, expires_at);`,
 }
 
 func Open(path string) (*Store, error) {

@@ -18,14 +18,21 @@ type RuleStats struct {
 // most-held first and then by name so the order is stable. It reads the
 // approvals table, not the audit trail: an approval row is the one record
 // of how a hold ended.
-func (s *Store) PolicyStats(ctx context.Context, since time.Time) ([]RuleStats, error) {
+//
+// A pending or partially approved row past its expiry at now counts as
+// expired: nothing moves it to "expired" unless the agent retries, and it
+// usually never does, so the status column alone under-counts the holds
+// nobody answered. now is passed in, not read here, so the caller's clock
+// (and a test's) decides what has lapsed.
+func (s *Store) PolicyStats(ctx context.Context, since, now time.Time) ([]RuleStats, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT rule,
 		COUNT(*) AS held,
 		SUM(CASE WHEN status IN ('approved', 'consumed', 'superseded') THEN 1 ELSE 0 END),
 		SUM(CASE WHEN status = 'denied' THEN 1 ELSE 0 END),
-		SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END)
+		SUM(CASE WHEN status = 'expired'
+			OR (status IN ('pending', 'partially_approved') AND expires_at < ?) THEN 1 ELSE 0 END)
 		FROM approvals WHERE created_at >= ?
-		GROUP BY rule ORDER BY held DESC, rule ASC`, ms(since))
+		GROUP BY rule ORDER BY held DESC, rule ASC`, ms(now), ms(since))
 	if err != nil {
 		return nil, err
 	}
