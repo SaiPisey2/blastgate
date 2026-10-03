@@ -3,7 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -165,5 +168,81 @@ func TestCountIgnoresExpired(t *testing.T) {
 	}
 	if n, err := s.CountPendingApprovals(ctx, now); err != nil || n != 3 {
 		t.Errorf("count = %d, %v; want 3 (live, edge, live-half)", n, err)
+	}
+}
+
+// A decided or finished hold must never be decided again: a second
+// DecideApproval on a consumed, superseded or expired row would mint a
+// fresh nonce and token for a request that already ran or was replaced.
+func TestDecideRefusesEveryFinishedStatus(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	for _, st := range []string{"approved", "denied", "consumed", "superseded", "expired"} {
+		t.Run(st, func(t *testing.T) {
+			a := appr("a-" + st)
+			a.RequestDigest, a.Status = st, st
+			a.Decided, a.DecidedBy, a.Nonce, a.Token = t0.Add(time.Minute), "bob", "n-"+st, "tok-"+st
+			if err := s.CreateApproval(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			before, err := s.ApprovalByID(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, to := range []string{"approved", "denied"} {
+				err := s.DecideApproval(ctx, a.ID, to, "mallory", "fresh", "fresh-tok", t0.Add(2*time.Minute), t0.Add(time.Hour))
+				if !errors.Is(err, ErrConflict) {
+					t.Errorf("%s -> %s: %v, want ErrConflict", st, to, err)
+				}
+			}
+			after, err := s.ApprovalByID(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("row changed:\nbefore %+v\nafter  %+v", before, after)
+			}
+		})
+	}
+}
+
+// Two people pressing approve at once on an access grant must not both
+// become the first approver: exactly one wins, and only one partial event
+// is written.
+func TestMarkPartiallyApprovedIsSingleUseUnderConcurrency(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if err := s.CreateApproval(ctx, appr("a1")); err != nil {
+		t.Fatal(err)
+	}
+	const n = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok, conflict := 0, 0
+	var other []error
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := s.MarkPartiallyApproved(ctx, "a1", fmt.Sprintf("ap%d", i), fmt.Sprintf("p%d", i), t0.Add(time.Minute))
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrConflict):
+				conflict++
+			default:
+				other = append(other, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if ok != 1 || conflict != n-1 || len(other) != 0 {
+		t.Errorf("ok=%d conflict=%d other=%v, want 1, %d, none", ok, conflict, n-1, other)
+	}
+	var events int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE kind = 'approval.partial'`).Scan(&events); err != nil || events != 1 {
+		t.Errorf("approval.partial events = %d, %v; want 1", events, err)
 	}
 }
