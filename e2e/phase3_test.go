@@ -17,6 +17,9 @@ type grantJSON struct {
 	DecidedBy      string `json:"decided_by"`
 	NeedsApprovers int    `json:"needs_approvers"`
 	FirstApprover  string `json:"first_approver"`
+	Name           string `json:"name"`
+	TargetName     string `json:"target_name"`
+	Grant          string `json:"grant"`
 }
 
 // letAliceGrantView lets alice create cluster role bindings to the view
@@ -74,6 +77,14 @@ func TestAccessGrantNeedsTwoApprovers(t *testing.T) {
 
 	bob := g.admin(t)
 	var ap grantJSON
+	// The approvers see the binding: its name (a create carries none in
+	// its path, so the console's typed target comes from target_name) and
+	// what it grants, read from the request kubectl sent.
+	if code := bob.do(t, http.MethodGet, "/api/approvals/"+id, nil, &ap); code != http.StatusOK || ap.Name != "" ||
+		ap.TargetName != grant || ap.Grant != "binds ClusterRole/view to User coding-agent" || ap.NeedsApprovers != 2 || ap.Status != "pending" {
+		t.Fatalf("the held grant: %d %+v, want target_name %q and the binding shown", code, ap, grant)
+	}
+	ap = grantJSON{}
 	if code := bob.do(t, http.MethodPost, "/api/approvals/"+id+"/approve", nil, &ap); code != http.StatusOK ||
 		ap.Status != "partially_approved" || ap.FirstApprover != "bob" || ap.NeedsApprovers != 2 {
 		t.Fatalf("bob's approval: %d %+v, want 200 partially_approved, first approver bob, needs 2", code, ap)
@@ -108,6 +119,67 @@ func TestAccessGrantNeedsTwoApprovers(t *testing.T) {
 		t.Fatalf("carol's approval: %d %+v, want 200 approved, decided by carol, first approver bob", code, ap)
 	}
 
+	must(t)(kubectl(t, kc, nil, "", create...))
+	must(t)(kubectl(t, adminKC, nil, "", "get", "clusterrolebinding", grant))
+}
+
+// approverID reads an approver's id from `blastgate approver list`.
+func approverID(t *testing.T, g *gate, name string) string {
+	t.Helper()
+	out, err := g.run(t, "approver", "list")
+	if err != nil {
+		t.Fatalf("approver list: %v", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[1] == name && f[len(f)-1] == "active" {
+			return f[0]
+		}
+	}
+	t.Fatalf("no active approver %q in:\n%s", name, out)
+	return ""
+}
+
+// A first approval counts only while its approver is live (ruling
+// E-R15a): once erin is revoked, frank's approval takes her place as the
+// first and releases nothing; grace, a third live approver, releases it.
+func TestRevokedFirstApproverIsReplaced(t *testing.T) {
+	letAliceGrantView(t)
+	g := start(t)
+	kc := g.session(t, "alice")
+	const grant = "e2e-revoked-first"
+	t.Cleanup(func() {
+		kubectl(t, adminKC, nil, "", "delete", "clusterrolebinding", grant, "--ignore-not-found")
+	})
+	create := []string{"create", "clusterrolebinding", grant, "--clusterrole=view", "--user=coding-agent"}
+	out, err := kubectl(t, kc, nil, "", create...)
+	m := ticket.FindStringSubmatch(out)
+	if err == nil || m == nil {
+		t.Fatalf("the cluster role binding was not held:\n%s", out)
+	}
+	id := m[1]
+	path := "/api/approvals/" + id + "/approve"
+
+	erin, frank, grace := g.approver(t, "erin"), g.approver(t, "frank"), g.approver(t, "grace")
+	var ap grantJSON
+	if code := erin.do(t, http.MethodPost, path, nil, &ap); code != http.StatusOK || ap.Status != "partially_approved" || ap.FirstApprover != "erin" {
+		t.Fatalf("erin's approval: %d %+v", code, ap)
+	}
+	if _, err := g.run(t, "approver", "revoke", approverID(t, g, "erin")); err != nil {
+		t.Fatalf("approver revoke: %v", err)
+	}
+	ap = grantJSON{}
+	if code := frank.do(t, http.MethodPost, path, nil, &ap); code != http.StatusOK || ap.Status != "partially_approved" || ap.FirstApprover != "frank" {
+		t.Fatalf("frank after erin's revocation: %d %+v, want partially_approved with frank first", code, ap)
+	}
+	out, err = kubectl(t, kc, nil, "", create...)
+	if m := ticket.FindStringSubmatch(out); err == nil || m == nil || m[1] != id {
+		t.Fatalf("the retry after a revoked first approval and one live one was not held on %s:\n%s", id, out)
+	}
+	ap = grantJSON{}
+	if code := grace.do(t, http.MethodPost, path, nil, &ap); code != http.StatusOK || ap.Status != "approved" || ap.FirstApprover != "frank" || ap.DecidedBy != "grace" {
+		t.Fatalf("grace's approval: %d %+v, want approved by grace after frank", code, ap)
+	}
 	must(t)(kubectl(t, kc, nil, "", create...))
 	must(t)(kubectl(t, adminKC, nil, "", "get", "clusterrolebinding", grant))
 }

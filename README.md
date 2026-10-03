@@ -294,8 +294,10 @@ zeros mean nothing was measured, not that nothing happens.
 Nobody approves a request made on their own behalf. The server refuses it, with 403
 "you can't approve a request made on your behalf", when the approver's name is the
 request's human, or the request's human is one linked to the approver with `approver new
---human`. Both match exactly, case included. The console disables *Approve* for such a
-request and says why. *Deny* is never blocked. `blastgate approve --by` checks the name it
+--human`. Both match exactly, case included. When the approver's own name is the
+request's human, the console disables *Approve* and says why; for a linked human the
+console cannot tell beforehand (it does not know the links), so *Approve* stays on offer
+and the server's 403 is shown as the reason instead. *Deny* is never blocked. `blastgate approve --by` checks the name it
 is given; linked humans belong to console accounts.
 
 The decision is recorded under the name of the signed-in approver, never a name from
@@ -306,16 +308,32 @@ the request. The agent's held request is released (or refused) exactly as with
 
 ### Access grants need two people
 
-A request that changes who may act in the cluster (any RBAC write, a service-account
-token, a CSR approval; class `AUTHORITY`, tagged *Grants access*) needs two approvers,
-each signed in to the console with their own account:
+A request that changes who may act in the cluster (an RBAC create, update or patch, a
+service-account token, a CSR approval; class `AUTHORITY`, tagged *Grants access*) needs
+two approvers, each signed in to the console with their own account. Deleting an RBAC
+object is scored like any other delete and needs one approver. Other ways to gain power
+are not classed as access grants: creating a service-account token Secret, or a pod that
+runs as a powerful service account, is held or not by your policy like any other write.
+
+The panel says what is granted, read from the request itself: "Grants ClusterRole/view to
+User coding-agent" for a binding, "Allows get,list on pods" for a role. That text is part
+of the measured impact, so the approval covers exactly what was shown. The typed target is
+the binding's or role's name, even for a create whose path carries no name. A body
+blastgate cannot read (no name, `generateName`, neither JSON nor protobuf, or any patch) still needs two
+people, and reads *Impact unknown*.
 
 - The first approval records who gave it and releases nothing: the request's status is
   `partially_approved`, it stays in Waiting, the agent's retry is held on the same ticket, and the panel says
   "Approved by bob at 14:02 · needs one more approver".
-- The second must come from a different account, with a different name. The same account
-  approving twice gets 409 "you already approved this; it needs a second person", and
-  for that person the console disables *Approve* and says so.
+- Until then Waiting and the panel say "Needs two approvers".
+- The second must come from a different account, with a different name (compared without
+  case). The same account approving twice gets 409 "you already approved this; it needs a
+  second person", and for that person the console disables *Approve* and says so.
+- A first approval counts only while its approver's account is live. Revoke the account
+  (say its token was stolen) and the next approval takes its place as the first: it
+  releases nothing, and a third, live approver is needed. Whoever loses a race to give the
+  first approval is told someone else got there first; the request stays, and they can
+  give the second.
 - Each of the two must have signed in within `BLASTGATE_AUTHORITY_REAUTH` (15 minutes by
   default) of approving. Otherwise the server answers 403 "sign in again to approve
   access grants", and the console offers *Sign in again*, which signs out and comes back
@@ -329,7 +347,7 @@ each signed in to the console with their own account:
 The rule fails closed: a stored impact whose class blastgate does not know, or that no
 longer matches its digest, needs two people too.
 
-![A partially approved access grant, seen by a second approver: approved by bob, needs one more approver](assets/ui-two-person.png)
+![A partially approved access grant, seen by a second approver: the role binding demo/coding-agent-view, approved by bob, needs one more approver, grants ClusterRole/view to User coding-agent](assets/ui-two-person.png)
 
 ### Details
 
@@ -726,6 +744,16 @@ A session for anyone else is then refused by the API server itself.
   [Writes that go around blastgate](#writes-that-go-around-blastgate)).
 - **Self-approval matching is exact.** An approver named `Bob` is not the human `bob`,
   and a linked human must be spelled exactly as sessions record it.
+- **Two approvers means two accounts.** blastgate cannot tell two accounts held by one
+  person from two people, and anyone with access to the host (the data directory and the
+  signing key) can create accounts with `approver new`. Treat host access as the power to
+  approve anything.
+- **Run one blastgate version against a database at a time.** The upgrade to v0.4.0
+  migrates the database in place. A v0.3.0 binary started on a migrated database reads
+  `partially_approved` as a final state and would never let that request finish. An
+  access grant approved by one person before the upgrade still releases on its retry until
+  its token lapses (15 minutes by default); one still pending at the upgrade needs two
+  people.
 
 ## Verified
 
@@ -744,9 +772,12 @@ with `approver new`: approve and deny from the API release and refuse kubectl's 
 revoking a session from the API stops it, replay from the API reports the change, the
 stream delivers a held request over HTTP/1.1 and HTTP/2, a write with the admin kubeconfig
 is recorded as a bypass, and neither a write through blastgate nor a controller's writes
-are. The approval-rule scenarios: a cluster role binding is held as an access grant, bob's
+are. The approval-rule scenarios: a cluster role binding is held as an access grant, the
+approvers are shown its name and "binds ClusterRole/view to User coding-agent", bob's
 approval leaves kubectl's retry held on the same ticket, bob approving again gets 409, the
-CLI cannot approve it, and carol's approval releases the retry; an approver linked to alice
+CLI cannot approve it, and carol's approval releases the retry; a first approver revoked
+with `approver revoke` no longer counts, so the next approval only replaces them and a
+third approver releases the retry; an approver linked to alice
 with `--human alice` is refused 403 on alice's request and can still deny it; and `/api/me`
 and the login answer name the upstream kubeconfig's context, or `BLASTGATE_CLUSTER_NAME`
 when set. The suite deletes the claim and changes the demo workloads, so run
