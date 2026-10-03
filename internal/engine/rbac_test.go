@@ -1,10 +1,17 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
 	"testing"
+
+	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
 
 	"github.com/SaiPisey2/blastgate/internal/normalize"
 )
@@ -176,5 +183,66 @@ func TestAuthorityImpactDigestCoversTheGrant(t *testing.T) {
 	}
 	if one.Digest() == other.Digest() {
 		t.Error("a different subject digests the same: the token would not cover what was shown")
+	}
+}
+
+// protobufBody encodes obj as kubectl sends a built-in type: protobuf.
+func protobufBody(t *testing.T, obj runtime.Object) []byte {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := rbacv1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	enc := serializer.NewCodecFactory(s).EncoderForVersion(protobuf.NewSerializer(s, s), rbacv1.SchemeGroupVersion)
+	b, err := runtime.Encode(enc, obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(b, protobufMagic) {
+		t.Fatalf("not a protobuf body: %q", b[:8])
+	}
+	return b
+}
+
+// `kubectl create clusterrolebinding` sends protobuf, never JSON: found
+// by the live kind run, which a JSON-only decode left unmeasured. The
+// approver must see the same grant either way.
+func TestAuthorityImpactReadsProtobuf(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, "", "", 200, &seen)
+	crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "agent-view"},
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacGroup, Kind: "ClusterRole", Name: "view"},
+		Subjects: []rbacv1.Subject{{APIGroup: rbacGroup, Kind: "User", Name: "coding-agent"}, {Kind: "ServiceAccount", Name: "ci", Namespace: "demo"}}}
+	a := rbacAction("create", "clusterrolebindings", "", "")
+	i := e.assessMutation(context.Background(), a, protobufBody(t, crb))
+	if !i.Measured || len(i.Effects) != 1 || i.Effects[0].Object != "rbac.authorization.k8s.io/ClusterRoleBinding//agent-view" ||
+		i.Effects[0].Explanation != "binds ClusterRole/view to User coding-agent, ServiceAccount demo/ci" {
+		t.Fatalf("impact = %+v", i)
+	}
+	json := e.assessMutation(context.Background(), a, []byte(`{"metadata":{"name":"agent-view"},"roleRef":{"kind":"ClusterRole","name":"view"},"subjects":[{"kind":"User","name":"coding-agent"},{"kind":"ServiceAccount","name":"ci","namespace":"demo"}]}`))
+	if json.Digest() != i.Digest() {
+		t.Error("the same grant digests differently as JSON and as protobuf")
+	}
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: "reader"}, Rules: []rbacv1.PolicyRule{{Verbs: []string{"get"}, Resources: []string{"pods"}}}}
+	if i := e.assessMutation(context.Background(), rbacAction("create", "roles", "demo", ""), protobufBody(t, role)); !i.Measured || i.Effects[0].Explanation != "allows get on pods" {
+		t.Errorf("role = %+v", i)
+	}
+
+	for name, body := range map[string][]byte{
+		"a Role sent to clusterrolebindings": protobufBody(t, role),
+		"a RoleBinding sent to clusterrolebindings": protobufBody(t, &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "x"},
+			RoleRef: rbacv1.RoleRef{Kind: "ClusterRole", Name: "admin"}, Subjects: []rbacv1.Subject{{Kind: "User", Name: "u"}}}),
+		"generateName": protobufBody(t, &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{GenerateName: "x-"},
+			RoleRef: rbacv1.RoleRef{Kind: "ClusterRole", Name: "admin"}}),
+		"truncated":  protobufBody(t, crb)[:20],
+		"magic only": []byte("k8s\x00"),
+	} {
+		i := e.assessMutation(context.Background(), a, body)
+		if i.Class != ClassAuthority || i.Measured {
+			t.Errorf("%s: impact = %+v, want unmeasured AUTHORITY", name, i)
+		}
+	}
+	if len(seen) != 0 {
+		t.Error("an authority grant was sent to the API server during scoring")
 	}
 }

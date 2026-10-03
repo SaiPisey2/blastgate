@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"strings"
 	"unicode"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	k8sjson "sigs.k8s.io/json"
 
 	"github.com/SaiPisey2/blastgate/internal/normalize"
@@ -94,10 +98,19 @@ func authorityImpact(a normalize.Action, body []byte) Impact {
 		return unmeasured("an RBAC " + a.Verb + " is not decoded: what it grants is not shown")
 	}
 	var obj rbacObject
-	// Case-sensitive, as the API server decodes: encoding/json would
-	// also take "Subjects" for "subjects", so a body carrying both could
-	// show the approver one list while the server stores the other.
-	if err := k8sjson.UnmarshalCaseSensitivePreserveInts(body, &obj); err != nil {
+	if bytes.HasPrefix(body, protobufMagic) {
+		// kubectl sends built-in types as protobuf: `kubectl create
+		// clusterrolebinding` never sends JSON at all.
+		o, ok := decodeRBACProtobuf(body, rk.kind)
+		if !ok {
+			return unmeasured("the RBAC object could not be read")
+		}
+		obj = o
+	} else if err := k8sjson.UnmarshalCaseSensitivePreserveInts(body, &obj); err != nil {
+		// Case-sensitive, as the API server decodes: encoding/json would
+		// also take "Subjects" for "subjects", so a body carrying both
+		// could show the approver one list while the server stores the
+		// other.
 		return unmeasured("the RBAC object could not be read as JSON")
 	}
 	name := cleanRBAC(obj.Metadata.Name)
@@ -224,4 +237,76 @@ func clip(s string, n int) string {
 		return string(r[:n])
 	}
 	return s
+}
+
+// protobufMagic starts every Kubernetes protobuf body.
+var protobufMagic = []byte("k8s\x00")
+
+// rbacDecoder decodes rbac.authorization.k8s.io/v1 objects and nothing
+// else: a protobuf body of any other type is not an RBAC object.
+var rbacDecoder = func() runtime.Decoder {
+	s := runtime.NewScheme()
+	if err := rbacv1.AddToScheme(s); err != nil {
+		panic(err)
+	}
+	return serializer.NewCodecFactory(s).UniversalDeserializer()
+}()
+
+// decodeRBACProtobuf reads a protobuf RBAC body into the fields an
+// approver is shown. The object must be the kind the path names: the
+// server refuses any other, and showing it would show the wrong thing.
+func decodeRBACProtobuf(body []byte, kind string) (rbacObject, bool) {
+	o, _, err := rbacDecoder.Decode(body, nil, nil)
+	if err != nil {
+		return rbacObject{}, false
+	}
+	var out rbacObject
+	set := func(name, generateName, namespace string) {
+		out.Metadata.Name, out.Metadata.GenerateName, out.Metadata.Namespace = name, generateName, namespace
+	}
+	binding := func(ref rbacv1.RoleRef, subjects []rbacv1.Subject) {
+		out.RoleRef = &struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		}{ref.Kind, ref.Name}
+		for _, sj := range subjects {
+			out.Subjects = append(out.Subjects, struct {
+				Kind      string `json:"kind"`
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			}{sj.Kind, sj.Name, sj.Namespace})
+		}
+	}
+	rules := func(rs []rbacv1.PolicyRule) {
+		for _, r := range rs {
+			out.Rules = append(out.Rules, struct {
+				Verbs           []string `json:"verbs"`
+				Resources       []string `json:"resources"`
+				NonResourceURLs []string `json:"nonResourceURLs"`
+			}{r.Verbs, r.Resources, r.NonResourceURLs})
+		}
+	}
+	got := ""
+	switch v := o.(type) {
+	case *rbacv1.ClusterRoleBinding:
+		got = "ClusterRoleBinding"
+		set(v.Name, v.GenerateName, v.Namespace)
+		binding(v.RoleRef, v.Subjects)
+	case *rbacv1.RoleBinding:
+		got = "RoleBinding"
+		set(v.Name, v.GenerateName, v.Namespace)
+		binding(v.RoleRef, v.Subjects)
+	case *rbacv1.ClusterRole:
+		got = "ClusterRole"
+		set(v.Name, v.GenerateName, v.Namespace)
+		rules(v.Rules)
+		if v.AggregationRule != nil {
+			out.AggregationRule = &struct{}{}
+		}
+	case *rbacv1.Role:
+		got = "Role"
+		set(v.Name, v.GenerateName, v.Namespace)
+		rules(v.Rules)
+	}
+	return out, got == kind
 }
