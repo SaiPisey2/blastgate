@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -29,6 +30,15 @@ func svc(t *testing.T, now *time.Time) (*Service, *store.Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	// Live approver accounts ap1..ap9, the ids the rules tests approve
+	// as: a first approval counts only while its approver is live
+	// (ruling E-R15a), and an id with no account is not.
+	for i := 1; i <= 9; i++ {
+		id := fmt.Sprintf("ap%d", i)
+		if err := st.CreateApprover(context.Background(), store.Approver{ID: id, Name: "acct-" + id, Created: *now}, []byte("hash-"+id)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return &Service{Store: st, Key: key, TokenTTL: 15 * time.Minute, PendingTTL: time.Hour, Now: func() time.Time { return *now }}, st, path
 }
 

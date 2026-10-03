@@ -241,22 +241,52 @@ func (s *Store) queryApprovals(ctx context.Context, q string, args ...any) ([]Ap
 	return out, rows.Err()
 }
 
-// DecideApproval moves a pending or partially approved approval to
-// approved or denied. The WHERE clause is the compare-and-swap: two
-// humans racing to decide the same approval must not both succeed, so
-// only the first UPDATE that still finds it undecided takes effect and
-// the second gets ErrConflict instead of silently overwriting the first
-// decision. Whether a partially approved row may be approved by this
-// person is the caller's rule; the store only guards the state.
+// DecideApproval moves an approval to approved or denied. The WHERE
+// clause is the compare-and-swap: two humans racing to decide the same
+// approval must not both succeed, so only the first UPDATE that still
+// finds it in the expected state takes effect and the second gets
+// ErrConflict instead of silently overwriting the first decision.
+//
+// The expected state is pinned to what the caller checked. A deny stands
+// in pending or partially_approved. An approval here is the single
+// approver's and needs pending: a row that became partially approved
+// between the caller's read and this write is an access grant, and a lone
+// approval must not release it. The second of two approvals goes through
+// ApproveSecond, which pins the first approver as well.
 func (s *Store) DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error {
+	where := `status IN ('pending', 'partially_approved')`
+	if status != "denied" {
+		where = `status = 'pending'`
+	}
+	return s.decide(ctx, id, status, by, nonce, token, decided, expires, where)
+}
+
+// liveFirstApprover is true when the row's first approver is a live
+// approver account. A first approval counts only while its approver is
+// live (ruling E-R15a): revoking a stolen account must withdraw what it
+// already approved.
+const liveFirstApprover = `EXISTS (SELECT 1 FROM approvers WHERE approvers.id = approvals.first_approver_id AND approvers.revoked_at IS NULL)`
+
+// ApproveSecond is the second approval of an access grant: it releases
+// only if the row is still partially approved by firstApproverID -- the
+// first approver the caller compared against -- and that approver is
+// still live, all inside the same UPDATE. Without the pin, a first
+// approver replaced or revoked between the caller's read and this write
+// would still be the "other person" the release rests on.
+func (s *Store) ApproveSecond(ctx context.Context, id, firstApproverID, by, nonce, token string, decided, expires time.Time) error {
+	return s.decide(ctx, id, "approved", by, nonce, token, decided, expires,
+		`status = 'partially_approved' AND first_approver_id = ? AND `+liveFirstApprover, firstApproverID)
+}
+
+func (s *Store) decide(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time, where string, args ...any) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, nonce = ?, token = ?, expires_at = ? WHERE id = ? AND status IN ('pending', 'partially_approved')`,
-		status, ms(decided), by, nonce, token, ms(expires), id)
+		`UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, nonce = ?, token = ?, expires_at = ? WHERE id = ? AND `+where,
+		append([]any{status, ms(decided), by, nonce, token, ms(expires), id}, args...)...)
 	if err != nil {
 		return err
 	}
@@ -268,6 +298,39 @@ func (s *Store) DecideApproval(ctx context.Context, id, status, by, nonce, token
 		return ErrConflict
 	}
 	if err := insertOutbox(ctx, tx, "approval.decided", id, status, decided); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReplaceFirstApprover makes approverID the first approver of an access
+// grant whose recorded first approver, revokedID, is no longer live
+// (ruling E-R15a). The row stays partially approved and nothing is
+// minted: the arriving approval becomes the first of two, never the
+// second, so a revoked account's approval can never be half of a release.
+// The UPDATE re-checks that the first approver is still revokedID and
+// still not live, so a live first approver is never overwritten.
+func (s *Store) ReplaceFirstApprover(ctx context.Context, id, revokedID, approverID, approverName string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET first_approver_id = ?, first_approver_name = ?, first_approved_at = ?
+		 WHERE id = ? AND status = 'partially_approved' AND first_approver_id = ? AND NOT `+liveFirstApprover,
+		approverID, approverName, ms(at), id, revokedID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrConflict
+	}
+	if err := insertOutboxEvent(ctx, tx, "approval.partial", outboxEvent{ApprovalID: id, Status: "partially_approved", FirstApproverName: approverName}, at); err != nil {
 		return err
 	}
 	return tx.Commit()

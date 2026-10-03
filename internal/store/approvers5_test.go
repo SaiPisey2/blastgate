@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -76,10 +77,26 @@ func TestSecondApprovalIsConditionalOnPartiallyApproved(t *testing.T) {
 	if got.Status != "partially_approved" || got.FirstApproverID != "ap1" || got.FirstApproverName != "bob" || !got.FirstApproved.Equal(at) {
 		t.Errorf("after first approval = %+v", got)
 	}
-	if err := s.DecideApproval(ctx, "a1", "approved", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); err != nil {
+	// A lone approval needs pending: a partially approved row is an
+	// access grant, and only ApproveSecond may release it.
+	if err := s.DecideApproval(ctx, "a1", "approved", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("lone approve of a partial: %v, want ErrConflict", err)
+	}
+	// ap1 has no approver account yet: not live, so it cannot be half of
+	// a release.
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second approval over a first approver with no account: %v, want ErrConflict", err)
+	}
+	if err := s.CreateApprover(ctx, Approver{ID: "ap1", Name: "bob", Created: t0}, []byte("h-ap1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap7", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second approval pinned to another first approver: %v, want ErrConflict", err)
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); err != nil {
 		t.Fatalf("decide from partial: %v", err)
 	}
-	if err := s.DecideApproval(ctx, "a1", "approved", "dave", "n2", "tok2", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); !errors.Is(err, ErrConflict) {
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "dave", "n2", "tok2", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Errorf("second decide: %v", err)
 	}
 	got, _ = s.ApprovalByID(ctx, "a1")
@@ -311,5 +328,86 @@ func TestPartialOutboxEventNamesTheFirstApprover(t *testing.T) {
 	}
 	if got, want := payloads["approval.pending"], `{"approval_id":"a1","status":"pending"}`; got != want {
 		t.Errorf("pending payload = %s, want %s", got, want)
+	}
+}
+
+// A revoked first approver no longer counts (ruling E-R15a): the second
+// approval's compare-and-swap refuses to release over them, and only a
+// non-live first approver can be replaced -- never a live one.
+func TestRevokedFirstApproverIsReplacedNeverReleased(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	if err := s.CreateApproval(ctx, appr("a1")); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ap1", "ap2", "ap3"} {
+		if err := s.CreateApprover(ctx, Approver{ID: id, Name: "n-" + id, Created: t0}, []byte("h-"+id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.MarkPartiallyApproved(ctx, "a1", "ap1", "bob", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := s.ApproverLive(ctx, "ap1"); err != nil || !live {
+		t.Fatalf("ApproverLive(ap1) = %v, %v", live, err)
+	}
+	// A live first approver is never replaced.
+	if err := s.ReplaceFirstApprover(ctx, "a1", "ap1", "ap2", "carol", t0.Add(2*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replacing a live first approver: %v, want ErrConflict", err)
+	}
+	if err := s.RevokeApprover(ctx, "ap1", t0.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ap1", "", "ghost"} {
+		if live, err := s.ApproverLive(ctx, id); err != nil || live {
+			t.Fatalf("ApproverLive(%q) = %v, %v, want false", id, live, err)
+		}
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second approval over a revoked first approver: %v, want ErrConflict", err)
+	}
+	// Pinned to the first approver checked: a stale id does not replace.
+	if err := s.ReplaceFirstApprover(ctx, "a1", "ap9", "ap2", "carol", t0.Add(3*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replace pinned to the wrong first approver: %v, want ErrConflict", err)
+	}
+	if err := s.ReplaceFirstApprover(ctx, "a1", "ap1", "ap2", "carol", t0.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.ApprovalByID(ctx, "a1")
+	if got.Status != "partially_approved" || got.FirstApproverID != "ap2" || got.FirstApproverName != "carol" ||
+		!got.FirstApproved.Equal(t0.Add(3*time.Minute)) || got.Token != "" || got.Nonce != "" {
+		t.Fatalf("after replacement = %+v", got)
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap2", "dave", "n1", "tok", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); err != nil {
+		t.Fatalf("second approval over the live replacement: %v", err)
+	}
+	// Deny still stands in both waiting states.
+	b := appr("b1")
+	b.RequestDigest = "b1"
+	if err := s.CreateApproval(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkPartiallyApproved(ctx, "b1", "ap3", "erin", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DecideApproval(ctx, "b1", "denied", "frank", "", "", t0.Add(2*time.Minute), t0.Add(time.Hour)); err != nil {
+		t.Fatalf("deny of a partial: %v", err)
+	}
+	var kinds []string
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, payload FROM outbox ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var p []byte
+		rows.Scan(&k, &p)
+		if strings.Contains(string(p), `"approval_id":"a1"`) {
+			kinds = append(kinds, k)
+		}
+	}
+	if want := []string{"approval.pending", "approval.partial", "approval.partial", "approval.decided"}; !slices.Equal(kinds, want) {
+		t.Errorf("outbox = %v, want %v", kinds, want)
 	}
 }

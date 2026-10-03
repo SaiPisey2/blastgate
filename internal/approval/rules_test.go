@@ -127,11 +127,15 @@ func TestTwoPeople(t *testing.T) {
 		// The second person must differ by id and by name: an empty id,
 		// the same id, or another account under the first approver's name
 		// are all the same person as far as the rule can tell.
-		if _, err := s.Approve(ctx, a.ID, browser("", "carol", now)); !errors.Is(err, ErrNeedsSecondApprover) {
-			t.Fatalf("an approver with no id: %v, want ErrNeedsSecondApprover", err)
+		if _, err := s.Approve(ctx, a.ID, browser("", "carol", now)); !errors.Is(err, ErrChannelNotAllowed) {
+			t.Fatalf("an approver with no id: %v, want ErrChannelNotAllowed", err)
 		}
 		if _, err := s.Approve(ctx, a.ID, browser("ap7", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
 			t.Fatalf("another account named bob: %v, want ErrNeedsSecondApprover", err)
+		}
+		// Names differing only in case are one person to this rule.
+		if _, err := s.Approve(ctx, a.ID, browser("ap8", "BoB", now)); !errors.Is(err, ErrNeedsSecondApprover) {
+			t.Fatalf("another account named BoB: %v, want ErrNeedsSecondApprover", err)
 		}
 		if _, err := s.Approve(ctx, a.ID, browser("ap1", "robert", now)); !errors.Is(err, ErrNeedsSecondApprover) {
 			t.Fatalf("bob's account under another name: %v, want ErrNeedsSecondApprover", err)
@@ -249,14 +253,24 @@ func TestTwoPeople(t *testing.T) {
 			}
 		}
 	})
-	t.Run("a partial approval survives the first approver's revocation", func(t *testing.T) {
+	t.Run("an approver with no id cannot be the first approver either", func(t *testing.T) {
 		now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 		s, st, _ := svc(t, &now)
-		for i, name := range []string{"bob", "carol"} {
-			if err := st.CreateApprover(ctx, store.Approver{ID: "ap" + string(rune('1'+i)), Name: name, Created: now}, []byte(name+"-token-hash")); err != nil {
-				t.Fatal(err)
-			}
+		a := held(t, st, now, authority)
+		if _, err := s.Approve(ctx, a.ID, browser("", "bob", now)); !errors.Is(err, ErrChannelNotAllowed) {
+			t.Fatalf("first approval with no id: %v, want ErrChannelNotAllowed", err)
 		}
+		if r := row(t, st, a.ID); r.Status != "pending" || r.FirstApproverName != "" {
+			t.Fatalf("an id-less first approval was recorded: %+v", r)
+		}
+	})
+	// Ruling E-R15a: a first approval counts only while its approver is
+	// live. Revoking a (perhaps stolen) account withdraws its approval:
+	// the next approval replaces it as the first and never releases, and
+	// a third, live person is needed to release.
+	t.Run("a revoked first approver's approval no longer counts", func(t *testing.T) {
+		now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+		s, st, _ := svc(t, &now)
 		a := held(t, st, now, authority)
 		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); err != nil {
 			t.Fatal(err)
@@ -264,29 +278,26 @@ func TestTwoPeople(t *testing.T) {
 		if err := st.RevokeApprover(ctx, "ap1", now); err != nil {
 			t.Fatal(err)
 		}
-		r := row(t, st, a.ID)
-		if r.Status != "partially_approved" || r.FirstApproverID != "ap1" || r.FirstApproverName != "bob" {
-			t.Fatalf("revocation changed the partial approval: %+v", r)
+		r, err := s.Approve(ctx, a.ID, browser("ap2", "carol", now))
+		if err != nil {
+			t.Fatalf("carol after bob's revocation: %v", err)
 		}
-		// The revoked account still counts as the first person: signing in
-		// again under it cannot supply the second approval.
-		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
-			t.Fatalf("first approver again after revocation: %v, want ErrNeedsSecondApprover", err)
+		if r.Status != "partially_approved" || r.FirstApproverID != "ap2" || r.FirstApproverName != "carol" ||
+			!r.FirstApproved.Equal(now) || r.Token != "" || r.Nonce != "" {
+			t.Fatalf("carol did not replace bob as the first approver: %+v", r)
 		}
-		// Nor can bob re-created under a new id: names are unique only
-		// among live approvers, so revoke-and-recreate is a new account
-		// for the same person.
-		if err := st.CreateApprover(ctx, store.Approver{ID: "ap9", Name: "bob", Created: now}, []byte("bob-again-token-hash")); err != nil {
-			t.Fatal(err)
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Pending {
+			t.Fatalf("check after the replacement = %v, %v, want Pending", o, err)
 		}
-		if _, err := s.Approve(ctx, a.ID, browser("ap9", "bob", now)); !errors.Is(err, ErrNeedsSecondApprover) {
-			t.Fatalf("bob re-created with a new id: %v, want ErrNeedsSecondApprover", err)
+		if _, err := s.Approve(ctx, a.ID, browser("ap2", "carol", now)); !errors.Is(err, ErrNeedsSecondApprover) {
+			t.Fatalf("carol again: %v, want ErrNeedsSecondApprover", err)
 		}
-		if r, err := s.Approve(ctx, a.ID, browser("ap2", "carol", now)); err != nil || r.Status != "approved" || r.Token == "" {
-			t.Fatalf("second approver: %+v, %v", r, err)
+		r, err = s.Approve(ctx, a.ID, browser("ap3", "dave", now))
+		if err != nil || r.Status != "approved" || r.Token == "" || r.DecidedBy != "dave" || r.FirstApproverName != "carol" {
+			t.Fatalf("dave releasing after carol: %+v, %v", r, err)
 		}
-		if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); !errors.Is(err, ErrNotPending) {
-			t.Fatalf("first approver after release: %v, want ErrNotPending", err)
+		if o, _, err := s.Check(ctx, "s1", "alice", "coding-agent", "rd", a.ImpactDigest); err != nil || o != Release {
+			t.Fatalf("check after dave = %v, %v, want Release", o, err)
 		}
 	})
 	t.Run("concurrent second approvals mint one token", func(t *testing.T) {
@@ -458,6 +469,89 @@ func TestSingleApprover(t *testing.T) {
 		b := held(t, st, now, reversible)
 		if r, err := s.Approve(ctx, b.ID, browser("ap1", "bob", now.Add(-24*time.Hour))); err != nil || r.Status != "approved" {
 			t.Fatalf("browser approval of a reversible request with an old sign-in: %+v, %v", r, err)
+		}
+	})
+}
+
+// racingStore runs before once, just before the named store write, after
+// the service has read and checked the row: the window in which another
+// request can change what the service checked.
+type racingStore struct {
+	*store.Store
+	before func()
+}
+
+func (r *racingStore) fire() {
+	if r.before != nil {
+		f := r.before
+		r.before = nil
+		f()
+	}
+}
+
+func (r *racingStore) ApproveSecond(ctx context.Context, id, first, by, nonce, token string, decided, expires time.Time) error {
+	r.fire()
+	return r.Store.ApproveSecond(ctx, id, first, by, nonce, token, decided, expires)
+}
+
+func (r *racingStore) DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error {
+	r.fire()
+	return r.Store.DecideApproval(ctx, id, status, by, nonce, token, decided, expires)
+}
+
+// The store write pins what the service checked (I2): a row edited
+// between the service's read and the write does not release.
+func TestDecideWritesPinTheCheckedState(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		edit  func(t *testing.T, st *store.Store, path, id string)
+		check string
+	}{
+		{"first approver changed", func(t *testing.T, st *store.Store, path, id string) {
+			if err := tamper(path, id, "first_approver_id", "ap5"); err != nil {
+				t.Fatal(err)
+			}
+		}, "partially_approved"},
+		{"first approver revoked", func(t *testing.T, st *store.Store, path, id string) {
+			if err := st.RevokeApprover(ctx, "ap1", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}, "partially_approved"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+			s, st, path := svc(t, &now)
+			a := held(t, st, now, authority)
+			if _, err := s.Approve(ctx, a.ID, browser("ap1", "bob", now)); err != nil {
+				t.Fatal(err)
+			}
+			rs := &racingStore{Store: st, before: func() { c.edit(t, st, path, a.ID) }}
+			s.Store = rs
+			if _, err := s.Approve(ctx, a.ID, browser("ap2", "carol", now)); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("second approval after the row changed under it: %v, want ErrConflict", err)
+			}
+			if r := row(t, st, a.ID); r.Status != c.check || r.Token != "" || r.Nonce != "" {
+				t.Fatalf("the row released: %+v", r)
+			}
+		})
+	}
+	t.Run("a lone approval needs the row still pending", func(t *testing.T) {
+		now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+		s, st, path := svc(t, &now)
+		a := held(t, st, now, reversible)
+		// Between the read (pending, one approver) and the write, the row
+		// becomes a partially approved access grant.
+		s.Store = &racingStore{Store: st, before: func() {
+			if err := tamper(path, a.ID, "status", "partially_approved"); err != nil {
+				t.Fatal(err)
+			}
+		}}
+		if _, err := s.Approve(ctx, a.ID, cli("bob")); !errors.Is(err, store.ErrConflict) {
+			t.Fatalf("lone approval of a row that turned partial: %v, want ErrConflict", err)
+		}
+		if r := row(t, st, a.ID); r.Status != "partially_approved" || r.Token != "" {
+			t.Fatalf("the row released: %+v", r)
 		}
 	})
 }

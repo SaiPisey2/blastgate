@@ -29,7 +29,10 @@ type Store interface {
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	LatestApproval(ctx context.Context, session, requestDigest string) (store.Approval, error)
 	DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error
+	ApproveSecond(ctx context.Context, id, firstApproverID, by, nonce, token string, decided, expires time.Time) error
 	MarkPartiallyApproved(ctx context.Context, id, approverID, approverName string, at time.Time) error
+	ReplaceFirstApprover(ctx context.Context, id, revokedID, approverID, approverName string, at time.Time) error
+	ApproverLive(ctx context.Context, id string) (bool, error)
 	ConsumeApproval(ctx context.Context, id, nonce string, at time.Time) error
 	SetApprovalStatus(ctx context.Context, id, from, to string) error
 }
@@ -182,9 +185,13 @@ func (s *Service) ReauthWindow() time.Duration {
 // An access grant (NeedsTwo) needs two different approver accounts, both
 // in the browser and both recently signed in: the first approval only
 // records who it was (partially_approved, no token), and only the second
-// mints. The store's compare-and-swaps are what stop two approvers (or
-// an approve racing a deny) from both succeeding; the checks here decide
-// who may try.
+// mints. A first approval counts only while its approver is live: when
+// the first approver has been revoked, the arriving approval replaces it
+// as the first and releases nothing (ruling E-R15a). The store's
+// compare-and-swaps pin the state checked here -- pending for a lone
+// approval, the same live first approver for a second -- so two
+// approvers, an approve racing a deny, or a revocation landing between
+// the read and the write cannot turn into a release the rules refused.
 func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Approval, error) {
 	if len(s.Key) == 0 {
 		return store.Approval{}, errNoKey
@@ -201,8 +208,10 @@ func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Ap
 	now := s.Now()
 	if NeedsTwo(a) {
 		// The CLI has no accounts: its --by is a claim, so it could
-		// supply both "people" by typing two names.
-		if by.Channel != "ui" {
+		// supply both "people" by typing two names. An approver with no
+		// account id is no better: it cannot be told apart from anyone,
+		// so it is neither the first person nor the second.
+		if by.Channel != "ui" || by.ID == "" {
 			return store.Approval{}, ErrChannelNotAllowed
 		}
 		reauth := s.ReauthWindow()
@@ -217,14 +226,34 @@ func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Ap
 			}
 			return s.Store.ApprovalByID(ctx, id)
 		}
-		// An empty id cannot be told apart from anyone, so it is never
-		// the second person. The name is compared as well as the id:
-		// revoking an approver and creating it again under the same name
-		// gives the same person a new id, and the id alone would let them
-		// approve twice.
-		if by.ID == "" || by.ID == a.FirstApproverID || by.Name == a.FirstApproverName {
+		live, err := s.Store.ApproverLive(ctx, a.FirstApproverID)
+		if err != nil {
+			return store.Approval{}, err
+		}
+		if !live {
+			// The first approver was revoked (perhaps a stolen account):
+			// their approval no longer counts, and this one becomes the
+			// first of two instead of completing a pair with it.
+			if err := s.Store.ReplaceFirstApprover(ctx, id, a.FirstApproverID, by.ID, by.Name, now); err != nil {
+				return store.Approval{}, err
+			}
+			return s.Store.ApprovalByID(ctx, id)
+		}
+		// The name is compared as well as the id: revoking an approver
+		// and creating it again under the same name gives the same person
+		// a new id, and the id alone would let them approve twice. Names
+		// are compared without case, so Bob and bob are one person here
+		// (self-approval stays exact, as names are recorded).
+		if by.ID == a.FirstApproverID || strings.EqualFold(by.Name, a.FirstApproverName) {
 			return store.Approval{}, ErrNeedsSecondApprover
 		}
+		nonce := NewID()
+		expires := now.Add(s.TokenTTL)
+		token := s.Token(a, nonce, expires)
+		if err := s.Store.ApproveSecond(ctx, id, a.FirstApproverID, by.Name, nonce, token, now, expires); err != nil {
+			return store.Approval{}, err
+		}
+		return s.Store.ApprovalByID(ctx, id)
 	}
 	nonce := NewID()
 	expires := now.Add(s.TokenTTL)

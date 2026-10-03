@@ -59,6 +59,17 @@ func (s *Store) ApproverByTokenHash(ctx context.Context, h []byte) (Approver, er
 	return a, err
 }
 
+// ApproverLive reports whether id is an approver account that exists and
+// is not revoked. An empty or unknown id is not live.
+func (s *Store) ApproverLive(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM approvers WHERE id = ? AND revoked_at IS NULL`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // ListApprovers returns every approver, newest first, live and revoked
 // alike: an operator revoking access needs to see who is still live, and
 // an audit of who ever held it needs the revoked ones too.
