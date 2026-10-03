@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/SaiPisey2/blastgate/internal/admin"
 	"github.com/SaiPisey2/blastgate/internal/config"
@@ -86,13 +88,16 @@ func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Wr
 			if !a.Revoked.IsZero() {
 				state = "revoked"
 			}
-			label := a.Name
+			label := printable(a.Name)
 			hs, err := st.ApproverHumans(ctx, a.ID)
 			if err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
 			if len(hs) > 0 {
+				for i := range hs {
+					hs[i] = printable(hs[i])
+				}
 				label += " (" + strings.Join(hs, ", ") + ")"
 			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.ID, label, a.Created.Format(time.RFC3339), state)
@@ -174,3 +179,15 @@ type stringList []string
 
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
+// printable quotes a value that holds a non-printable rune. Names reach
+// the store from other code paths than this CLI's validator; one holding
+// an escape sequence would otherwise repaint the operator's terminal.
+func printable(v string) string {
+	for _, r := range v {
+		if !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) {
+			return strconv.Quote(v)
+		}
+	}
+	return v
+}

@@ -28,7 +28,7 @@ func TestClusterNameFromEnv(t *testing.T) {
 }
 
 func TestEnvClusterNameOver63OrWithControlCharsIsAConfigError(t *testing.T) {
-	for _, v := range []string{strings.Repeat("a", 64), "x\x1b[31m", "a‮b", "a\nb"} {
+	for _, v := range []string{strings.Repeat("a", 64), "x\x1b[31m", "a‮b", "a\nb", "   ", "\t", "a\u2028b"} {
 		m := base()
 		m["BLASTGATE_CLUSTER_NAME"] = v
 		if _, err := Load(env(m)); err == nil {
@@ -43,9 +43,9 @@ func TestEnvClusterNameOver63OrWithControlCharsIsAConfigError(t *testing.T) {
 }
 
 func TestClusterNameFromKubeconfigIsCleaned(t *testing.T) {
-	long := "\\u001b[31m\\u202e" + strings.Repeat("k", 80)
+	long := "\\u001b[31m\\u202e\\u2028\\u00a0\\ue000" + strings.Repeat("k", 80)
 	got := ResolveClusterName("", writeKubeconfig(t, long), false)
-	if strings.ContainsRune(got, 0x1b) || strings.ContainsRune(got, 0x202e) {
+	if strings.ContainsRune(got, 0x1b) || strings.ContainsRune(got, 0x202e) || strings.ContainsAny(got, "\u2028\u00a0\ue000") {
 		t.Errorf("control or format rune survived: %q", got)
 	}
 	if n := utf8.RuneCountInString(got); n != 63 {

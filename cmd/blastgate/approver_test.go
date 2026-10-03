@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SaiPisey2/blastgate/internal/store"
 )
@@ -201,5 +203,60 @@ func TestApproverListShowsLinkedHumans(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "amy (") {
 		t.Errorf("empty parens for an approver with no links:\n%s", out.String())
+	}
+}
+
+// A failed link must not leave a live approver with no linked humans, who
+// could then approve for exactly the people they were meant to be barred from.
+func TestApproverNewRevokesWhenLinkingFails(t *testing.T) {
+	env, dir := approverEnv(t)
+	path := filepath.Join(dir, "blastgate.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE approver_humans`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"approver", "new", "--name", "bob", "--human", "bob@corp"}, env, &out, &errb); code != 1 || out.Len() != 0 {
+		t.Fatalf("exit %d, stdout %q; want 1 and no token", code, out.String())
+	}
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	l, err := st.ListApprovers(context.Background())
+	if err != nil || len(l) != 1 || l[0].Revoked.IsZero() {
+		t.Errorf("approver left live: %+v, %v", l, err)
+	}
+}
+
+func TestApproverListQuotesUnprintableNames(t *testing.T) {
+	env, dir := approverEnv(t)
+	st, err := store.Open(filepath.Join(dir, "blastgate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := store.Approver{ID: "aa", Name: "evil\x1b[2J", Created: time.Now().UTC()}
+	if err := st.CreateApprover(context.Background(), a, []byte("h")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddApproverHumans(context.Background(), "aa", []string{"h‮x", "plain"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	var out bytes.Buffer
+	run([]string{"approver", "list"}, env, &out, &bytes.Buffer{})
+	if strings.ContainsAny(out.String(), "\x1b‮") || !strings.Contains(out.String(), `"evil\x1b[2J"`) || !strings.Contains(out.String(), "plain") {
+		t.Errorf("unquoted or mangled:\n%q", out.String())
 	}
 }
