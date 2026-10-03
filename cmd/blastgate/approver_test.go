@@ -156,3 +156,50 @@ func TestApproverNewRevokesWhenTheTokenCannotBePrinted(t *testing.T) {
 		t.Errorf("approvers = %+v, %v; want bob, revoked", l, err)
 	}
 }
+
+func TestApproverNewStoresLinkedHumans(t *testing.T) {
+	env, dir := approverEnv(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"approver", "new", "--name", "bob", "--human", "bob@corp", "--human", "b@corp"}, env, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	st, err := store.Open(filepath.Join(dir, "blastgate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	l, _ := st.ListApprovers(context.Background())
+	hs, err := st.ApproverHumans(context.Background(), l[0].ID)
+	if err != nil || len(hs) != 2 || hs[0] != "b@corp" || hs[1] != "bob@corp" {
+		t.Errorf("humans %v, %v", hs, err)
+	}
+}
+
+func TestApproverNewRefusesAnInvalidHuman(t *testing.T) {
+	env, _ := approverEnv(t)
+	for _, h := range []string{"", "system:admin", "bob smith", "b\r\nX: 1", strings.Repeat("a", 254)} {
+		var out, errb bytes.Buffer
+		if code := run([]string{"approver", "new", "--name", "bob", "--human", "ok@corp", "--human", h}, env, &out, &errb); code != 2 || out.Len() != 0 {
+			t.Errorf("human %q: exit %d, stdout %q", h, code, out.String())
+		}
+	}
+	var out bytes.Buffer
+	run([]string{"approver", "list"}, env, &out, &bytes.Buffer{})
+	if strings.Count(out.String(), "\n") != 1 {
+		t.Errorf("a refused approver was stored:\n%s", out.String())
+	}
+}
+
+func TestApproverListShowsLinkedHumans(t *testing.T) {
+	env, _ := approverEnv(t)
+	run([]string{"approver", "new", "--name", "bob", "--human", "bob@corp", "--human", "b@corp"}, env, &bytes.Buffer{}, &bytes.Buffer{})
+	run([]string{"approver", "new", "--name", "amy"}, env, &bytes.Buffer{}, &bytes.Buffer{})
+	var out bytes.Buffer
+	run([]string{"approver", "list"}, env, &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "bob (b@corp, bob@corp)") {
+		t.Errorf("no linked humans in:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "amy (") {
+		t.Errorf("empty parens for an approver with no links:\n%s", out.String())
+	}
+}

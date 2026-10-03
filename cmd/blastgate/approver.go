@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // approverCmd manages who may sign in to the approver UI. There is no
 // default account: until `approver new` has run, nobody can log in.
 func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	const usage = "usage: blastgate approver new --name <name> | list | revoke <id>"
+	const usage = "usage: blastgate approver new --name <name> [--human <h>]... | list | revoke <id>"
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, usage)
 		return 2
@@ -43,6 +44,8 @@ func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Wr
 		fs := flag.NewFlagSet("approver new", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		name := fs.String("name", "", "the approver's name, recorded on every decision they make (required)")
+		var humans stringList
+		fs.Var(&humans, "human", "a human identity this approver must never approve for; repeatable")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
@@ -56,7 +59,15 @@ func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Wr
 			fmt.Fprintf(stderr, "approver name: %v\n", err)
 			return 2
 		}
-		return approverNew(ctx, st, *name, stdout, stderr)
+		// Linked humans are matched against an approval's human, so they
+		// pass the check those names passed when the session was made.
+		for _, h := range humans {
+			if err := session.ValidateHuman(h); err != nil {
+				fmt.Fprintf(stderr, "linked human: %v\n", err)
+				return 2
+			}
+		}
+		return approverNew(ctx, st, *name, humans, stdout, stderr)
 
 	case "list":
 		if len(args) != 1 {
@@ -75,7 +86,16 @@ func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Wr
 			if !a.Revoked.IsZero() {
 				state = "revoked"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.ID, a.Name, a.Created.Format(time.RFC3339), state)
+			label := a.Name
+			hs, err := st.ApproverHumans(ctx, a.ID)
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			if len(hs) > 0 {
+				label += " (" + strings.Join(hs, ", ") + ")"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.ID, label, a.Created.Format(time.RFC3339), state)
 		}
 		tw.Flush()
 		return 0
@@ -109,7 +129,7 @@ func approverCmd(args []string, getenv func(string) string, stdout, stderr io.Wr
 // token alone goes to stdout, so `blastgate approver new --name bob >
 // bob.token` keeps it out of scrollback and any log capturing stderr;
 // only its hash is stored, so this is the one time anyone sees it.
-func approverNew(ctx context.Context, st *store.Store, name string, stdout, stderr io.Writer) int {
+func approverNew(ctx context.Context, st *store.Store, name string, humans []string, stdout, stderr io.Writer) int {
 	id := make([]byte, 8)
 	rand.Read(id)
 	a := store.Approver{ID: hex.EncodeToString(id), Name: name, Created: time.Now().UTC()}
@@ -122,6 +142,17 @@ func approverNew(ctx context.Context, st *store.Store, name string, stdout, stde
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
+	}
+	if len(humans) > 0 {
+		if err := st.AddApproverHumans(ctx, a.ID, humans); err != nil {
+			// An approver without the links they were made with could
+			// approve for those humans; none is safer than a partial one.
+			fmt.Fprintln(stderr, err)
+			if rerr := st.RevokeApprover(ctx, a.ID, time.Now().UTC()); rerr != nil {
+				fmt.Fprintf(stderr, "approver %s could not be revoked: %v; revoke it with: blastgate approver revoke %[1]s\n", a.ID, rerr)
+			}
+			return 1
+		}
 	}
 	if _, err := fmt.Fprintln(stdout, tok); err != nil {
 		// The token was never delivered, or only part of it: nobody
@@ -137,3 +168,9 @@ func approverNew(ctx context.Context, st *store.Store, name string, stdout, stde
 	fmt.Fprintf(stderr, "approver %s: %s; the token above is shown once, sign in with it at the admin UI\n", a.ID, a.Name)
 	return 0
 }
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }

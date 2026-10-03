@@ -352,3 +352,24 @@ func TestBypassIncludeNoise(t *testing.T) {
 		}
 	}
 }
+
+func TestReauthDefaultAndBounds(t *testing.T) {
+	c, err := Load(env(base()))
+	if err != nil || c.AuthorityReauth != 15*time.Minute {
+		t.Fatalf("default: %v, %v", c.AuthorityReauth, err)
+	}
+	for _, ok := range []string{"1m", "12h"} {
+		m := base()
+		m["BLASTGATE_AUTHORITY_REAUTH"] = ok
+		if _, err := Load(env(m)); err != nil {
+			t.Errorf("%s refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"30s", "13h", "59s", "12h1s", "0", "-5m", "garbage"} {
+		m := base()
+		m["BLASTGATE_AUTHORITY_REAUTH"] = bad
+		if _, err := Load(env(m)); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}

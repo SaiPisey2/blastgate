@@ -44,6 +44,12 @@ type Config struct {
 	// BypassIncludeNoise makes the webhook record Lease and Event writes,
 	// which it skips by default (BLASTGATE_BYPASS_INCLUDE_NOISE=1).
 	BypassIncludeNoise bool
+
+	// AuthorityReauth is how recently an approver must have signed in to
+	// approve an access grant (BLASTGATE_AUTHORITY_REAUTH).
+	AuthorityReauth time.Duration
+	// ClusterName is what approvers see for the cluster a grant reaches.
+	ClusterName string
 }
 
 const (
@@ -62,6 +68,11 @@ const (
 	maxHoldPlusBudget = 55 * time.Second
 	maxBudget         = 30 * time.Second
 	maxApprovalTTL    = 24 * time.Hour
+
+	// A reauth window under a minute is shorter than a person can read the
+	// grant they are approving; over 12h it is no longer a re-check.
+	minAuthorityReauth = time.Minute
+	maxAuthorityReauth = 12 * time.Hour
 )
 
 // defaultBypassIgnore matches webhook.DefaultIgnore (a test in cmd/blastgate
@@ -101,6 +112,16 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("set BLASTGATE_UPSTREAM_KUBECONFIG to the service-account kubeconfig blastgate forwards with, or BLASTGATE_UPSTREAM_IN_CLUSTER=1 inside a pod; the default kubeconfig is never used")
 	}
 	c.UpstreamKubeconfig, c.UpstreamInCluster = path, inCluster
+	if c.AuthorityReauth, err = boundedDuration(getenv, "BLASTGATE_AUTHORITY_REAUTH", 15*time.Minute, minAuthorityReauth, maxAuthorityReauth); err != nil {
+		return Config{}, err
+	}
+	name := getenv("BLASTGATE_CLUSTER_NAME")
+	if name != "" {
+		if err := checkClusterName(name); err != nil {
+			return Config{}, err
+		}
+	}
+	c.ClusterName = ResolveClusterName(name, path, inCluster)
 	if err := loadListeners(&c, getenv); err != nil {
 		return Config{}, err
 	}
@@ -252,6 +273,22 @@ func duration(getenv func(string) string, name string, def, max time.Duration) (
 	}
 	if d <= 0 || d > max {
 		return 0, fmt.Errorf("%s %s must be more than 0 and at most %s", name, d, max)
+	}
+	return d, nil
+}
+
+// boundedDuration is duration with a floor as well as a ceiling.
+func boundedDuration(getenv func(string) string, name string, def, min, max time.Duration) (time.Duration, error) {
+	v := getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s %q is not a duration (for example %s)", name, v, def)
+	}
+	if d < min || d > max {
+		return 0, fmt.Errorf("%s %s must be at least %s and at most %s", name, d, min, max)
 	}
 	return d, nil
 }
