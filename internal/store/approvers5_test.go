@@ -237,6 +237,23 @@ func TestCountIgnoresExpired(t *testing.T) {
 	if n, err := s.CountPendingApprovals(ctx, now); err != nil || n != 3 {
 		t.Errorf("count = %d, %v; want 3 (live, edge, live-half)", n, err)
 	}
+	// PendingQueue gives the same rows and the true count past its cap.
+	if l, n, err := s.PendingQueue(ctx, now, 2); err != nil || n != 3 || len(l) != 2 {
+		t.Errorf("PendingQueue(cap 2) = %d rows, count %d, %v; want 2 rows, count 3", len(l), n, err)
+	}
+	want, _ := s.ListPendingApprovals(ctx, now, 10)
+	if l, n, err := s.PendingQueue(ctx, now, 10); err != nil || n != 3 || len(l) != len(want) {
+		t.Errorf("PendingQueue = %v, %d, %v", l, n, err)
+	} else {
+		for i := range l {
+			if l[i].ID != want[i].ID || l[i].Status != want[i].Status || l[i].FirstApproverName != want[i].FirstApproverName {
+				t.Errorf("PendingQueue[%d] = %+v, want %+v", i, l[i], want[i])
+			}
+		}
+	}
+	if l, n, err := s.PendingQueue(ctx, t0.Add(3*time.Hour), 10); err != nil || n != 0 || len(l) != 0 {
+		t.Errorf("PendingQueue(all lapsed) = %v, %d, %v", l, n, err)
+	}
 }
 
 // A decided or finished hold must never be decided again: a second

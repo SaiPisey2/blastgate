@@ -99,6 +99,7 @@ type apiStore interface {
 	ListApprovalsLimit(ctx context.Context, status string, limit int) ([]store.Approval, error)
 	ListPendingApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
 	CountPendingApprovals(ctx context.Context, now time.Time) (int, error)
+	PendingQueue(ctx context.Context, now time.Time, limit int) ([]store.Approval, int, error)
 	ListLivePartialApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error)
 	PolicyStats(ctx context.Context, since, now time.Time) ([]store.RuleStats, error)
 	ApproverHumans(ctx context.Context, approverID string) ([]string, error)

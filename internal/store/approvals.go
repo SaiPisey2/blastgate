@@ -202,6 +202,41 @@ func (s *Store) CountPendingApprovals(ctx context.Context, now time.Time) (int, 
 	return n, err
 }
 
+// PendingQueue is ListPendingApprovals and CountPendingApprovals read by
+// one statement, so both see the same rows: read apart, a hold landing
+// between them gave a count that disagreed with the ids beside it.
+func (s *Store) PendingQueue(ctx context.Context, now time.Time, limit int) ([]Approval, int, error) {
+	if limit < 1 {
+		n, err := s.CountPendingApprovals(ctx, now)
+		return nil, n, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+approvalCols+`, COUNT(*) OVER () FROM approvals
+		WHERE status IN ('pending', 'partially_approved') AND expires_at >= ?
+		ORDER BY created_at ASC, id ASC LIMIT ?`, ms(now), limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []Approval
+	n := 0
+	for rows.Next() {
+		a, err := scanApproval(countScanner{rows, &n})
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, a)
+	}
+	return out, n, rows.Err()
+}
+
+// countScanner scans an approval row that ends with one extra count column.
+type countScanner struct {
+	rows *sql.Rows
+	n    *int
+}
+
+func (c countScanner) Scan(dest ...any) error { return c.rows.Scan(append(dest, c.n)...) }
+
 func (s *Store) listApprovals(ctx context.Context, status string, limit int) ([]Approval, error) {
 	q := `SELECT ` + approvalCols + ` FROM approvals`
 	var args []any

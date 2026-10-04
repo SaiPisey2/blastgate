@@ -98,6 +98,11 @@ func (c *countingStore) CountPendingApprovals(ctx context.Context, now time.Time
 	c.n.Add(1)
 	return c.Store.CountPendingApprovals(ctx, now)
 }
+func (c *countingStore) PendingQueue(ctx context.Context, now time.Time, limit int) ([]store.Approval, int, error) {
+	c.n.Add(1)
+	c.lastLimit.Store(int64(limit))
+	return c.Store.PendingQueue(ctx, now, limit)
+}
 func (c *countingStore) ListLivePartialApprovals(ctx context.Context, now time.Time, limit int) ([]store.Approval, error) {
 	c.n.Add(1)
 	c.lastLimit.Store(int64(limit))

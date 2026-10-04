@@ -295,13 +295,10 @@ func (st *streamState) poll(ctx context.Context) bool {
 	// Read at each poll's own time, so an approval that lapses while the
 	// stream is open leaves the count without anything else changing.
 	now := h.auth.Now()
-	l, err := h.st.ListPendingApprovals(ctx, now, streamPendingLimit)
+	// One read for both, so the count never disagrees with the ids.
+	l, count, err := h.st.PendingQueue(ctx, now, streamPendingLimit)
 	if err != nil {
 		return st.failed(ctx, "stream pending approvals", err)
-	}
-	count, err := h.st.CountPendingApprovals(ctx, now)
-	if err != nil {
-		return st.failed(ctx, "stream pending count", err)
 	}
 	ids := make([]string, 0, len(l))
 	partial, names := map[string]string{}, map[string]string{}
