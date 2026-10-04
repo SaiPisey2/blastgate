@@ -251,6 +251,9 @@ func TestCountIgnoresExpired(t *testing.T) {
 			}
 		}
 	}
+	if l, n, err := s.PendingQueue(ctx, now, 0); err != nil || n != 3 || len(l) != 0 {
+		t.Errorf("PendingQueue(cap 0) = %d rows, count %d, %v; want 0 rows, count 3", len(l), n, err)
+	}
 	if l, n, err := s.PendingQueue(ctx, t0.Add(3*time.Hour), 10); err != nil || n != 0 || len(l) != 0 {
 		t.Errorf("PendingQueue(all lapsed) = %v, %d, %v", l, n, err)
 	}

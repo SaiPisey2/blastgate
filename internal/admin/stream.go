@@ -53,8 +53,8 @@ const (
 	maxStreamsPerSession = 4
 	maxStreams           = 32
 	// streamPendingLimit bounds the pending ids read each poll. The count
-	// is not bounded by it: it comes from its own COUNT query, so a badge
-	// over a long queue says how long, not "500".
+	// is not bounded by it: COUNT(*) OVER () in the same statement counts
+	// the whole queue, so a badge over a long queue says how long, not "500".
 	streamPendingLimit = 500
 
 	errStreams = "too many live streams"
