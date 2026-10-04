@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -125,47 +126,130 @@ func TestAuthorityImpactDecodesCaseSensitively(t *testing.T) {
 	}
 }
 
-// Every string from the body is cleaned and capped before it is shown.
-func TestAuthorityImpactSanitisesAndCaps(t *testing.T) {
+// crb is a cluster role binding body with the given role and subjects.
+func crb(role string, subjects ...string) string {
+	return `{"metadata":{"name":"x"},"roleRef":{"kind":"ClusterRole","name":"` + role + `"},"subjects":[` + strings.Join(subjects, ",") + `]}`
+}
+
+func user(name string) string { return `{"kind":"User","name":"` + name + `"}` }
+
+func group(name string) string { return `{"kind":"Group","name":"` + name + `"}` }
+
+// assertNotShown is the ruling E-R17 outcome: a grant that cannot be
+// shown whole and as sent is unmeasured AUTHORITY with only the generic
+// effect, so nothing partial reaches the approver and two people decide
+// on "Impact unknown".
+func assertNotShown(t *testing.T, what string, i Impact) {
+	t.Helper()
+	if i.Class != ClassAuthority || i.Measured || len(i.Effects) != 1 || i.Effects[0].Explanation != GrantUnknown {
+		t.Errorf("%s: impact = %+v, want unmeasured AUTHORITY with the generic effect", what, i)
+	}
+}
+
+// The re-review's probe: two long Group subjects push "User attacker"
+// past the explanation cap. A cut explanation would hide the attacker
+// while the impact still claimed to be measured.
+func TestAuthorityImpactNeverHidesASubjectPastTheCap(t *testing.T) {
 	var seen []*http.Request
 	e := apiServer(t, "", "", 200, &seen)
-	var subj []string
-	for i := 0; i < 20; i++ {
-		subj = append(subj, `{"kind":"User","name":"u`+itoa(i)+`"}`)
-	}
-	long := strings.Repeat("a", 2000)
-	body := "{\"metadata\":{\"name\":\"x\"},\"roleRef\":{\"kind\":\"ClusterRole\",\"name\":\"ad‮min\\u0007\"}," +
-		"\"subjects\":[{\"kind\":\"User\",\"name\":\"" + long + "\"}," + strings.Join(subj, ",") + "]}"
-	i := e.assessMutation(context.Background(), rbacAction("create", "clusterrolebindings", "", ""), []byte(body))
-	if len(i.Effects) != 1 || !i.Measured {
-		t.Fatalf("impact = %+v", i)
-	}
-	expl := i.Effects[0].Explanation
-	if !strings.HasPrefix(expl, "binds ClusterRole/admin to User aaa") {
-		t.Errorf("explanation not cleaned: %q", expl)
-	}
-	for _, r := range expl {
-		if unprintable(r) {
-			t.Fatalf("explanation keeps unprintable rune %U: %q", r, expl)
+	a := rbacAction("create", "clusterrolebindings", "", "")
+	body := crb("cluster-admin", group(strings.Repeat("g", 240)), group(strings.Repeat("h", 240)), user("attacker"))
+	i := e.assessMutation(context.Background(), a, []byte(body))
+	assertNotShown(t, "attacker probe", i)
+	for _, ef := range i.Effects {
+		if strings.Contains(ef.Explanation, "gggg") {
+			t.Errorf("a partial grant was shown: %q", ef.Explanation)
 		}
 	}
-	if n := len([]rune(expl)); n > maxRBACExplanation {
-		t.Errorf("explanation is %d runes, cap %d", n, maxRBACExplanation)
+	// Short enough to show whole: every subject is there, attacker included.
+	i = e.assessMutation(context.Background(), a, []byte(crb("cluster-admin", group("ops"), user("attacker"))))
+	if !i.Measured || i.Effects[0].Explanation != "binds ClusterRole/cluster-admin to Group ops, User attacker" {
+		t.Errorf("short binding: %+v", i)
 	}
-	// Eight subjects at the longest name each run past the cap.
-	var longSubj []string
-	for i := 0; i < maxRBACSubjects; i++ {
-		longSubj = append(longSubj, `{"kind":"User","name":"`+strings.Repeat(string(rune('a'+i)), maxRBACString)+`"}`)
+}
+
+// A list longer than its cap is not shown with "and N more": the hidden
+// entries are exactly the ones that matter (impersonate, secrets).
+func TestAuthorityImpactListOverflowIsUnmeasured(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, "", "", 200, &seen)
+	crbA := rbacAction("create", "clusterrolebindings", "", "")
+	crA := rbacAction("create", "clusterroles", "", "")
+	var eight, nine []string
+	for i := 0; i < 9; i++ {
+		u := user(fmt.Sprintf("u%d", i))
+		if i < 8 {
+			eight = append(eight, u)
+		}
+		nine = append(nine, u)
 	}
-	body = `{"metadata":{"name":"x"},"roleRef":{"kind":"ClusterRole","name":"view"},"subjects":[` + strings.Join(longSubj, ",") + `]}`
-	i = e.assessMutation(context.Background(), rbacAction("create", "clusterrolebindings", "", ""), []byte(body))
-	if n := len([]rune(i.Effects[0].Explanation)); n != maxRBACExplanation {
-		t.Errorf("explanation of eight long subjects is %d runes, want the cap %d", n, maxRBACExplanation)
+	if i := e.assessMutation(context.Background(), crbA, []byte(crb("view", eight...))); !i.Measured || !strings.HasSuffix(i.Effects[0].Explanation, "User u7") {
+		t.Errorf("eight subjects should show whole: %+v", i)
 	}
-	body = `{"metadata":{"name":"x"},"roleRef":{"kind":"ClusterRole","name":"view"},"subjects":[` + strings.Join(subj, ",") + `]}`
-	i = e.assessMutation(context.Background(), rbacAction("create", "clusterrolebindings", "", ""), []byte(body))
-	if expl := i.Effects[0].Explanation; !strings.HasSuffix(expl, "User u7, and 12 more") {
-		t.Errorf("subjects not capped: %q", expl)
+	assertNotShown(t, "nine subjects", e.assessMutation(context.Background(), crbA, []byte(crb("view", nine...))))
+
+	role := func(rules ...string) []byte {
+		return []byte(`{"metadata":{"name":"r"},"rules":[` + strings.Join(rules, ",") + `]}`)
+	}
+	rule := func(verbs, resources string) string {
+		return `{"verbs":[` + verbs + `],"resources":[` + resources + `]}`
+	}
+	six := `"a1","a2","a3","a4","a5","a6"`
+	if i := e.assessMutation(context.Background(), crA, role(rule(six, `"pods"`))); !i.Measured {
+		t.Errorf("six verbs should show whole: %+v", i)
+	}
+	// "impersonate" sorts after the padding and would fall past the cap.
+	assertNotShown(t, "seven verbs", e.assessMutation(context.Background(), crA, role(rule(six+`,"impersonate"`, `"users"`))))
+	assertNotShown(t, "seven resources", e.assessMutation(context.Background(), crA, role(rule(`"get"`, six+`,"secrets"`))))
+	var rules []string
+	for i := 0; i < 6; i++ {
+		rules = append(rules, rule(`"get"`, fmt.Sprintf(`"r%d"`, i)))
+	}
+	if i := e.assessMutation(context.Background(), crA, role(rules...)); !i.Measured {
+		t.Errorf("six rules should show whole: %+v", i)
+	}
+	assertNotShown(t, "seven rules", e.assessMutation(context.Background(), crA, role(append(rules, rule(`"*"`, `"secrets"`))...)))
+	// Rule entries may carry "/".
+	if i := e.assessMutation(context.Background(), crA, role(rule(`"create"`, `"pods/exec"`), `{"verbs":["get"],"nonResourceURLs":["/metrics"]}`)); !i.Measured ||
+		i.Effects[0].Explanation != "allows create on pods/exec; get on /metrics" {
+		t.Errorf("slashes in rule entries: %+v", i)
+	}
+}
+
+// A string that cleaning would change, or that holds the explanation's
+// own separators, is never shown altered: the approver would read a
+// different name than the one bound.
+func TestAuthorityImpactAlteredStringsAreUnmeasured(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, "", "", 200, &seen)
+	a := rbacAction("create", "clusterrolebindings", "", "")
+	for name, body := range map[string]string{
+		"zero-width space in a subject": crb("view", user("atta\u200bcker")),
+		"bidi override in a subject":    crb("view", user("ad\u202enimda")),
+		"control rune in a subject":     crb("view", user("a\u0007b")),
+		"subject over 253 runes":        crb("view", user(strings.Repeat("a", 254))),
+		"comma in a subject":            crb("view", user("x, User root")),
+		"space in a subject":            crb("view", user("x y")),
+		"slash in a subject":            crb("view", user("a/b")),
+		"slash in a namespace":          crb("view", `{"kind":"ServiceAccount","name":"ci","namespace":"a/b"}`),
+		"zero-width space in the role":  crb("vi\u200bew", user("u")),
+		"role over 253 runes":           crb(strings.Repeat("r", 254), user("u")),
+		"semicolon in the role":         crb("view;admin", user("u")),
+		"empty subject name":            crb("view", user("")),
+	} {
+		assertNotShown(t, name, e.assessMutation(context.Background(), a, []byte(body)))
+	}
+	crA := rbacAction("create", "clusterroles", "", "")
+	for name, body := range map[string]string{
+		"zero-width space in a verb": `{"metadata":{"name":"r"},"rules":[{"verbs":["g\u200bet"],"resources":["pods"]}]}`,
+		"comma in a resource":        `{"metadata":{"name":"r"},"rules":[{"verbs":["get"],"resources":["pods,secrets"]}]}`,
+		"resource over 253 runes":    `{"metadata":{"name":"r"},"rules":[{"verbs":["get"],"resources":["` + strings.Repeat("p", 254) + `"]}]}`,
+	} {
+		assertNotShown(t, name, e.assessMutation(context.Background(), crA, []byte(body)))
+	}
+	// A 253-rune subject is shown whole.
+	if i := e.assessMutation(context.Background(), a, []byte(crb("view", user(strings.Repeat("a", 253))))); !i.Measured {
+		t.Errorf("a 253-rune subject should show whole: %+v", i)
 	}
 }
 

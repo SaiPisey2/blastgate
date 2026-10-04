@@ -84,19 +84,36 @@ func TestSecondApprovalIsConditionalOnPartiallyApproved(t *testing.T) {
 	}
 	// ap1 has no approver account yet: not live, so it cannot be half of
 	// a release.
-	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap2", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second approval over a first approver with no account: %v, want ErrConflict", err)
 	}
 	if err := s.CreateApprover(ctx, Approver{ID: "ap1", Name: "bob", Created: t0}, []byte("h-ap1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ApproveSecond(ctx, "a1", "ap7", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+	// The second approver must be live too: no account, or a revoked
+	// one, cannot release.
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap2", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second approval by an approver with no account: %v, want ErrConflict", err)
+	}
+	if err := s.CreateApprover(ctx, Approver{ID: "ap5", Name: "erin", Created: t0}, []byte("h-ap5")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeApprover(ctx, "ap5", t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap5", "erin", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second approval by a revoked approver: %v, want ErrConflict", err)
+	}
+	if err := s.CreateApprover(ctx, Approver{ID: "ap2", Name: "carol", Created: t0}, []byte("h-ap2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveSecond(ctx, "a1", "ap7", "ap2", "carol", "n0", "tok0", t0.Add(2*time.Minute), t0.Add(17*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second approval pinned to another first approver: %v, want ErrConflict", err)
 	}
-	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); err != nil {
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap2", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); err != nil {
 		t.Fatalf("decide from partial: %v", err)
 	}
-	if err := s.ApproveSecond(ctx, "a1", "ap1", "dave", "n2", "tok2", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); !errors.Is(err, ErrConflict) {
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap3", "dave", "n2", "tok2", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Errorf("second decide: %v", err)
 	}
 	got, _ = s.ApprovalByID(ctx, "a1")
@@ -363,7 +380,7 @@ func TestRevokedFirstApproverIsReplacedNeverReleased(t *testing.T) {
 			t.Fatalf("ApproverLive(%q) = %v, %v, want false", id, live, err)
 		}
 	}
-	if err := s.ApproveSecond(ctx, "a1", "ap1", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); !errors.Is(err, ErrConflict) {
+	if err := s.ApproveSecond(ctx, "a1", "ap1", "ap2", "carol", "n1", "tok", t0.Add(3*time.Minute), t0.Add(18*time.Minute)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("second approval over a revoked first approver: %v, want ErrConflict", err)
 	}
 	// Pinned to the first approver checked: a stale id does not replace.
@@ -378,7 +395,7 @@ func TestRevokedFirstApproverIsReplacedNeverReleased(t *testing.T) {
 		!got.FirstApproved.Equal(t0.Add(3*time.Minute)) || got.Token != "" || got.Nonce != "" {
 		t.Fatalf("after replacement = %+v", got)
 	}
-	if err := s.ApproveSecond(ctx, "a1", "ap2", "dave", "n1", "tok", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); err != nil {
+	if err := s.ApproveSecond(ctx, "a1", "ap2", "ap3", "dave", "n1", "tok", t0.Add(4*time.Minute), t0.Add(19*time.Minute)); err != nil {
 		t.Fatalf("second approval over the live replacement: %v", err)
 	}
 	// Deny still stands in both waiting states.

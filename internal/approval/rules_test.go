@@ -489,9 +489,9 @@ func (r *racingStore) fire() {
 	}
 }
 
-func (r *racingStore) ApproveSecond(ctx context.Context, id, first, by, nonce, token string, decided, expires time.Time) error {
+func (r *racingStore) ApproveSecond(ctx context.Context, id, first, byID, by, nonce, token string, decided, expires time.Time) error {
 	r.fire()
-	return r.Store.ApproveSecond(ctx, id, first, by, nonce, token, decided, expires)
+	return r.Store.ApproveSecond(ctx, id, first, byID, by, nonce, token, decided, expires)
 }
 
 func (r *racingStore) DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error {
@@ -510,6 +510,11 @@ func TestDecideWritesPinTheCheckedState(t *testing.T) {
 	}{
 		{"first approver changed", func(t *testing.T, st *store.Store, path, id string) {
 			if err := tamper(path, id, "first_approver_id", "ap5"); err != nil {
+				t.Fatal(err)
+			}
+		}, "partially_approved"},
+		{"second approver revoked", func(t *testing.T, st *store.Store, path, id string) {
+			if err := st.RevokeApprover(ctx, "ap2", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}, "partially_approved"},

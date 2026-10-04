@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -131,77 +130,122 @@ func authorityImpact(a normalize.Action, body []byte) Impact {
 	if rk.namespaced {
 		ns = a.Namespace
 	}
+	// Every string the approver reads is shown whole and as sent, or not
+	// at all (ruling E-R17): a name cut at a cap, a list cut at "and N
+	// more", or a string changed by cleaning would let a subject such as
+	// "User attacker" sit past the end of what is shown while the impact
+	// still claimed to be measured. Any of those makes the grant unmeasured
+	// instead -- "Impact unknown", still two people.
 	var expl string
+	ok = true
 	if strings.HasSuffix(rk.kind, "Binding") {
-		if obj.RoleRef == nil || cleanRBAC(obj.RoleRef.Name) == "" || cleanRBAC(obj.RoleRef.Kind) == "" {
+		if obj.RoleRef == nil || obj.RoleRef.Name == "" || obj.RoleRef.Kind == "" {
 			return unmeasured("the binding names no role")
 		}
-		expl = "binds " + cleanRBAC(obj.RoleRef.Kind) + "/" + cleanRBAC(obj.RoleRef.Name) + " to " + subjectsText(obj)
+		if !showable(obj.RoleRef.Kind, false) || !showable(obj.RoleRef.Name, false) {
+			return unmeasured(cannotShow)
+		}
+		var subj string
+		subj, ok = subjectsText(obj)
+		expl = "binds " + obj.RoleRef.Kind + "/" + obj.RoleRef.Name + " to " + subj
 	} else {
-		expl = rulesText(obj)
+		expl, ok = rulesText(obj)
+	}
+	if !ok || len([]rune(expl)) > maxRBACExplanation {
+		return unmeasured(cannotShow)
 	}
 	return Impact{Class: ClassAuthority, Measured: true, Undo: "none", Effects: []Effect{{
 		Kind:        "grants",
 		Object:      rbacGroup + "/" + rk.kind + "/" + ns + "/" + name,
-		Explanation: clip(expl, maxRBACExplanation),
+		Explanation: expl,
 	}}}
 }
 
-func subjectsText(obj rbacObject) string {
-	if len(obj.Subjects) == 0 {
-		return "no subjects"
+// cannotShow is the reason for a grant decoded but too large, too long,
+// or too strange to show in full.
+const cannotShow = "the grant cannot be shown in full"
+
+// showable reports whether s can be shown exactly as sent: not empty,
+// unchanged by cleaning (no unprintable rune, within the length cap), and
+// free of the characters the explanation itself uses to separate things
+// (whitespace, ",", ";", and for names "/"), so a subject named
+// "x, User root" cannot read as two subjects. Rule entries may hold "/"
+// ("pods/exec", "/metrics").
+func showable(s string, slashOK bool) bool {
+	if s == "" || cleanRBAC(s) != s {
+		return false
 	}
-	var parts []string
-	for i, s := range obj.Subjects {
-		if i == maxRBACSubjects {
-			parts = append(parts, fmt.Sprintf("and %d more", len(obj.Subjects)-i))
-			break
+	for _, r := range s {
+		if unicode.IsSpace(r) || r == ',' || r == ';' || (!slashOK && r == '/') {
+			return false
 		}
-		who := cleanRBAC(s.Name)
-		if ns := cleanRBAC(s.Namespace); ns != "" {
-			who = ns + "/" + who
-		}
-		parts = append(parts, cleanRBAC(s.Kind)+" "+who)
 	}
-	return strings.Join(parts, ", ")
+	return true
 }
 
-func rulesText(obj rbacObject) string {
+func subjectsText(obj rbacObject) (string, bool) {
+	if len(obj.Subjects) == 0 {
+		return "no subjects", true
+	}
+	if len(obj.Subjects) > maxRBACSubjects {
+		return "", false
+	}
+	var parts []string
+	for _, s := range obj.Subjects {
+		if !showable(s.Kind, false) || !showable(s.Name, false) || (s.Namespace != "" && !showable(s.Namespace, false)) {
+			return "", false
+		}
+		who := s.Name
+		if s.Namespace != "" {
+			who = s.Namespace + "/" + who
+		}
+		parts = append(parts, s.Kind+" "+who)
+	}
+	return strings.Join(parts, ", "), true
+}
+
+func rulesText(obj rbacObject) (string, bool) {
 	if obj.AggregationRule != nil {
 		// The rules of an aggregated ClusterRole are filled in by the
 		// controller from other roles; the body's own rules are not them.
-		return "aggregates the rules of other ClusterRoles"
+		return "aggregates the rules of other ClusterRoles", true
 	}
 	if len(obj.Rules) == 0 {
-		return "allows nothing"
+		return "allows nothing", true
+	}
+	if len(obj.Rules) > maxRBACRules {
+		return "", false
 	}
 	var parts []string
-	for i, r := range obj.Rules {
-		if i == maxRBACRules {
-			parts = append(parts, fmt.Sprintf("and %d more rules", len(obj.Rules)-i))
-			break
+	for _, r := range obj.Rules {
+		verbs, ok1 := listText(r.Verbs)
+		on, ok2 := listText(append(append([]string(nil), r.Resources...), r.NonResourceURLs...))
+		if !ok1 || !ok2 {
+			return "", false
 		}
-		on := append(append([]string(nil), r.Resources...), r.NonResourceURLs...)
-		parts = append(parts, listText(r.Verbs)+" on "+listText(on))
+		parts = append(parts, verbs+" on "+on)
 	}
-	return "allows " + strings.Join(parts, "; ")
+	return "allows " + strings.Join(parts, "; "), true
 }
 
-// listText joins a capped, sorted, cleaned list: sorted so the same rule
-// written in another order digests the same and reads the same.
-func listText(l []string) string {
+// listText joins a sorted list, whole or not at all: sorted so the same
+// rule written in another order digests the same and reads the same.
+func listText(l []string) (string, bool) {
 	if len(l) == 0 {
-		return "nothing"
+		return "nothing", true
+	}
+	if len(l) > maxRBACList {
+		return "", false
 	}
 	c := make([]string, 0, len(l))
 	for _, s := range l {
-		c = append(c, cleanRBAC(s))
+		if !showable(s, true) {
+			return "", false
+		}
+		c = append(c, s)
 	}
 	sort.Strings(c)
-	if len(c) > maxRBACList {
-		c = append(c[:maxRBACList], fmt.Sprintf("and %d more", len(l)-maxRBACList))
-	}
-	return strings.Join(c, ",")
+	return strings.Join(c, ","), true
 }
 
 // unprintable is the rule blastgate applies to every name it did not
@@ -229,14 +273,6 @@ func cleanRBAC(s string) string {
 		n++
 	}
 	return b.String()
-}
-
-// clip caps s at n runes.
-func clip(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n])
-	}
-	return s
 }
 
 // protobufMagic starts every Kubernetes protobuf body.

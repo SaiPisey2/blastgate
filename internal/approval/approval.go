@@ -29,7 +29,7 @@ type Store interface {
 	ApprovalByID(ctx context.Context, id string) (store.Approval, error)
 	LatestApproval(ctx context.Context, session, requestDigest string) (store.Approval, error)
 	DecideApproval(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time) error
-	ApproveSecond(ctx context.Context, id, firstApproverID, by, nonce, token string, decided, expires time.Time) error
+	ApproveSecond(ctx context.Context, id, firstApproverID, byID, by, nonce, token string, decided, expires time.Time) error
 	MarkPartiallyApproved(ctx context.Context, id, approverID, approverName string, at time.Time) error
 	ReplaceFirstApprover(ctx context.Context, id, revokedID, approverID, approverName string, at time.Time) error
 	ApproverLive(ctx context.Context, id string) (bool, error)
@@ -250,7 +250,7 @@ func (s *Service) Approve(ctx context.Context, id string, by Approver) (store.Ap
 		nonce := NewID()
 		expires := now.Add(s.TokenTTL)
 		token := s.Token(a, nonce, expires)
-		if err := s.Store.ApproveSecond(ctx, id, a.FirstApproverID, by.Name, nonce, token, now, expires); err != nil {
+		if err := s.Store.ApproveSecond(ctx, id, a.FirstApproverID, by.ID, by.Name, nonce, token, now, expires); err != nil {
 			return store.Approval{}, err
 		}
 		return s.Store.ApprovalByID(ctx, id)

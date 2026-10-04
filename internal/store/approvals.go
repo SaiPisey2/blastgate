@@ -269,13 +269,16 @@ const liveFirstApprover = `EXISTS (SELECT 1 FROM approvers WHERE approvers.id = 
 
 // ApproveSecond is the second approval of an access grant: it releases
 // only if the row is still partially approved by firstApproverID -- the
-// first approver the caller compared against -- and that approver is
-// still live, all inside the same UPDATE. Without the pin, a first
-// approver replaced or revoked between the caller's read and this write
-// would still be the "other person" the release rests on.
-func (s *Store) ApproveSecond(ctx context.Context, id, firstApproverID, by, nonce, token string, decided, expires time.Time) error {
+// first approver the caller compared against -- and both that approver
+// and the one approving now (byID) are still live, all inside the same
+// UPDATE. Without the pin, a first approver replaced or revoked between
+// the caller's read and this write would still be the "other person" the
+// release rests on; and an account revoked between its sign-in check and
+// this write must not supply the second approval either.
+func (s *Store) ApproveSecond(ctx context.Context, id, firstApproverID, byID, by, nonce, token string, decided, expires time.Time) error {
 	return s.decide(ctx, id, "approved", by, nonce, token, decided, expires,
-		`status = 'partially_approved' AND first_approver_id = ? AND `+liveFirstApprover, firstApproverID)
+		`status = 'partially_approved' AND first_approver_id = ? AND `+liveFirstApprover+
+			` AND EXISTS (SELECT 1 FROM approvers WHERE approvers.id = ? AND approvers.revoked_at IS NULL)`, firstApproverID, byID)
 }
 
 func (s *Store) decide(ctx context.Context, id, status, by, nonce, token string, decided, expires time.Time, where string, args ...any) error {

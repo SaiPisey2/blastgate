@@ -317,10 +317,15 @@ runs as a powerful service account, is held or not by your policy like any other
 
 The panel says what is granted, read from the request itself: "Grants ClusterRole/view to
 User coding-agent" for a binding, "Allows get,list on pods" for a role. That text is part
-of the measured impact, so the approval covers exactly what was shown. The typed target is
-the binding's or role's name, even for a create whose path carries no name. A body
-blastgate cannot read (no name, `generateName`, neither JSON nor protobuf, or any patch) still needs two
-people, and reads *Impact unknown*.
+of the measured impact, so the approval covers exactly the request that was shown, as
+the agent sent it (a mutating admission webhook may still change it afterwards; see
+[Known limits](#known-limits)). The typed target is the binding's or role's
+name, even for a create whose path carries no name. A grant blastgate cannot show in full
+still needs two people and reads *Impact unknown*: a body it cannot read (no name,
+`generateName`, neither JSON nor protobuf, or any patch), more than 8 subjects, 6 rules or
+6 verbs or resources in a rule, a text longer than 512 characters, or any name it would
+have to cut or clean to show (an invisible or control character, more than 253
+characters, or a space, comma, semicolon or slash inside a name).
 
 - The first approval records who gave it and releases nothing: the request's status is
   `partially_approved`, it stays in Waiting, the agent's retry is held on the same ticket, and the panel says
@@ -750,10 +755,17 @@ A session for anyone else is then refused by the API server itself.
   approve anything.
 - **Run one blastgate version against a database at a time.** The upgrade to v0.4.0
   migrates the database in place. A v0.3.0 binary started on a migrated database reads
-  `partially_approved` as a final state and would never let that request finish. An
-  access grant approved by one person before the upgrade still releases on its retry until
-  its token lapses (15 minutes by default); one still pending at the upgrade needs two
-  people.
+  `partially_approved` as a final state and would never let that request finish. A retry
+  is measured again before its approval is checked, and v0.4.0 measures an RBAC write
+  differently (it names the binding), so an RBAC grant approved by one person before the
+  upgrade is superseded on its retry, and the new hold needs two people. A
+  service-account token or CSR approval approved before the upgrade is measured as
+  before and still releases on its retry until its token lapses (15 minutes by
+  default). A grant still pending at the upgrade needs two people.
+- **The grant shown is the request as sent.** blastgate reads the binding or role from the
+  request body; it never sends an access grant to the API server while scoring. A mutating
+  admission webhook that rewrites the subjects or rules after approval is not reflected in
+  what the approvers saw.
 
 ## Verified
 
