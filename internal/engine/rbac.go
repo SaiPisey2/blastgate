@@ -192,12 +192,19 @@ func subjectsText(obj rbacObject) (string, bool) {
 	}
 	var parts []string
 	for _, s := range obj.Subjects {
-		if !showable(s.Kind, false) || !showable(s.Name, false) || (s.Namespace != "" && !showable(s.Namespace, false)) {
+		// Only a ServiceAccount lives in a namespace. The API server keeps a
+		// namespace sent on a User or Group but ignores it, so showing it
+		// would name an identity that does not exist.
+		ns := s.Namespace
+		if s.Kind != "ServiceAccount" {
+			ns = ""
+		}
+		if !showable(s.Kind, false) || !showable(s.Name, false) || (ns != "" && !showable(ns, false)) {
 			return "", false
 		}
 		who := s.Name
-		if s.Namespace != "" {
-			who = s.Namespace + "/" + who
+		if ns != "" {
+			who = ns + "/" + who
 		}
 		parts = append(parts, s.Kind+" "+who)
 	}

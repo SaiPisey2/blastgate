@@ -253,6 +253,34 @@ func TestAuthorityImpactAlteredStringsAreUnmeasured(t *testing.T) {
 	}
 }
 
+// The API server keeps a namespace on a User or Group subject but ignores
+// it: the binding grants the cluster-wide identity. Showing
+// "User kube-system/attacker" would read as a namespaced identity that
+// does not exist, so only a ServiceAccount carries its namespace.
+func TestAuthorityImpactShowsNamespaceOnlyForServiceAccounts(t *testing.T) {
+	var seen []*http.Request
+	e := apiServer(t, "", "", 200, &seen)
+	a := rbacAction("create", "clusterrolebindings", "", "")
+	for body, want := range map[string]string{
+		crb("cluster-admin", `{"kind":"User","name":"attacker","namespace":"kube-system"}`):     "binds ClusterRole/cluster-admin to User attacker",
+		crb("cluster-admin", `{"kind":"Group","name":"ops","namespace":"kube-system"}`):         "binds ClusterRole/cluster-admin to Group ops",
+		crb("cluster-admin", `{"kind":"User","name":"attacker","namespace":"x, User root"}`):    "binds ClusterRole/cluster-admin to User attacker",
+		crb("cluster-admin", `{"kind":"ServiceAccount","name":"ci","namespace":"kube-system"}`): "binds ClusterRole/cluster-admin to ServiceAccount kube-system/ci",
+	} {
+		i := e.assessMutation(context.Background(), a, []byte(body))
+		if !i.Measured || len(i.Effects) != 1 || i.Effects[0].Explanation != want {
+			t.Errorf("%s: impact = %+v, want %q", body, i, want)
+		}
+	}
+	// The same grant with and without the ignored namespace reads and
+	// digests the same, as the server stores the same permission.
+	with := e.assessMutation(context.Background(), a, []byte(crb("view", `{"kind":"User","name":"u","namespace":"demo"}`)))
+	without := e.assessMutation(context.Background(), a, []byte(crb("view", user("u"))))
+	if with.Digest() != without.Digest() {
+		t.Error("an ignored namespace changed the digest")
+	}
+}
+
 // The binding shown is part of the impact digest: an identical retry
 // digests the same, a different subject does not.
 func TestAuthorityImpactDigestCoversTheGrant(t *testing.T) {
